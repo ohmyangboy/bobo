@@ -1,0 +1,1 @@
+{"name":"bobo","private":true,"type":"module","scripts":{"start":"node server.mjs","test":"node --test test.mjs ai.test.mjs reader.test.mjs streaming.test.mjs sources.test.mjs agents.test.mjs codex-agents.test.mjs opencode.test.mjs codex.test.mjs otty.test.mjs usage.test.mjs"},"engines":{"node":">=22"}}
