@@ -6,6 +6,14 @@ published: true
 
 本文件记录 bobo 面向用户的版本变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。发布在 [GitHub Releases](https://github.com/ohmyangboy/bobo/releases)。
 
+## [1.2.4] - 2026-09-20
+
+### 变更
+
+- 顶栏版本号改为服务端注入，首屏就是正确版本（1.2.2 里它写死成 `v1.2.0`，看起来像没更新）。
+- 自动检查频率从每 6 小时改为**每小时**一次（启动 15 秒后先查一次）。
+- 新版本下载完成时弹一次提示：「vX.Y.Z 已下载好，点右上角版本号重启安装」，不用进设置页找入口。
+
 ## [1.2.3] - 2026-09-20
 
 ### 变更
@@ -58,3 +66,4 @@ published: true
 [1.2.1]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.1
 [1.2.2]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.2
 [1.2.3]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.3
+[1.2.4]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.4

@@ -12,7 +12,7 @@ export const repo='ohmyangboy/bobo',bundleId='local.bobo.app';
 // 发布包的签名团队（Developer ID Application: Yonghao Yang）；应用内更新只接受这个团队的签名。
 export const teamId='LGKLTGNTY2';
 export const repoUrl='https://github.com/'+repo,releasesUrl=repoUrl+'/releases',releaseApi='https://api.github.com/repos/'+repo+'/releases/latest';
-const assetName='bobo.app.zip',minAssetSize=1024*1024,checkDelayMs=15000,checkIntervalMs=6*3600*1000,retryMs=600000;
+const assetName='bobo.app.zip',minAssetSize=1024*1024,checkDelayMs=15000,checkIntervalMs=3600*1000,retryMs=600000;
 const here=path.dirname(fileURLToPath(import.meta.url));
 // codesign 的诊断信息走 stderr，这里合并输出，调用方拿到的就是完整文本。
 const run=(file,args)=>new Promise((resolve,reject)=>{execFile(file,args,{maxBuffer:1024*1024},(error,stdout,stderr)=>error?reject(Object.assign(error,{stderr})):resolve(String(stdout||'')+String(stderr||'')));});
@@ -187,6 +187,7 @@ export function createUpdate({home,now=Date.now,fetchImpl=fetch,exec=run,spawnIm
 
  // 启动后的静默检查；已暂存好更新就不打扰（等用户重启安装）。
  // 只在从 .app 运行时启用：源码 / 测试环境不自动联网，手动「检查更新」也不受影响（它是独立接口）。
+ // 启动 15 秒后查一次，之后每小时一次（GitHub 无 token 的 60 次/小时限流足够）。
  function start(){
   if(timer||!canUpdate)return;
   timer=setTimeout(()=>{check().catch(()=>{});timer=setInterval(()=>{check({auto:true}).catch(()=>{});},checkIntervalMs);if(timer.unref)timer.unref();},checkDelayMs);

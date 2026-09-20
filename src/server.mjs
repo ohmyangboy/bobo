@@ -402,7 +402,9 @@ const server=http.createServer(async(req,res)=>{
   const asset=assets[url.pathname];if(!asset)fail('Not found',404);
   // 图片按二进制读取且不声明 charset；文本资源按 UTF-8 读取并声明 charset。
   const isText=/^(text\/|application\/(javascript|json))/.test(asset[1]);
-  let data=await fs.readFile(path.join(root,'public',asset[0]),isText?'utf8':undefined);if(url.pathname==='/'||url.pathname==='/panel.html')data=data.replace('__TOKEN__',token);
+  let data=await fs.readFile(path.join(root,'public',asset[0]),isText?'utf8':undefined);
+  // 页面里注入 token 与当前版本：版本号首屏就是对的，不用等 /api/app 回来。
+  if(url.pathname==='/'||url.pathname==='/panel.html')data=data.replace('__TOKEN__',token).replace('__VERSION__',update.snapshot().version);
   res.writeHead(200,{'Content-Type':asset[1]+(isText?'; charset=utf-8':''),'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"});res.end(data);
  }catch(e){json({error:e.code==='ENOENT'?'文件不存在':e.message},e.status||500);}
 });

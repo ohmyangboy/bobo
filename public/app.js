@@ -279,7 +279,7 @@ for(const b of document.querySelectorAll('#settingsWorkspace [data-settings-pane
 
 // 更新入口在右上角的版本按钮（#appVersion）：默认显示版本号，检查中 / 下载中 / 已就绪会直接变成对应状态，
 // 点它执行「检查更新」或「重启并更新」；设置页只保留 app 信息，更新说明放在重启确认框里。
-let appInfo=null,appTimer=null;
+let appInfo=null,appTimer=null,readyNotified='';
 const fallbackRepo='https://github.com/ohmyangboy/bobo';
 async function loadApp(){
  appInfo=await api('app');
@@ -301,6 +301,11 @@ function renderVersion(){
  button.classList.toggle('is-busy',state.kind==='checking'||state.kind==='downloading');
  button.classList.toggle('is-ready',state.kind==='ready'||state.kind==='installing');
  button.classList.toggle('is-error',state.kind==='failed');
+ // 下载好时提醒一次（每次页面加载最多一次）：告诉用户点右上角就能重启安装。
+ if(state.kind==='ready'&&release.displayVersion&&readyNotified!==release.displayVersion){
+  readyNotified=release.displayVersion;
+  toast(release.displayVersion+' 已下载好，点右上角版本号重启安装');
+ }
 }
 function renderAbout(){
  if(!appInfo)return;
