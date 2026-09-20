@@ -9,10 +9,13 @@ import {execFile,spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
 export const repo='ohmyangboy/bobo',bundleId='local.bobo.app';
+// 发布包的签名团队（Developer ID Application: Yonghao Yang）；应用内更新只接受这个团队的签名。
+export const teamId='LGKLTGNTY2';
 export const repoUrl='https://github.com/'+repo,releasesUrl=repoUrl+'/releases',releaseApi='https://api.github.com/repos/'+repo+'/releases/latest';
 const assetName='bobo.app.zip',minAssetSize=1024*1024,checkDelayMs=15000,checkIntervalMs=6*3600*1000,retryMs=600000;
 const here=path.dirname(fileURLToPath(import.meta.url));
-const run=(file,args)=>new Promise((resolve,reject)=>{execFile(file,args,{maxBuffer:1024*1024},(error,stdout,stderr)=>error?reject(Object.assign(error,{stderr})):resolve(stdout));});
+// codesign 的诊断信息走 stderr，这里合并输出，调用方拿到的就是完整文本。
+const run=(file,args)=>new Promise((resolve,reject)=>{execFile(file,args,{maxBuffer:1024*1024},(error,stdout,stderr)=>error?reject(Object.assign(error,{stderr})):resolve(String(stdout||'')+String(stderr||'')));});
 
 // package.json 是版本唯一真源：dev 在项目根，App 包与 v2 runtime 都放在模块的上一级。
 export async function readPackage(){return JSON.parse(await fs.readFile(new URL('../package.json',import.meta.url),'utf8'));}
@@ -239,6 +242,11 @@ export function createUpdate({home,now=Date.now,fetchImpl=fetch,exec=run,spawnIm
    const stagedVersion=info?plistValue(info,'CFBundleShortVersionString'):null;
    if(!info||plistValue(info,'CFBundleIdentifier')!==bundleId)throw Error('更新包不是 bobo 应用');
    if(stagedVersion!==release.version)throw Error('更新包版本不匹配（预期 '+release.version+'，实际 '+(stagedVersion||'未知')+'）');
+   // 代码签名校验：只接受同一开发者（Developer ID）签名且签名有效的更新包。
+   const verified=await exec('codesign',['--verify','--deep','--strict',stagedApp]).then(()=>true,()=>false);
+   if(!verified)throw Error('更新包的代码签名校验失败');
+   const signature=await exec('codesign',['-dv','--verbose=4',stagedApp]).catch(()=> '');
+   if(!new RegExp('TeamIdentifier='+teamId).test(String(signature)))throw Error('更新包不是预期的开发者签名，已拒绝安装');
    await fs.writeFile(manifestFile,JSON.stringify({version:release.version,url:release.asset.url,size:release.asset.size,sha256:release.asset.sha256,notes:release.notes,htmlUrl:release.htmlUrl,publishedAt:release.publishedAt,downloadedAt:new Date(now()).toISOString()},null,1));
    state={kind:'ready',release,progress:1};emit();
   }catch(e){

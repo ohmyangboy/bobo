@@ -1,4 +1,20 @@
-# bobo
+<div align="center">
+
+  <img src="assets/app-icon.png" alt="bobo 图标" width="120" height="120" />
+
+  # bobo
+
+  ***万事通式的本地 Agent 工作台。***
+
+  [![Release](https://img.shields.io/github/v/release/ohmyangboy/bobo?style=flat-square&color=1d4ed8)](https://github.com/ohmyangboy/bobo/releases)
+  [![Platform](https://img.shields.io/badge/platform-macOS%2013.0%2B-f7f5ef?style=flat-square&logo=apple&logoColor=000000)](https://github.com/ohmyangboy/bobo)
+  [![License](https://img.shields.io/badge/license-MIT-c92a2a?style=flat-square)](LICENSE)
+
+  [Releases](https://github.com/ohmyangboy/bobo/releases) · [问题反馈](https://github.com/ohmyangboy/bobo/issues)
+
+</div>
+
+---
 
 > “it's bobo!”
 

@@ -165,9 +165,31 @@
 
 ## 发布
 
-1. 更新 `package.json` 的 `version`，把变更写进 `CHANGELOG.md`；
-2. 提交后打 tag 并推送：`git tag v1.2.0 && git push origin v1.2.0`；
-3. GitHub Actions（`.github/workflows/release.yml`）在 macOS runner 上跑 `npm test`、再执行 `node scripts/package-release.mjs` 打包出 `dist/bobo.app.zip`（同时生成 `.sha256`），然后创建 GitHub Release 并上传；
-4. 应用内更新读取该 Release 的 `bobo.app.zip`，用 GitHub 资产自带的 sha256 digest 校验后再安装。
+发布包用 **Developer ID 签名 + Apple 公证**（`Developer ID Application: Yonghao Yang (LGKLTGNTY2)`），别人下载后 Gatekeeper 直接放行；应用内更新只接受同一团队的签名。
 
-本地想单独打包：`npm run package`；手动发布可以用 `gh release create <tag> dist/bobo.app.zip dist/bobo.app.zip.sha256`。CI（`.github/workflows/ci.yml`）在 push / PR 时只跑 `npm test`。
+### 本机发布（当前默认路径）
+
+1. 更新 `package.json` 的 `version`，把变更写进 `CHANGELOG.md`；
+2. `npm run package`：构建 → 签名（硬化运行时 + 安全时间戳）→ 提交 Apple 公证并等待 → staple → Gatekeeper 校验 → 输出 `dist/bobo.app.zip` 与 `.sha256`；
+3. 打 tag 并推送：`git tag v1.2.1 && git push origin v1.2.1`（Release 工作流没有签名 secrets 时会跳过打包、只跑测试）；
+4. 创建 Release：`gh release create v1.2.1 dist/bobo.app.zip dist/bobo.app.zip.sha256 --title v1.2.1 --generate-notes`；
+5. 应用内更新读取该 Release 的 `bobo.app.zip`，用 GitHub 资产的 sha256 digest 与代码签名双重校验后再安装。
+
+- 公证凭据：本机钥匙串里的 notarytool profile（默认 `paperrss-notary`，可用 `NOTARY_PROFILE` 覆盖），或 `NOTARY_API_KEY` / `NOTARY_API_KEY_ID` / `NOTARY_API_ISSUER_ID`（App Store Connect API Key）。
+- 没有 Developer ID 证书时会退回 ad-hoc 签名：`npm run package` 默认拒绝发布（本机验证可加 `BOBO_ALLOW_ADHOC=1`），`BOBO_SKIP_NOTARY=1` 可跳过公证。
+- `./update.sh`（本机安装）同样走签名构建，但不需要公证。
+
+### GitHub Actions 自动发布（可选）
+
+在仓库 secrets 里配置以下项后，推 `v*` tag 就会在 CI 里完成签名、公证与发布：
+
+| Secret | 内容 |
+| --- | --- |
+| `BUILD_CERTIFICATE_BASE64` | 导出的 Developer ID 证书（.p12）base64 |
+| `P12_PASSWORD` | 导出 .p12 时设置的密码 |
+| `KEYCHAIN_PASSWORD` | CI 临时钥匙串的任意密码 |
+| `NOTARY_API_KEY_P8` | App Store Connect API Key（.p8）base64 |
+| `NOTARY_API_KEY_ID` | API Key 的 Key ID |
+| `NOTARY_API_ISSUER_ID` | API Key 的 Issuer ID |
+
+导出证书：钥匙串访问 → 我的证书 → 右键 `Developer ID Application: Yonghao Yang` → 导出为 .p12（设置密码），然后 `base64 -i cert.p12 | pbcopy` 填进 secret。CI（`.github/workflows/ci.yml`）在 push / PR 时只跑 `npm test`。

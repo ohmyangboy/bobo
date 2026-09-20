@@ -2,6 +2,16 @@
 
 本文件记录 bobo 面向用户的版本变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。发布在 [GitHub Releases](https://github.com/ohmyangboy/bobo/releases)。
 
+## [1.2.1] - 2026-09-20
+
+### 变更
+
+- 发布包改用 Developer ID（Yonghao Yang · LGKLTGNTY2）签名并提交 Apple 公证，启用硬化运行时与安全时间戳：下载后 Gatekeeper 直接放行，不用再右键打开。
+- 应用内更新校验更新包的代码签名，只接受同一开发者团队签名的包，签名无效或团队不符时拒绝安装。
+- `scripts/build-app.sh` 自动检测本机钥匙串里的 Developer ID 证书（找不到时退回 ad-hoc 并告警）；`npm run package` 完成签名、公证、staple 与 Gatekeeper 校验后再打包，未签名时默认拒绝发布。
+- Release 工作流支持 Developer ID 签名与公证（配置证书与 App Store Connect API Key 的 secrets 后自动生效；未配置时只跑测试并提示跳过发布）。
+- README 顶部加入应用图标与徽章（对齐 PaperRss 的主页样式）。
+
 ## [1.2.0] - 2026-09-20
 
 首个公开版本。
@@ -24,3 +34,4 @@
 - 版本号以 `package.json` 为唯一真源，构建时写入 Info.plist；新增 `scripts/build-app.sh` 与 `scripts/package-release.mjs`。
 
 [1.2.0]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.0
+[1.2.1]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.1

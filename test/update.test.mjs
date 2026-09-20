@@ -1,6 +1,24 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs/promises';import os from 'node:os';import path from 'node:path';import {createHash} from 'node:crypto';
 import {compareVersions,parseVersion,releaseCandidate,appBundlePath,plistValue,relaunchScript,createUpdate,readPackage,repoUrl,bundleId} from '../src/update.mjs';
 
+// 当前版本从 package.json 读（版本唯一真源），测试里的「新版本」永远比它大一个 patch。
+const currentVersion=(await readPackage()).version;
+const nextVersion=currentVersion.replace(/\.(\d+)$/,(_,n)=>'.'+(Number(n)+1));
+// 发布流的 exec 替身：ditto 解压出 Info.plist，codesign 返回签名诊断（可按需改签名团队 / 让校验失败）。
+const makeExec=({team='LGKLTGNTY2',valid=true,version=nextVersion}={})=>async(file,args)=>{
+ if(file==='ditto'){
+  const app=path.join(args[3],'bobo.app');
+  await fs.mkdir(path.join(app,'Contents'),{recursive:true});
+  await fs.writeFile(path.join(app,'Contents/Info.plist'),'<key>CFBundleIdentifier</key><string>'+bundleId+'</string><key>CFBundleShortVersionString</key><string>'+version+'</string>');
+  return '';
+ }
+ if(file==='codesign'){
+  if(args[0]==='--verify'){if(!valid)throw Error('invalid signature');return 'valid';}
+  return 'Authority=Developer ID Application: Yonghao Yang ('+team+')\nTeamIdentifier='+team;
+ }
+ throw Error('未预期的命令：'+file+' '+args.join(' '));
+};
+
 test('语义化版本：比较、预发布与无法解析的返回 null',()=>{
  assert.equal(compareVersions('1.2.1','1.2.0'),1);
  assert.equal(compareVersions('1.2.0','1.2.1'),-1);
@@ -57,7 +75,7 @@ test('检查到安装全流程：下载校验、解压暂存、生成重启脚�
  try{
   const zip=Buffer.alloc(1024*1024+16,7);
   const sha=createHash('sha256').update(zip).digest('hex');
-  const release={tag_name:'v1.3.0',html_url:repoUrl+'/releases/tag/v1.3.0',body:'更新说明',published_at:'2026-09-20T00:00:00Z',draft:false,prerelease:false,
+  const release={tag_name:'v'+nextVersion,html_url:repoUrl+'/releases/tag/v'+nextVersion,body:'更新说明',published_at:'2026-09-20T00:00:00Z',draft:false,prerelease:false,
    assets:[{name:'bobo.app.zip',browser_download_url:'https://example.com/bobo.app.zip',digest:'sha256:'+sha,size:zip.length}]};
   const urls=[];
   const fetchImpl=async url=>{
@@ -65,13 +83,7 @@ test('检查到安装全流程：下载校验、解压暂存、生成重启脚�
    if(String(url).includes('/releases/latest'))return {status:200,ok:true,json:async()=>release};
    return {status:200,ok:true,body:(async function*(){yield zip;})()};
   };
-  const exec=async(file,args)=>{
-   assert.equal(file,'ditto');
-   const app=path.join(args[3],'bobo.app');
-   await fs.mkdir(path.join(app,'Contents'),{recursive:true});
-   await fs.writeFile(path.join(app,'Contents/Info.plist'),'<key>CFBundleIdentifier</key><string>'+bundleId+'</string><key>CFBundleShortVersionString</key><string>1.3.0</string>');
-   return '';
-  };
+  const exec=makeExec();
   const spawned=[];
   const spawnImpl=(file,args,opts)=>{spawned.push({file,args,opts});return {unref(){}};};
   const appDir=path.join(home,'Applications/bobo.app');
@@ -79,20 +91,20 @@ test('检查到安装全流程：下载校验、解压暂存、生成重启脚�
   await update.load();
   const initial=update.snapshot();
   assert.equal(initial.canUpdate,true);
-  assert.equal(initial.version,'1.2.0');
+  assert.equal(initial.version,currentVersion);
   assert.equal(initial.state.kind,'idle');
   await update.check();
   for(let i=0;i<300&&update.snapshot().state.kind!=='ready';i++)await new Promise(r=>setTimeout(r,10));
   const ready=update.snapshot().state;
   assert.equal(ready.kind,'ready');
-  assert.equal(ready.release.version,'1.3.0');
+  assert.equal(ready.release.version,nextVersion);
   assert.equal(ready.progress,1);
   assert.deepEqual(urls,[
    'https://api.github.com/repos/ohmyangboy/bobo/releases/latest',
    'https://example.com/bobo.app.zip',
   ]);
   const manifest=JSON.parse(await fs.readFile(path.join(home,'.bobo/updates/staged.json'),'utf8'));
-  assert.equal(manifest.version,'1.3.0');
+  assert.equal(manifest.version,nextVersion);
   assert.equal(manifest.sha256,sha);
   await update.install();
   assert.equal(update.snapshot().state.kind,'installing');
@@ -110,23 +122,46 @@ test('检查到安装全流程：下载校验、解压暂存、生成重启脚�
  }finally{await fs.rm(home,{recursive:true,force:true});}
 });
 
+test('更新包签名校验：不是预期开发者或签名无效时拒绝安装',async()=>{
+ for(const exec of [makeExec({team:'BADSIGN'}),makeExec({valid:false})]){
+  const home=await fs.mkdtemp(path.join(os.tmpdir(),'bobo-update-'));
+  try{
+   const zip=Buffer.alloc(1024*1024+16,9);
+   const sha=createHash('sha256').update(zip).digest('hex');
+   const release={tag_name:'v'+nextVersion,html_url:repoUrl+'/releases/tag/v'+nextVersion,body:'',draft:false,prerelease:false,
+    assets:[{name:'bobo.app.zip',browser_download_url:'https://example.com/bobo.app.zip',digest:'sha256:'+sha,size:zip.length}]};
+   const fetchImpl=async url=>String(url).includes('/releases/latest')
+    ?{status:200,ok:true,json:async()=>release}
+    :{status:200,ok:true,body:(async function*(){yield zip;})()};
+   const appDir=path.join(home,'Applications/bobo.app');
+   const update=createUpdate({home,fetchImpl,exec,spawnImpl:()=>({unref(){}}),argv1:path.join(appDir,'Contents/Resources/src/server.mjs')});
+   await update.load();
+   await update.check();
+   for(let i=0;i<300&&!['ready','failed'].includes(update.snapshot().state.kind);i++)await new Promise(r=>setTimeout(r,10));
+   const state=update.snapshot().state;
+   assert.equal(state.kind,'failed');
+   assert.match(state.message,/签名/);
+  }finally{await fs.rm(home,{recursive:true,force:true});}
+ }
+});
+
 test('断点恢复：重启后暂存仍在且版本更新时直接标记可安装',async()=>{
  const home=await fs.mkdtemp(path.join(os.tmpdir(),'bobo-update-'));
  try{
   const appDir=path.join(home,'Applications/bobo.app');
   const stagedApp=path.join(home,'.bobo/updates/staged/bobo.app');
   await fs.mkdir(path.join(stagedApp,'Contents'),{recursive:true});
-  await fs.writeFile(path.join(stagedApp,'Contents/Info.plist'),'<key>CFBundleIdentifier</key><string>'+bundleId+'</string><key>CFBundleShortVersionString</key><string>1.4.0</string>');
-  await fs.writeFile(path.join(home,'.bobo/updates/staged.json'),JSON.stringify({version:'1.4.0',url:'https://example.com/bobo.app.zip',size:2*1024*1024,sha256:'b'.repeat(64),notes:'说明',htmlUrl:repoUrl+'/releases/tag/v1.4.0',publishedAt:'2026-09-20T00:00:00Z'}));
+  await fs.writeFile(path.join(stagedApp,'Contents/Info.plist'),'<key>CFBundleIdentifier</key><string>'+bundleId+'</string><key>CFBundleShortVersionString</key><string>'+nextVersion+'</string>');
+  await fs.writeFile(path.join(home,'.bobo/updates/staged.json'),JSON.stringify({version:nextVersion,url:'https://example.com/bobo.app.zip',size:2*1024*1024,sha256:'b'.repeat(64),notes:'说明',htmlUrl:repoUrl+'/releases/tag/v'+nextVersion,publishedAt:'2026-09-20T00:00:00Z'}));
   const update=createUpdate({home,fetchImpl:async()=>{throw Error('不该联网');},exec:async()=>'',spawnImpl:()=>({unref(){}}),argv1:path.join(appDir,'Contents/Resources/src/server.mjs')});
   await update.load();
   const state=update.snapshot().state;
   assert.equal(state.kind,'ready');
   assert.equal(state.resumed,true);
-  assert.equal(state.release.version,'1.4.0');
+  assert.equal(state.release.version,nextVersion);
   // 暂存版本不比当前新时清掉残留。
-  await fs.writeFile(path.join(home,'.bobo/updates/staged.json'),JSON.stringify({version:'1.2.0',url:'x',size:1,sha256:'c'.repeat(64)}));
-  await fs.writeFile(path.join(stagedApp,'Contents/Info.plist'),'<key>CFBundleIdentifier</key><string>'+bundleId+'</string><key>CFBundleShortVersionString</key><string>1.2.0</string>');
+  await fs.writeFile(path.join(home,'.bobo/updates/staged.json'),JSON.stringify({version:'0.0.1',url:'x',size:1,sha256:'c'.repeat(64)}));
+  await fs.writeFile(path.join(stagedApp,'Contents/Info.plist'),'<key>CFBundleIdentifier</key><string>'+bundleId+'</string><key>CFBundleShortVersionString</key><string>0.0.1</string>');
   const stale=createUpdate({home,fetchImpl:async()=>{throw Error('不该联网');},exec:async()=>'',spawnImpl:()=>({unref(){}}),argv1:path.join(appDir,'Contents/Resources/src/server.mjs')});
   await stale.load();
   assert.equal(stale.snapshot().state.kind,'idle');
@@ -140,7 +175,7 @@ test('源码运行不提供应用内更新；检查失败进入 failed 并可重
   const update=createUpdate({home,fetchImpl:async()=>{throw Error('连接失败');},exec:async()=>'',spawnImpl:()=>({unref(){}}),argv1:path.join(home,'bobo/src/server.mjs')});
   await update.load();
   assert.equal(update.snapshot().canUpdate,false);
-  assert.equal(update.snapshot().version,'1.2.0');
+  assert.equal(update.snapshot().version,currentVersion);
   const after=await update.check();
   assert.equal(after.state.kind,'failed');
   assert.match(after.state.message,/检查更新失败/);

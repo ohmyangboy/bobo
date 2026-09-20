@@ -7,7 +7,12 @@ project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out_dir="${1:-$project_dir/dist}"
 version="$(node -p "require('$project_dir/package.json').version")"
 build="${BOBO_BUILD:-$(git -C "$project_dir" rev-list --count HEAD 2>/dev/null || echo 1)}"
-identity="${CODESIGN_IDENTITY:--}"
+# 签名身份：优先环境变量；否则自动检测本机钥匙串里的 Developer ID Application 证书；
+# 都没有才退回 ad-hoc（只能本机运行，不能公证、别人下载会被 Gatekeeper 拦）。
+identity="${CODESIGN_IDENTITY:-}"
+if [[ -z "$identity" ]]; then
+  identity="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application: [^"]*\)"/\1/p' | head -1)"
+fi
 
 if [[ -z "$version" ]]; then
   echo "无法从 package.json 读取版本号" >&2
@@ -61,5 +66,12 @@ cat > "$app_dir/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 
-codesign --force --sign "$identity" "$app_dir"
+if [[ -n "$identity" ]]; then
+  # Developer ID 签名：硬化运行时 + 安全时间戳（Apple 公证的前置条件）。
+  codesign --force --options runtime --timestamp --sign "$identity" "$app_dir"
+  echo "签名：$identity"
+else
+  echo "警告：未找到 Developer ID Application 证书，使用 ad-hoc 签名（仅本机可用，无法公证）" >&2
+  codesign --force --sign - "$app_dir"
+fi
 echo "$app_dir"
