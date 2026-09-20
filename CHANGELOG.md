@@ -1,6 +1,21 @@
+---
+published: true
+---
+
 # 更新日志
 
 本文件记录 bobo 面向用户的版本变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。发布在 [GitHub Releases](https://github.com/ohmyangboy/bobo/releases)。
+
+## [1.2.3] - 2026-09-20
+
+### 变更
+
+- 更新入口移到顶栏右上角的**版本按钮**：默认显示版本号，检查中 / 下载中（带百分比）/ 已就绪直接显示在按钮上（就绪时呼吸提示），点一下即检查更新或重启安装；「设置 → 关于」不再放更新按钮，只保留 app 信息与开源社区。
+
+### 修复
+
+- 点「重启并更新」后应用长时间不退出（AppleScript 受「自动化」权限限制，原脚本要等 10 秒才强杀）：重启脚本改为按 PID 分级退出（AppleScript 1 秒 → SIGTERM 3 秒 → SIGKILL），等待上限压到 4 秒内。
+- 暂存包被系统清理后点重启会一直卡在「正在重启」：安装前先确认暂存包存在（不存在就提示重新检查），并挂 40 秒看门狗，失败自动恢复成可重试状态。
 
 ## [1.2.2] - 2026-09-20
 
@@ -42,3 +57,4 @@
 [1.2.0]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.0
 [1.2.1]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.1
 [1.2.2]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.2
+[1.2.3]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.3

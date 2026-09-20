@@ -1,3 +1,7 @@
+---
+published: true
+---
+
 # 贡献指南
 
 bobo 是一个个人工具项目，欢迎试用与提交 Issue / PR。动手前建议先看 [README](README.md)；[AGENTS.md](AGENTS.md) 是给 AI 协作者与开发者的详细架构约定，改代码前值得读一遍相关章节。

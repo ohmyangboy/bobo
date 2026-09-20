@@ -29,6 +29,28 @@ bobo 可以说是个融合怪：
 
 当前项目为个人工具项目，可能存在较多兼容问题，大部分场景只兼容到我实际使用的工具，更建议你 fork 后自己加入任何你想要的任何功能。
 
+## 截图
+
+<div align="center">
+
+  <img src="assets/screenshots/notch-collapsed.png" alt="通知岛折叠态" width="620" />
+  <br />
+  <sub>通知岛 · 折叠：头像是最需要关注的会话，右侧为额度与设备指示</sub>
+
+  <br /><br />
+
+  <img src="assets/screenshots/notch-expanded.png" alt="通知岛展开态" width="1040" />
+  <br />
+  <sub>通知岛 · 展开：来自哪家 harness、跑在哪个终端、已经跑了多久</sub>
+
+  <br /><br />
+
+  <img src="assets/screenshots/web-island.png" alt="bobo 网页界面：通知岛设置" width="1140" />
+  <br />
+  <sub>网页界面：通知岛设置与五家 harness 的连接状态</sub>
+
+</div>
+
 ## 支持的 harness
 
 以下是目前支持的 harness 列表：
@@ -69,7 +91,7 @@ npm start                  # 或只跑本地服务 → http://127.0.0.1:4318
 - **智能体**：管理 OpenCode 与 Codex CLI 的自定义智能体定义，阅读并调节五家 harness 的全局配置。
 - **AI**：按段落翻译全文、生成能力总结（OpenAI 兼容接口，可用 DeepSeek）。
 
-详细功能与实现说明见 [docs/features.md](docs/features.md)。
+详细功能与实现说明见 [docs/features.md](docs/features.md)，一页速览见 [docs/intro.md](docs/intro.md)。
 
 ## 开发
 

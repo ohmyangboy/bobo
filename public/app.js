@@ -277,9 +277,9 @@ function showSettingsPane(name){
 }
 for(const b of document.querySelectorAll('#settingsWorkspace [data-settings-pane]'))b.onclick=()=>showSettingsPane(b.dataset.settingsPane);
 
-// 关于与更新：应用信息来自 GET /api/app，更新在服务端后台静默下载（见 update.mjs）。
-// 这里只展示状态并触发「重启并更新」；点下去后应用会退出，几秒后以新版本重开。
-let appInfo=null,aboutTimer=null;
+// 更新入口在右上角的版本按钮（#appVersion）：默认显示版本号，检查中 / 下载中 / 已就绪会直接变成对应状态，
+// 点它执行「检查更新」或「重启并更新」；设置页只保留 app 信息，更新说明放在重启确认框里。
+let appInfo=null,appTimer=null;
 const fallbackRepo='https://github.com/ohmyangboy/bobo';
 async function loadApp(){
  appInfo=await api('app');
@@ -288,59 +288,60 @@ async function loadApp(){
 function renderVersion(){
  if(!appInfo)return;
  const state=appInfo.state||{},release=state.release||{};
- const version='v'+appInfo.version;
- $('#appVersion').textContent=version;
- const pending=['available','downloading','ready'].includes(state.kind);
- $('#appVersion').classList.toggle('has-update',pending);
- $('#appVersion').title=pending?'新版本 '+release.displayVersion+' 正在准备，点击查看更新详情':'当前版本 '+version;
+ const button=$('#appVersion'),version='v'+appInfo.version;
+ let text=version,title='当前版本 '+version;
+ if(state.kind==='checking'){text='检查更新…';title='正在检查更新';}
+ else if(state.kind==='downloading'){const percent=Math.round((state.progress||0)*100);text=(release.displayVersion||'新版本')+' '+percent+'%';title='正在下载 '+(release.displayVersion||'')+'（'+percent+'%）';}
+ else if(state.kind==='ready'){text=(release.displayVersion||'新版本')+' 已就绪';title='点击重启并安装 '+(release.displayVersion||'');}
+ else if(state.kind==='installing'){text='正在重启…';title='正在重启安装';}
+ else if(state.kind==='failed'){title=state.message||'检查更新失败';}
+ button.textContent=text;
+ button.title=title;
+ button.classList.toggle('has-update',['available','downloading','ready'].includes(state.kind));
+ button.classList.toggle('is-busy',state.kind==='checking'||state.kind==='downloading');
+ button.classList.toggle('is-ready',state.kind==='ready'||state.kind==='installing');
+ button.classList.toggle('is-error',state.kind==='failed');
 }
 function renderAbout(){
  if(!appInfo)return;
- const state=appInfo.state||{},release=state.release||{};
  $('#aboutVersion').textContent='v'+appInfo.version;
  $('#aboutBuild').textContent=Number(appInfo.build)>0?'Build '+appInfo.build:'';
- $('#updateHint').textContent=appInfo.canUpdate?'启动后自动检查，发现新版本会在后台下载':'当前以源码运行；应用内更新只在安装版可用，请用 ./update.sh 更新';
- const messages={idle:'尚未检查',checking:'正在检查…',upToDate:'已是最新版本',available:'发现新版本 '+release.displayVersion,downloading:'正在下载 '+release.displayVersion,ready:release.displayVersion+' 已就绪',installing:'正在重启安装…'};
- $('#updateStatus').textContent=state.kind==='failed'?(state.message||'检查失败'):(messages[state.kind]||'尚未检查');
- const percent=Math.round((state.progress||0)*100);
- $('#updateProgressRow').hidden=state.kind!=='downloading';
- $('#updateProgress').textContent=percent+'%';
- const showNotes=Boolean(release.notes)&&['available','downloading','ready'].includes(state.kind);
- $('#updateNotes').hidden=!showNotes;
- if(showNotes)$('#updateNotes').textContent=release.notes.split('\n').slice(0,10).join('\n');
- $('#updateCheck').disabled=!appInfo.canUpdate||['checking','downloading','installing'].includes(state.kind);
- const install=$('#updateInstall');
- install.hidden=state.kind!=='ready'&&state.kind!=='installing';
- install.disabled=state.kind!=='ready';
- install.textContent=state.kind==='installing'?'正在重启…':(release.displayVersion?'重启并更新 '+release.displayVersion:'重启并更新');
 }
-function openAbout(){loadApp().catch(()=>{});if(!aboutTimer)aboutTimer=setInterval(()=>loadApp().catch(()=>{}),1500);}
-function aboutClose(){if(aboutTimer){clearInterval(aboutTimer);aboutTimer=null;}}
+// 版本与更新状态靠轮询（内存接口，成本极低）：页面打开时每 2 秒一次，切到后台暂停。
+function startAppPolling(){
+ if(appTimer)return;
+ const tick=()=>loadApp().catch(()=>{});
+ tick();
+ appTimer=setInterval(tick,2000);
+}
+function stopAppPolling(){if(appTimer){clearInterval(appTimer);appTimer=null;}}
+document.addEventListener('visibilitychange',()=>{document.hidden?stopAppPolling():startAppPolling();});
 const openRepo=()=>api('open',{url:appInfo?.repoUrl||fallbackRepo});
 $('#repoLink').onclick=guard(()=>openRepo());
 $('#aboutRepo').onclick=guard(()=>openRepo());
 $('#aboutReleases').onclick=guard(()=>api('open',{url:appInfo?.releasesUrl||(fallbackRepo+'/releases')}));
 $('#aboutIssues').onclick=guard(()=>api('open',{url:(appInfo?.repoUrl||fallbackRepo)+'/issues/new/choose'}));
-$('#appVersion').onclick=guard(async()=>{await switchView('settings');showSettingsPane('about');});
-$('#updateCheck').onclick=guard(async()=>{
- $('#updateCheck').disabled=true;
- try{
-  const state=await api('update/check',{});
-  appInfo={...appInfo,...state};
-  renderVersion();renderAbout();
-  const kind=state.state.kind;
-  toast(kind==='upToDate'||kind==='idle'?'已是最新版本':kind==='failed'?(state.state.message||'检查更新失败'):'发现新版本，正在后台下载');
- }finally{renderAbout();}
-});
-$('#updateInstall').onclick=guard(async()=>{
- if(!confirm('立即重启并安装新版本？bobo 会退出，几秒后重新打开。'))return;
- $('#updateInstall').disabled=true;
- try{
-  const state=await api('update/install',{});
-  appInfo={...appInfo,...state};
-  renderVersion();renderAbout();
-  toast('正在重启安装，几秒后回来');
- }catch(e){$('#updateInstall').disabled=false;toast(e.message);}
+// 版本按钮：已下载好 → 重启安装；其余状态 → 检查更新（下载中 / 检查中给提示）。
+$('#appVersion').onclick=guard(async()=>{
+ if(!appInfo)return;
+ const state=appInfo.state||{};
+ if(!appInfo.canUpdate){toast('当前以源码运行；应用内更新只在安装版可用');return;}
+ if(state.kind==='ready'){
+  const release=state.release||{};
+  const notes=(release.notes||'').split('\n').filter(line=>line.trim()&&!line.startsWith('**Full Changelog**')).slice(0,6).join('\n');
+  if(!confirm('重启并安装 '+release.displayVersion+'？bobo 会退出，几秒后重新打开。'+(notes?'\n\n'+notes:'')))return;
+  appInfo={...appInfo,...await api('update/install',{})};
+  renderVersion();
+  toast('正在重启安装，几秒后自动回来');
+  return;
+ }
+ if(state.kind==='installing'){toast('正在重启安装…');return;}
+ if(state.kind==='downloading'){toast('正在后台下载 '+(state.release?.displayVersion||'新版本')+'（'+Math.round((state.progress||0)*100)+'%）');return;}
+ if(state.kind==='checking'){toast('正在检查更新…');return;}
+ appInfo={...appInfo,...await api('update/check',{})};
+ renderVersion();
+ const kind=appInfo.state.kind;
+ toast(kind==='upToDate'||kind==='idle'?'已是最新版本':kind==='failed'?(appInfo.state.message||'检查更新失败'):'发现新版本，正在后台下载');
 });
 
 function setView(next){
@@ -870,7 +871,7 @@ async function switchView(next){
  if(next==='island')openIsland();else islandClose();
  if(next==='usage')openUsage();else usageClose();
  if(next==='device')openDevice();else deviceClose();
- if(next==='settings'){await loadAISettings();openAbout();}else aboutClose();
+ if(next==='settings')await loadAISettings();
 }
 async function saveAgent(){
  if(!agentSel)return;
@@ -1407,4 +1408,4 @@ function deviceClose(){if(deviceTimer){clearInterval(deviceTimer);deviceTimer=nu
 $('#deviceRefresh').onclick=guard(async()=>{$('#deviceRefresh').disabled=true;try{await loadDevice(true);toast('已刷新设备信息');}finally{$('#deviceRefresh').disabled=false;}});
 
 guard(async()=>{await refresh(false,true);const first=$('#skills .skill-group');if(first)openFolder(first.dataset.group);const j=await api('job');if(j?.running){showConsole();await poll();}})();
-guard(loadApp);
+guard(startAppPolling)();

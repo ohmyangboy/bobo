@@ -81,23 +81,30 @@ export function plistValue(text,key){
 export function relaunchScript(){
  return `#!/bin/sh
 # bobo 应用内更新：等旧应用退出后替换安装包并重新打开（由 src/update.mjs 生成）。
-LOG="$1"; TARGET="$2"; STAGED="$3"; UPDATES="$4"
+LOG="$1"; TARGET="$2"; STAGED="$3"; UPDATES="$4"; APP_PID="$5"
 log(){ printf '[%s] %s\\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG"; }
 fail(){ log "失败：$*"; log "暂存的应用保留在 $STAGED，可手动替换"; exit 1; }
 [ -d "$STAGED/Contents/MacOS" ] || fail "暂存的应用不完整"
-log "=== 开始安装（脚本 $$）target=$TARGET ==="
+log "=== 开始安装（脚本 $$）target=$TARGET app_pid=$APP_PID ==="
 
-# 1. 退出旧应用（applicationWillTerminate 会停掉本地服务）。
-if pgrep -x Bobo >/dev/null 2>&1; then
+# 1. 退出旧应用：先请它自己退出（能触发 applicationWillTerminate 收尾、停掉本地服务），
+#    1 秒内没退就直接 SIGTERM，再等 3 秒不退就 SIGKILL——osascript 受「自动化」权限限制，不能只靠它。
+[ -n "$APP_PID" ] || APP_PID="$(pgrep -x Bobo 2>/dev/null | head -1 || true)"
+if [ -n "$APP_PID" ] && kill -0 "$APP_PID" 2>/dev/null; then
  log "请求应用退出"
  osascript -e 'tell application id "${bundleId}" to quit' >>"$LOG" 2>&1 || true
  COUNT=0
- while pgrep -x Bobo >/dev/null 2>&1; do
-  sleep 0.2; COUNT=$((COUNT+1))
-  [ "$COUNT" -eq 50 ] && { log "应用未退出，发送 SIGTERM"; pkill -x Bobo 2>/dev/null || true; }
-  [ "$COUNT" -eq 70 ] && { log "应用仍未退出，发送 SIGKILL"; pkill -9 -x Bobo 2>/dev/null || true; }
-  [ "$COUNT" -ge 100 ] && break
- done
+ while kill -0 "$APP_PID" 2>/dev/null && [ "$COUNT" -lt 5 ]; do sleep 0.2; COUNT=$((COUNT+1)); done
+ if kill -0 "$APP_PID" 2>/dev/null; then
+  log "应用未响应，发送 SIGTERM"
+  kill -TERM "$APP_PID" 2>/dev/null || true
+  COUNT=0
+  while kill -0 "$APP_PID" 2>/dev/null && [ "$COUNT" -lt 15 ]; do sleep 0.2; COUNT=$((COUNT+1)); done
+ fi
+ if kill -0 "$APP_PID" 2>/dev/null; then
+  log "应用仍未退出，发送 SIGKILL"
+  kill -9 "$APP_PID" 2>/dev/null || true
+ fi
 fi
 
 # 2. 等 4318 释放：旧服务必须停，否则新版本会连上旧服务复用旧代码。
@@ -259,13 +266,28 @@ export function createUpdate({home,now=Date.now,fetchImpl=fetch,exec=run,spawnIm
  async function install(){
   if(state.kind!=='ready')throw Object.assign(Error('没有已下载好的更新'),{status:409});
   if(!appPath)throw Object.assign(Error('当前不是从应用包运行，无法应用内更新'),{status:409});
+  // 暂存包可能被系统清理：先确认它还在，避免脚本启动后立刻失败、应用卡在「正在重启」。
+  const stagedOk=await fs.access(stagedApp).then(()=>true,()=>false);
+  if(!stagedOk){
+   state={kind:'failed',message:'更新包已不存在，请重新检查更新',checkedAt:now()};emit();
+   throw Object.assign(Error('更新包已不存在，请重新检查更新'),{status:409});
+  }
   const scriptFile=path.join(updatesDir,'relaunch.sh');
   await fs.mkdir(updatesDir,{recursive:true});
   await fs.writeFile(scriptFile,relaunchScript(),{mode:0o755});
-  const child=spawnImpl('/bin/sh',[scriptFile,logFile,appPath,stagedApp,updatesDir],{detached:true,stdio:'ignore'});
+  // 把应用进程号交给脚本：优先请应用自己退出（AppleScript），1 秒内没退就直接 SIGTERM。
+  const appPid=process.ppid>1?String(process.ppid):'';
+  const child=spawnImpl('/bin/sh',[scriptFile,logFile,appPath,stagedApp,updatesDir,appPid],{detached:true,stdio:'ignore'});
   if(child.unref)child.unref();
   closing=true;
   state={kind:'installing',release:state.release};emit();
+  // 看门狗：正常情况下脚本几秒内就让应用退出（进程随之结束）；40 秒还在说明脚本失败，恢复成可重试。
+  const watchdog=setTimeout(()=>{
+   if(state.kind!=='installing')return;
+   closing=false;
+   state={kind:'ready',release:state.release,progress:1};emit();
+  },40000);
+  if(watchdog.unref)watchdog.unref();
   return snapshot();
  }
 

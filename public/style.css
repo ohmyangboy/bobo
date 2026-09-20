@@ -64,6 +64,11 @@ nav{grid-column:3;justify-self:end}
 .top-links button:hover{background:var(--hover);color:var(--text)}
 .top-links .sf{width:15px;height:15px}
 .top-links #appVersion.has-update{color:var(--accent);border-color:var(--line);background:var(--hover)}
+/* 版本按钮兼作更新入口：检查 / 下载中显示进度（is-busy），已就绪时呼吸提示（is-ready），失败变红（is-error）。 */
+.top-links #appVersion.is-busy{color:var(--accent);border-color:var(--line);background:var(--hover)}
+.top-links #appVersion.is-ready{color:#fff;background:var(--accent);border-color:transparent;animation:versionPulse 1.6s ease-in-out infinite}
+.top-links #appVersion.is-error{color:var(--danger)}
+@keyframes versionPulse{0%,100%{opacity:1}50%{opacity:.7}}
 
 /* SF Symbols 图标（内联 SVG 精灵，见 index.html 顶部的 .sf-sprite）：用 currentColor 描边，跟随文字颜色与深浅色自动适配。 */
 .sf-sprite{position:absolute;width:0;height:0;overflow:hidden}
@@ -441,4 +446,4 @@ body[data-view=usage] #usageRefresh,body[data-view=device] #deviceRefresh{displa
 
 @media(max-width:900px){.library{width:220px}.agent-items{width:230px}.files{width:150px}.editor-foot span:last-child{display:none}}
 @media(max-width:760px){header{gap:8px}.glass-group button{padding:4px 8px;font-size:12px}.library{width:190px}}
-@media(prefers-reduced-motion:reduce){*{transition:none!important}.is-loading .summary-spark{animation:none}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}.is-loading .summary-spark{animation:none}.top-links #appVersion.is-ready{animation:none}}

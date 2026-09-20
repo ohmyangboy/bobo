@@ -62,7 +62,10 @@ test('定位 App 与读 plist：只认 .app 路径段',()=>{
 test('重启脚本：退出应用、等端口释放、替换并回滚',()=>{
  const script=relaunchScript();
  assert.match(script,/^#!\/bin\/sh/);
+ assert.match(script,/APP_PID="\$5"/);
  assert.match(script,/osascript -e 'tell application id "local\.bobo\.app" to quit'/);
+ assert.match(script,/kill -TERM "\$APP_PID"/);
+ assert.match(script,/kill -9 "\$APP_PID"/);
  assert.match(script,/lsof -nP -iTCP:4318 -sTCP:LISTEN/);
  assert.match(script,/xattr -cr "\$STAGED"/);
  assert.match(script,/mv "\$STAGED" "\$TARGET"/);
@@ -115,6 +118,7 @@ test('检查到安装全流程：下载校验、解压暂存、生成重启脚�
    appDir,
    path.join(home,'.bobo/updates/staged/bobo.app'),
    path.join(home,'.bobo/updates'),
+   String(process.ppid),
   ]);
   assert.equal(spawned[0].opts.detached,true);
   const script=await fs.readFile(spawned[0].args[0],'utf8');
@@ -143,6 +147,32 @@ test('更新包签名校验：不是预期开发者或签名无效时拒绝安�
    assert.match(state.message,/签名/);
   }finally{await fs.rm(home,{recursive:true,force:true});}
  }
+});
+
+test('重启安装前校验暂存包：已被清理时拒绝并给出可重试状态',async()=>{
+ const home=await fs.mkdtemp(path.join(os.tmpdir(),'bobo-update-'));
+ try{
+  const zip=Buffer.alloc(1024*1024+16,3);
+  const sha=createHash('sha256').update(zip).digest('hex');
+  const release={tag_name:'v'+nextVersion,html_url:repoUrl+'/releases/tag/v'+nextVersion,body:'',draft:false,prerelease:false,
+   assets:[{name:'bobo.app.zip',browser_download_url:'https://example.com/bobo.app.zip',digest:'sha256:'+sha,size:zip.length}]};
+  const fetchImpl=async url=>String(url).includes('/releases/latest')
+   ?{status:200,ok:true,json:async()=>release}
+   :{status:200,ok:true,body:(async function*(){yield zip;})()};
+  const appDir=path.join(home,'Applications/bobo.app');
+  const spawned=[];
+  const update=createUpdate({home,fetchImpl,exec:makeExec(),spawnImpl:(file,args,opts)=>{spawned.push({file,args,opts});return {unref(){}};},argv1:path.join(appDir,'Contents/Resources/src/server.mjs')});
+  await update.load();
+  await update.check();
+  for(let i=0;i<300&&update.snapshot().state.kind!=='ready';i++)await new Promise(r=>setTimeout(r,10));
+  assert.equal(update.snapshot().state.kind,'ready');
+  // 模拟系统清理掉暂存目录后再点重启：应拒绝安装并给出可重试的失败状态，而不是卡在「正在重启」。
+  await fs.rm(path.join(home,'.bobo/updates/staged'),{recursive:true,force:true});
+  await assert.rejects(update.install(),/更新包已不存在/);
+  assert.equal(spawned.length,0);
+  assert.equal(update.snapshot().state.kind,'failed');
+  assert.match(update.snapshot().state.message,/更新包已不存在/);
+ }finally{await fs.rm(home,{recursive:true,force:true});}
 });
 
 test('断点恢复：重启后暂存仍在且版本更新时直接标记可安装',async()=>{
