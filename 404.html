@@ -1,0 +1,189 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="strict-origin-when-cross-origin"><meta name="theme-color" content="#D97757"><link rel="icon" href="/bobo/assets/paper-blog-favicon.png"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous"><title>Not found | Paper Blog</title><style>
+:root {
+  --primary: #D97757;
+  --bg: #ffffff;
+  --text: #111827;
+  --subtext: #6b7280;
+  --link: #111827;
+  --link-underline: #374151;
+  --border: #e5e7eb;
+  --code-bg: #f9fafb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #09090b;
+    --text: #e4e4e7;
+    --subtext: #71717a;
+    --link: #e4e4e7;
+    --link-underline: #d1d5db;
+    --border: #27272a;
+    --code-bg: #18181b;
+  }
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background-color: var(--bg);
+  color: var(--text);
+  line-height: 1.7;
+  letter-spacing: 0.02em;
+  padding: 4rem 2rem;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  -webkit-font-smoothing: antialiased;
+}
+.container { flex: 1; max-width: 60ch; margin: 0 auto; width: 100%; }
+header { margin-bottom: 2.25rem; }
+h1 { font-size: 1.5rem; font-weight: 500; letter-spacing: -0.02em; margin-bottom: 1.25rem; color: var(--text); line-height: 1.3; position: relative; }
+h2 { font-size: 0.875rem; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; margin-top: 2.25rem; margin-bottom: 1rem; color: var(--subtext); }
+h3 { font-size: 1.1rem; font-weight: 500; margin-top: 1.75rem; margin-bottom: 0.75rem; color: var(--text); }
+p { margin-top: 1.25rem; margin-bottom: 1.25rem; color: var(--text); }
+a { color: var(--text); cursor: pointer; text-decoration: underline; text-decoration-color: var(--link-underline); text-underline-offset: 3px; transition: color 0.15s ease, text-decoration-color 0.15s ease; }
+a:hover { color: var(--primary); text-decoration-color: var(--primary); }
+ul, ol { margin-left: 1.25rem; margin-top: 1rem; margin-bottom: 1.25rem; }
+li { margin-bottom: 0.4rem; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 0.875em; padding: 0.2em 0.4em; border-radius: 4px; background-color: var(--code-bg); }
+pre { background-color: var(--code-bg); padding: 1rem; border-radius: 6px; overflow-x: auto; margin-top: 1.25rem; margin-bottom: 1.25rem; border: 1px solid var(--border); }
+pre code { padding: 0; background-color: transparent; }
+blockquote { border-left: 2px solid var(--primary); padding-left: 1rem; color: var(--subtext); font-style: italic; margin-top: 1.25rem; margin-bottom: 1.25rem; }
+.post-list { display: flex; flex-direction: column; gap: 0.6rem; }
+.post-item { display: flex; justify-content: space-between; align-items: baseline; }
+.post-title { font-weight: 500; text-decoration: none; }
+.post-item .post-date { font-size: 0.875rem; color: var(--subtext); font-variant-numeric: tabular-nums; margin-left: 1rem; }
+.post-date { font-size: 0.875rem; color: var(--subtext); font-variant-numeric: tabular-nums; }
+.writing-header { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+footer { margin-top: 4rem; text-align: center; }
+.footer-brand { font-family: Georgia, Cambria, Baskerville, "Times New Roman", serif; font-style: italic; font-size: 0.725rem; letter-spacing: 0.04em; color: var(--text); text-decoration: none; opacity: 0.12; transition: opacity 0.2s ease, color 0.2s ease; }
+.footer-brand:hover { opacity: 0.5; color: var(--primary); }
+.back-icon { position: absolute; left: -2rem; top: 0.41rem; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; color: var(--subtext); text-decoration: none; }
+.back-icon:hover { color: var(--primary); }
+
+/* Markdown Profile additions: syntax support without changing the site shell. */
+.markdown { font-size: 1rem; line-height: 1.5; }
+.markdown > * + * { margin-top: 1.25rem; }
+.markdown > .markdown-blank-line { height: 1.5em; margin-top: 0; }
+.markdown > .markdown-blank-line + * { margin-top: 0; }
+.markdown h1, .markdown h2, .markdown h3, .markdown h4, .markdown h5, .markdown h6 { font-weight: 650; line-height: 1.35; letter-spacing: -0.02em; color: var(--text); text-transform: none; }
+.markdown h1 { font-size: 1.75rem; margin-top: 2.5rem; }
+.markdown h2 { font-size: 1.375rem; margin-top: 2.75rem; }
+.markdown h3 { font-size: 1.125rem; margin-top: 2rem; }
+.markdown h4 { font-size: 1rem; font-weight: 600; }
+.markdown h1:first-child, .markdown h2:first-child, .markdown h3:first-child, .markdown h4:first-child { margin-top: 0; }
+.markdown p { margin: 0; }
+.markdown strong { font-weight: 650; }
+.markdown ul, .markdown ol { margin-top: 0; margin-bottom: 0; padding-left: 0.25rem; }
+.markdown li { margin: 0.25rem 0; }
+.markdown li > p { margin: 0; }
+.markdown li > ul, .markdown li > ol { margin-top: 0.25rem; }
+.markdown a { text-underline-offset: 0.2em; text-decoration-thickness: 1px; }
+.markdown pre { position: relative; margin: 0; font-size: 0.875em; line-height: 1.7; }
+.markdown pre code { display: block; padding: 0; background-color: transparent; font-size: inherit; }
+.markdown blockquote { margin: 0; }
+.markdown blockquote blockquote { border-left-color: var(--border); }
+.markdown table { width: 100%; border-collapse: collapse; border: 1px solid var(--border); font-size: 0.875rem; }
+.markdown th, .markdown td { border: 1px solid var(--border); padding: 0.5rem 0.75rem; text-align: left; vertical-align: top; }
+.markdown th { background-color: var(--code-bg); font-weight: 600; color: var(--text); }
+.markdown tbody tr:nth-child(even) td { background-color: var(--code-bg); }
+.markdown hr { border: 0; border-top: 1px solid var(--border); margin: 2.5rem 0; }
+.markdown :not(pre) > code { white-space: nowrap; }
+.markdown img { display: block; max-width: 100%; height: auto; margin-inline: auto; border: 1px solid var(--border); border-radius: 8px; cursor: zoom-in; }
+.markdown img[data-align="left"], .markdown img.align-left { margin-left: 0; margin-right: auto; }
+.markdown img[data-align="right"], .markdown img.align-right { margin-left: auto; margin-right: 0; }
+.markdown img[data-align="center"], .markdown img.align-center { margin-inline: auto; }
+.markdown .missing-image { display: inline-block; padding: 0.5rem 0.75rem; border: 1px dashed var(--border); border-radius: 6px; color: var(--subtext); background: var(--code-bg); font-size: 0.875rem; }
+.markdown .image-group { display: flex; flex-direction: row; flex-wrap: wrap; justify-content: center; align-items: center; gap: 1rem; width: 120%; max-width: 120%; margin-left: -10%; margin-right: -10%; margin-top: 1.5rem; margin-bottom: 1.5rem; box-sizing: border-box; }
+.markdown .image-group img { display: block; max-width: 100%; height: auto; margin: 0; flex: 0 1 auto; }
+.markdown .image-group img:not([width]) { flex: 1 1 0; min-width: min(200px, 100%); max-width: 100%; }
+.markdown .image-group a { display: inline-flex; justify-content: center; align-items: center; text-decoration: none; }
+.markdown .image-group a img { margin: 0; }
+.markdown .image-group .missing-image { margin: 0; flex: 0 1 auto; }
+.image-lightbox { width: 100vw; max-width: none; height: 100vh; max-height: none; padding: 3rem; border: 0; background: transparent; overflow: hidden; }
+.image-lightbox::backdrop { background: rgba(0, 0, 0, 0.82); backdrop-filter: blur(6px); }
+.image-lightbox img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.image-lightbox-close { position: fixed; top: 1rem; right: 1rem; width: 2.5rem; height: 2.5rem; border: 0; border-radius: 999px; background: rgba(0, 0, 0, 0.62); color: white; font-size: 1.5rem; line-height: 1; cursor: pointer; }
+.task-list-item { list-style: none; margin-left: -1.25rem; }
+.task-list-item input { margin-right: 0.4rem; accent-color: var(--primary); }
+.math-block { overflow-x: auto; overflow-y: hidden; text-align: center; margin: 1.5rem 0; padding: 0.5rem 0; }
+.katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.5rem 0; margin: 1.5rem 0 !important; }
+.math-inline { font-family: inherit; }
+@media (max-width: 640px) { body { padding: 2.5rem 1.5rem; } .post-item { align-items: flex-start; gap: 0.5rem; } .back-icon { left: -1.5rem; } .markdown .image-group { width: 100%; max-width: 100%; margin-left: 0; margin-right: 0; gap: 0.75rem; } }
+@media (min-width: 48rem) { .home-container { margin-top: 4rem; } }
+
+pre { line-height: 125%; }
+td.linenos .normal { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+span.linenos { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+td.linenos .special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+.syntax-highlight .hll { background-color: #ffffcc }
+.syntax-highlight { background: #f8f8f8; }
+.syntax-highlight .c { color: #3D7B7B; font-style: italic } /* Comment */
+.syntax-highlight .err { border: 1px solid #F00 } /* Error */
+.syntax-highlight .k { color: #008000; font-weight: bold } /* Keyword */
+.syntax-highlight .o { color: #666 } /* Operator */
+.syntax-highlight .ch { color: #3D7B7B; font-style: italic } /* Comment.Hashbang */
+.syntax-highlight .cm { color: #3D7B7B; font-style: italic } /* Comment.Multiline */
+.syntax-highlight .cp { color: #9C6500 } /* Comment.Preproc */
+.syntax-highlight .cpf { color: #3D7B7B; font-style: italic } /* Comment.PreprocFile */
+.syntax-highlight .c1 { color: #3D7B7B; font-style: italic } /* Comment.Single */
+.syntax-highlight .cs { color: #3D7B7B; font-style: italic } /* Comment.Special */
+.syntax-highlight .gd { color: #A00000 } /* Generic.Deleted */
+.syntax-highlight .ge { font-style: italic } /* Generic.Emph */
+.syntax-highlight .ges { font-weight: bold; font-style: italic } /* Generic.EmphStrong */
+.syntax-highlight .gr { color: #E40000 } /* Generic.Error */
+.syntax-highlight .gh { color: #000080; font-weight: bold } /* Generic.Heading */
+.syntax-highlight .gi { color: #008400 } /* Generic.Inserted */
+.syntax-highlight .go { color: #717171 } /* Generic.Output */
+.syntax-highlight .gp { color: #000080; font-weight: bold } /* Generic.Prompt */
+.syntax-highlight .gs { font-weight: bold } /* Generic.Strong */
+.syntax-highlight .gu { color: #800080; font-weight: bold } /* Generic.Subheading */
+.syntax-highlight .gt { color: #04D } /* Generic.Traceback */
+.syntax-highlight .kc { color: #008000; font-weight: bold } /* Keyword.Constant */
+.syntax-highlight .kd { color: #008000; font-weight: bold } /* Keyword.Declaration */
+.syntax-highlight .kn { color: #008000; font-weight: bold } /* Keyword.Namespace */
+.syntax-highlight .kp { color: #008000 } /* Keyword.Pseudo */
+.syntax-highlight .kr { color: #008000; font-weight: bold } /* Keyword.Reserved */
+.syntax-highlight .kt { color: #B00040 } /* Keyword.Type */
+.syntax-highlight .m { color: #666 } /* Literal.Number */
+.syntax-highlight .s { color: #BA2121 } /* Literal.String */
+.syntax-highlight .na { color: #687822 } /* Name.Attribute */
+.syntax-highlight .nb { color: #008000 } /* Name.Builtin */
+.syntax-highlight .nc { color: #00F; font-weight: bold } /* Name.Class */
+.syntax-highlight .no { color: #800 } /* Name.Constant */
+.syntax-highlight .nd { color: #A2F } /* Name.Decorator */
+.syntax-highlight .ni { color: #717171; font-weight: bold } /* Name.Entity */
+.syntax-highlight .ne { color: #CB3F38; font-weight: bold } /* Name.Exception */
+.syntax-highlight .nf { color: #00F } /* Name.Function */
+.syntax-highlight .nl { color: #767600 } /* Name.Label */
+.syntax-highlight .nn { color: #00F; font-weight: bold } /* Name.Namespace */
+.syntax-highlight .nt { color: #008000; font-weight: bold } /* Name.Tag */
+.syntax-highlight .nv { color: #19177C } /* Name.Variable */
+.syntax-highlight .ow { color: #A2F; font-weight: bold } /* Operator.Word */
+.syntax-highlight .w { color: #BBB } /* Text.Whitespace */
+.syntax-highlight .mb { color: #666 } /* Literal.Number.Bin */
+.syntax-highlight .mf { color: #666 } /* Literal.Number.Float */
+.syntax-highlight .mh { color: #666 } /* Literal.Number.Hex */
+.syntax-highlight .mi { color: #666 } /* Literal.Number.Integer */
+.syntax-highlight .mo { color: #666 } /* Literal.Number.Oct */
+.syntax-highlight .sa { color: #BA2121 } /* Literal.String.Affix */
+.syntax-highlight .sb { color: #BA2121 } /* Literal.String.Backtick */
+.syntax-highlight .sc { color: #BA2121 } /* Literal.String.Char */
+.syntax-highlight .dl { color: #BA2121 } /* Literal.String.Delimiter */
+.syntax-highlight .sd { color: #BA2121; font-style: italic } /* Literal.String.Doc */
+.syntax-highlight .s2 { color: #BA2121 } /* Literal.String.Double */
+.syntax-highlight .se { color: #AA5D1F; font-weight: bold } /* Literal.String.Escape */
+.syntax-highlight .sh { color: #BA2121 } /* Literal.String.Heredoc */
+.syntax-highlight .si { color: #A45A77; font-weight: bold } /* Literal.String.Interpol */
+.syntax-highlight .sx { color: #008000 } /* Literal.String.Other */
+.syntax-highlight .sr { color: #A45A77 } /* Literal.String.Regex */
+.syntax-highlight .s1 { color: #BA2121 } /* Literal.String.Single */
+.syntax-highlight .ss { color: #19177C } /* Literal.String.Symbol */
+.syntax-highlight .bp { color: #008000 } /* Name.Builtin.Pseudo */
+.syntax-highlight .fm { color: #00F } /* Name.Function.Magic */
+.syntax-highlight .vc { color: #19177C } /* Name.Variable.Class */
+.syntax-highlight .vg { color: #19177C } /* Name.Variable.Global */
+.syntax-highlight .vi { color: #19177C } /* Name.Variable.Instance */
+.syntax-highlight .vm { color: #19177C } /* Name.Variable.Magic */
+.syntax-highlight .il { color: #666 } /* Literal.Number.Integer.Long */
+.syntax-highlight { background: transparent !important; }</style></head><body><div class="container"><main><h1>Not found</h1></main></div><footer><a href="https://ohmyangboy.github.io/paper-blog/" target="_blank" rel="noopener noreferrer" class="footer-brand">Paper Blog</a></footer><dialog class="image-lightbox" aria-label="图片大图预览"><button class="image-lightbox-close" type="button" aria-label="关闭大图">×</button><img alt=""></dialog><script>(()=>{const d=document.querySelector('.image-lightbox');const v=d.querySelector('img');document.addEventListener('click',e=>{const i=e.target.closest?.('.markdown img');if(!i||i.closest('a'))return;const s=i.currentSrc||i.src;if(typeof d.showModal!=='function'){window.open(s,'_blank','noopener');return}v.src=s;v.alt=i.alt||'';d.showModal()});d.querySelector('.image-lightbox-close').addEventListener('click',()=>d.close());d.addEventListener('click',e=>{if(e.target===d)d.close()});d.addEventListener('close',()=>{v.removeAttribute('src')})})();</script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false},{left:'\\[',right:'\\]',display:true}],throwOnError:false});"></script></body></html>
