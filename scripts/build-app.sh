@@ -68,7 +68,17 @@ PLIST
 
 if [[ -n "$identity" ]]; then
   # Developer ID 签名：硬化运行时 + 安全时间戳（Apple 公证的前置条件）。
-  codesign --force --options runtime --timestamp --sign "$identity" "$app_dir"
+  # 时间戳服务偶发不可用（"The timestamp service is not available"），重试几次再放弃。
+  signed=false
+  for attempt in 1 2 3 4 5; do
+    if codesign --force --options runtime --timestamp --sign "$identity" "$app_dir"; then signed=true; break; fi
+    echo "codesign 第 $attempt 次失败，1.5 秒后重试…" >&2
+    sleep 1.5
+  done
+  if [[ "$signed" != true ]]; then
+    echo "签名失败：时间戳服务不可用或证书不可用" >&2
+    exit 1
+  fi
   echo "签名：$identity"
 else
   echo "警告：未找到 Developer ID Application 证书，使用 ad-hoc 签名（仅本机可用，无法公证）" >&2
