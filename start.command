@@ -10,4 +10,4 @@ if ! command -v node >/dev/null 2>&1; then
   read '?按回车退出'
   exit 1
 fi
-node server.mjs --open
+node src/server.mjs --open

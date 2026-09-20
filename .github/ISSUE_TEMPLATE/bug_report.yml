@@ -1,0 +1,58 @@
+name: Bug 反馈
+description: 报告一个可复现的问题
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！提交前请先确认问题能在最新版本上复现（设置 → 关于 → 检查更新）。
+  - type: input
+    id: version
+    attributes:
+      label: bobo 版本
+      description: 「设置 → 关于」里的版本号（例如 v1.2.0 Build 12）
+      placeholder: v1.2.0 Build 12
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS 版本与机型
+      placeholder: macOS 15.6 · MacBook Pro (M3)
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 涉及的功能
+      multiple: true
+      options:
+        - 通知岛
+        - 额度
+        - 设备
+        - 技能
+        - 智能体 / 全局配置
+        - AI 翻译与总结
+        - 应用内更新
+        - 其它
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 做了什么、期望看到什么、实际看到什么；能稳定复现的步骤最有用
+      placeholder: |
+        1. 打开……
+        2. 点击……
+        3. 看到……
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 截图或日志
+      description: |
+        截图可以直接拖进来；日志在 `~/.bobo/app.log`（更新相关还有 `~/.bobo/updates/relaunch.log`），请先检查有没有敏感信息。
+    validations:
+      required: false

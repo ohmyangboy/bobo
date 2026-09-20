@@ -1,0 +1,10 @@
+<svg width="100" height="100" viewBox="4 4 92 92" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Claude（Anthropic）的星形标记 ✳：四根等宽辐条按 45° 交叉成八芒，与 Claude Code 的终端标题前缀同形。
+       白色是运行时模板染色的底，原生按模板图渲染成白色。 -->
+  <g fill="#FFFFFF">
+    <rect x="45" y="6" width="10" height="88" rx="5"/>
+    <rect x="6" y="45" width="88" height="10" rx="5"/>
+    <rect x="45" y="6" width="10" height="88" rx="5" transform="rotate(45 50 50)"/>
+    <rect x="45" y="6" width="10" height="88" rx="5" transform="rotate(-45 50 50)"/>
+  </g>
+</svg>

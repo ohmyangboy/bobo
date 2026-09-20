@@ -1,1 +1,26 @@
-{"name":"bobo","private":true,"type":"module","scripts":{"start":"node server.mjs","test":"node --test test.mjs ai.test.mjs reader.test.mjs streaming.test.mjs sources.test.mjs agents.test.mjs codex-agents.test.mjs opencode.test.mjs codex.test.mjs otty.test.mjs usage.test.mjs"},"engines":{"node":">=22"}}
+{
+  "name": "bobo",
+  "version": "1.2.0",
+  "private": true,
+  "type": "module",
+  "description": "本地技能与 Agent 管理界面：通知岛、额度、系统状态与技能管理",
+  "license": "MIT",
+  "author": "ohmyangboy",
+  "homepage": "https://github.com/ohmyangboy/bobo",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ohmyangboy/bobo.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ohmyangboy/bobo/issues"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "build:app": "bash scripts/build-app.sh",
+    "package": "node scripts/package-release.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+      - name: 打包 bobo.app.zip
+        run: node scripts/package-release.mjs
+        env:
+          BOBO_BUILD: ${{ github.run_number }}
+      - name: 创建 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/bobo.app.zip dist/bobo.app.zip.sha256 \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

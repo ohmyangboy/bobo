@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/remote-schema.json",
+  "identifier": "remote-bobo",
+  "description": "本地服务页面（127.0.0.1:4318）可用的受限能力：窗口拖动/尺寸、事件、文件夹选择器。不给文件系统与应用控制权限。",
+  "windows": ["main", "island"],
+  "remote": {
+    "urls": ["http://127.0.0.1:4318/*", "http://localhost:4318/*"]
+  },
+  "permissions": [
+    "core:event:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:window:allow-inner-size",
+    "core:window:allow-scale-factor",
+    "dialog:default"
+  ]
+}

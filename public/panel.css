@@ -1,0 +1,18 @@
+/* 通知岛面板：窗口是透明的，这里只画顶部齐平、底部圆角的胶囊（与 Swift 版的 IslandShape 对齐）。
+   宽度由内容决定，面板 JS 测出来回报给 Rust 调整窗口尺寸（见 panel.js 的 fit）。 */
+html,body{margin:0;padding:0;height:100%;background:transparent;overflow:hidden}
+#island{
+ display:inline-flex;align-items:center;gap:5px;
+ box-sizing:border-box;padding:0 12px;height:100%;
+ white-space:nowrap;
+ background:rgba(28,28,30,.92);color:#fff;
+ font:12px/1 -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;
+ border-radius:0 0 12px 12px;
+ user-select:none;-webkit-user-select:none;
+}
+#island.expanded{border-radius:0 0 22px 22px}
+#hint{opacity:.6}
+#avatars{display:flex;gap:3px}
+.avatar{width:19px;height:19px;border-radius:6px;display:grid;place-items:center;font-size:11px;font-weight:600;color:#fff}
+.chip{display:inline-flex;align-items:center;height:19px;padding:0 6px;border-radius:10px;background:rgba(255,255,255,.12);font-variant-numeric:tabular-nums}
+.hidden{display:none}

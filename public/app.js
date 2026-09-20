@@ -146,8 +146,8 @@ function renderFolder(){
  }
  if(!rows.length){const p=document.createElement('p');p.textContent='此文件夹下没有技能';p.className='muted';$('#folderSkills').append(p);}
 }
-async function refresh(force=false,initial=false){try{const snapshot=initial?await api('startup'):null;skills=snapshot?snapshot.skills:await api('skills'+(force?'?refresh=1':''));try{mineRoots=await api('sources/roots');}catch{}$('#syncMine').hidden=!mineRoots.length;if(snapshot?.cached)setTimeout(()=>guard(()=>refresh(true))(),0);render();if(selected&&!skills.some(s=>s.id===selected.id)){selected=null;current=null;if(!(folder&&!$('#folder').hidden)){$('#detail').hidden=true;$('#empty').hidden=false;}}else if(selected){selected=skills.find(s=>s.id===selected.id);}if(folder&&!$('#folder').hidden)renderFolder();}catch(e){$('#count').textContent='加载失败';throw e;}}
-async function choose(s){if(!leave())return;const run=++selectionRun;selected=s;folder=skillGroup(s).key;showDetailView();markFolder(folder);$('#backToFolder').hidden=false;$('#backToFolder').textContent='← 返回 '+folderInfo().label;$('#reader').scrollTop=0;groupState.set(folder,true);current=null;$('#name').textContent=s.name;$('#origin').textContent=s.mine?('我的技能 · '+(s.mine.repo||'未同步 GitHub')):(s.source||'本地技能');$('#description').textContent=s.description||'此技能暂未提供描述。';$('#location').textContent=s.mine?s.mine.root+'（'+linkLabel(s)+'）':s.path;$('#agents').textContent=s.mine?linkLabel(s):'Agent：'+s.agents.join('、');$('#updateOne').disabled=!s.source||!!s.mine;const address=addressOf(s);$('#sourceLink').hidden=!address;$('#sourceLink').textContent=address.includes('github.com')?'GitHub':'来源';readerData=null;readerSkill=s.id;readerFile=null;bilingual=false;summaryExpanded=false;$('#summaryStatus').hidden=true;setView('read');render();try{const files=await api('tree?id='+s.id);if(run!==selectionRun)return;renderTree(files,true);}catch(e){if(run!==selectionRun)return;renderTree([],true,e.message);}await openFile('SKILL.md',true);}
+async function refresh(force=false,initial=false){try{const snapshot=initial?await api('startup'):null;skills=snapshot?snapshot.skills:await api('skills'+(force?'?refresh=1':''));try{mineRoots=await api('sources/roots');}catch{}if(snapshot?.cached)setTimeout(()=>guard(()=>refresh(true))(),0);render();if(selected&&!skills.some(s=>s.id===selected.id)){selected=null;current=null;if(!(folder&&!$('#folder').hidden)){$('#detail').hidden=true;$('#empty').hidden=false;}}else if(selected){selected=skills.find(s=>s.id===selected.id);}if(folder&&!$('#folder').hidden)renderFolder();}catch(e){$('#count').textContent='加载失败';throw e;}}
+async function choose(s){if(!leave())return;const run=++selectionRun;selected=s;folder=skillGroup(s).key;showDetailView();markFolder(folder);$('#backToFolder').hidden=false;$('#backToFolder').textContent='← 返回 '+folderInfo().label;$('#reader').scrollTop=0;groupState.set(folder,true);current=null;$('#name').textContent=s.name;$('#originText').textContent=s.mine?('我的技能 · '+(s.mine.repo||'未同步 GitHub')):(s.source||'本地技能');$('#description').textContent=s.description||'此技能暂未提供描述。';$('#location').textContent=s.mine?s.mine.root+'（'+linkLabel(s)+'）':s.path;$('#agents').textContent=s.mine?linkLabel(s):'Agent：'+s.agents.join('、');$('#updateOne').disabled=!s.source||!!s.mine;const address=addressOf(s);$('#sourceLink').hidden=!address;$('#sourceLink').textContent=address.includes('github.com')?'在 GitHub 打开 ↗':'打开来源 ↗';readerData=null;readerSkill=s.id;readerFile=null;bilingual=false;summaryExpanded=false;$('#summaryStatus').hidden=true;setView('read');render();try{const files=await api('tree?id='+s.id);if(run!==selectionRun)return;renderTree(files,true);}catch(e){if(run!==selectionRun)return;renderTree([],true,e.message);}await openFile('SKILL.md',true);}
 // 文件树：把平铺路径还原成目录层级，文件夹行可点击展开/折叠。默认全部收起，只自动展开当前文件所在的目录。
 const openDirs=new Set();
 function buildTree(files){
@@ -211,14 +211,14 @@ $('#folderRemove').onclick=guard(async()=>{
  if(!confirm('确定删除「'+folderInfo().label+'」下的全部 '+rows.length+' 个技能？此操作直接删除、不进行备份。\n\n'+rows.map(s=>s.name).join('、')))return;
  await execute(['remove',...rows.map(s=>s.name),'-g'],folder);
 });
-// 命令行面板：默认收起，右下角的小凸起按钮点击展开或折叠。
-// 由按钮/命令自动拉起的（auto）在结束后自动收起；用户手动拉起的保持展开，不自动收起。
+// 任务输出抽屉：默认收起，右下角的小凸起按钮点击展开或折叠；只读，不能再输入命令。
+// 由按钮操作自动拉起的（auto）在结束后自动收起；用户手动拉起的保持展开，不自动收起。
 let consoleTimer,consoleAuto=false,consoleSuppressClose=false;
-function setConsole(open,auto=false){clearTimeout(consoleTimer);consoleAuto=open&&auto;$('#console').classList.toggle('open',open);const h=$('#consoleHandle');h.setAttribute('aria-expanded',String(open));h.textContent=(open?'⌄':'⌃')+' 命令行';}
-// 命令触发时展开：已经在展开状态（多为用户手动打开）就不改动，避免把手动面板变成自动收起。
+function setConsole(open,auto=false){clearTimeout(consoleTimer);consoleAuto=open&&auto;$('#console').classList.toggle('open',open);const h=$('#consoleHandle');h.setAttribute('aria-expanded',String(open));h.textContent=(open?'⌄':'⌃')+' 任务输出';}
+// 操作触发时展开：已经在展开状态（多为用户手动打开）就不改动，避免把手动抽屉变成自动收起。
 // 同时忽略「触发本次打开的那一下点击」，免得它顺着冒泡被下面的外部点击监听立刻收掉。
 function showConsole(){consoleSuppressClose=true;setTimeout(()=>{consoleSuppressClose=false;},0);if(!$('#console').classList.contains('open'))setConsole(true,true);}
-$('#consoleHandle').onclick=()=>{const open=$('#console').classList.contains('open');setConsole(!open);if(!open)$('#command').focus();};$('#closeConsole').onclick=()=>setConsole(false);
+$('#consoleHandle').onclick=()=>setConsole(!$('#console').classList.contains('open'));$('#closeConsole').onclick=()=>setConsole(false);
 // 点击面板和右下角开关以外的任意地方收起面板。
 document.addEventListener('click',e=>{if(consoleSuppressClose||!$('#console').classList.contains('open'))return;if(e.target.closest?.('#console')||e.target.closest?.('#consoleHandle'))return;setConsole(false);});
 // 「更多」菜单：选中任一项、点击面板以外或按 Esc 都收起。
@@ -227,12 +227,9 @@ function closeMenus(except){for(const m of document.querySelectorAll('details.me
 for(const m of document.querySelectorAll('details.menu'))m.addEventListener('click',e=>{if(e.target.closest('.menu-panel button'))closeMenus();});
 document.addEventListener('click',e=>closeMenus(e.target.closest?.('details.menu')));
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeMenus();});
-function parse(text){const out=[];let word='',quote=null,active=false;for(const c of text.trim()){if(quote){if(c===quote)quote=null;else word+=c;active=true;}else if(c==='"'||c==="'"){quote=c;active=true;}else if(/\s/.test(c)){if(active){out.push(word);word='';active=false;}}else{word+=c;active=true;}}if(quote)throw Error('引号未闭合');if(active)out.push(word);return out;}
-function busyUI(value){loading=value;for(const id of ['run','updateAll','updateOne','remove','submitAdd','folderRemove','folderUpdate','folderFinder','folderRefresh','folderRelink','folderSync','folderNew'])$('#'+id).disabled=value;}
-async function execute(args,group){if(loading)throw Error('请等待当前命令完成');if(!leave())return;showConsole();$('#command').value=args.join(' ');await api('command',{args,group});busyUI(true);await poll();}
-async function poll(){try{const j=await api('job');if(!j)return;$('#output').textContent=j.output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'');$('#output').scrollTop=$('#output').scrollHeight;$('#jobStatus').textContent=j.running?'运行中…':j.code===0?'完成':'失败 · 退出码 '+j.code;busyUI(j.running);if(j.running)setTimeout(poll,650);else{await refresh(true);if(selected&&!dirty())await choose(selected);toast(j.code===0?'命令执行完成':'命令失败，请查看输出');if(consoleAuto)consoleTimer=setTimeout(()=>setConsole(false),2000);}}catch(e){busyUI(false);toast(e.message);}}
-$('#commandForm').onsubmit=guard(async e=>{e.preventDefault();const args=parse($('#command').value);const verb=args.filter(a=>!['npx','skills'].includes(a))[0];if(verb==='remove'&&!confirm('执行此命令？将直接删除技能，不进行备份。\n\n'+args.join(' ')))return;if(['update','add'].includes(verb)&&!confirm('执行此命令？修改前将备份当前技能。\n\n'+args.join(' ')))return;await execute(args);});
-$('#updateAll').onclick=guard(()=>{if(confirm('更新所有全局技能？本地修改会先备份。'))return execute(['update','-g']);});
+function busyUI(value){loading=value;for(const id of ['updateOne','remove','submitAdd','folderRemove','folderUpdate','folderFinder','folderRefresh','folderRelink','folderSync','folderNew'])$('#'+id).disabled=value;}
+async function execute(args,group){if(loading)throw Error('请等待当前操作完成');if(!leave())return;showConsole();await api('command',{args,group});busyUI(true);await poll();}
+async function poll(){try{const j=await api('job');if(!j)return;$('#output').textContent=j.output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'');$('#output').scrollTop=$('#output').scrollHeight;$('#jobStatus').textContent=j.running?'运行中…':j.code===0?'完成':'失败';busyUI(j.running);if(j.running)setTimeout(poll,650);else{await refresh(true);if(selected&&!dirty())await choose(selected);toast(j.code===0?'操作完成':'操作失败，请查看任务输出');if(consoleAuto)consoleTimer=setTimeout(()=>setConsole(false),2000);}}catch(e){busyUI(false);toast(e.message);}}
 $('#updateOne').onclick=guard(()=>{if(confirm('更新 '+selected.name+'？本地修改会先备份。'))return execute(['update',selected.name,'-g']);});
 async function deleteMineSkill(s){
  if(!confirm('确定删除技能 '+s.name+'？源目录与 ~/.agents/skills 里的链接都会被永久删除。\n\n'+s.mine.root))return;
@@ -244,7 +241,7 @@ async function deleteMineSkill(s){
 }
 $('#remove').onclick=guard(()=>{if(selected.mine)return deleteMineSkill(selected);if(confirm('确定直接删除技能 '+selected.name+' 及其全部文件与 Agent 链接？此操作不进行备份。'))return execute(['remove',selected.name,'-g']);});
 $('#add').onclick=()=>$('#addDialog').showModal();$('#cancelAdd').onclick=()=>$('#addDialog').close();
-$('#addMode').onchange=()=>{const mode=$('#addMode').value;$('#skillField').hidden=mode!=='add';$('#addHint').hidden=mode!=='add';$('#package').placeholder=mode==='init'?'my-skill':mode==='find'?'例如 react':'mattpocock/skills@code-review';};
+$('#addMode').onchange=()=>{const mode=$('#addMode').value;$('#skillField').hidden=mode!=='add';$('#addHint').hidden=mode!=='add';$('#package').placeholder=mode==='init'?'my-skill':'mattpocock/skills@code-review';};
 $('#addForm').onsubmit=guard(async e=>{e.preventDefault();const mode=$('#addMode').value,value=$('#package').value.trim();if(!value)return;const args=[mode,value];if(mode==='add'&&$('#skillName').value.trim())args.push('--skill',$('#skillName').value.trim());$('#addDialog').close();await execute(args);});
 $('#newFile').onclick=guard(async()=>{if(!leave())return;const file=prompt('新文件路径，例如 references/notes.md');if(!file)return;await api('file',{id:selected.id,path:file,content:'',create:true});expandDirs(file);renderTree(await api('tree?id='+selected.id));await openFile(file,true);setView('edit');toast('文件已创建');});
 $('#deleteFile').onclick=guard(async()=>{if(!current||!confirm('删除文件 '+current+'？原文件会备份。'))return;await api('file',{id:selected.id,path:current,version,delete:true});current=null;await choose(selected);toast('文件已删除');});
@@ -279,6 +276,72 @@ function showSettingsPane(name){
  for(const b of document.querySelectorAll('#settingsWorkspace [data-settings-pane]'))b.setAttribute('aria-pressed',String(b.dataset.settingsPane===next));
 }
 for(const b of document.querySelectorAll('#settingsWorkspace [data-settings-pane]'))b.onclick=()=>showSettingsPane(b.dataset.settingsPane);
+
+// 关于与更新：应用信息来自 GET /api/app，更新在服务端后台静默下载（见 update.mjs）。
+// 这里只展示状态并触发「重启并更新」；点下去后应用会退出，几秒后以新版本重开。
+let appInfo=null,aboutTimer=null;
+const fallbackRepo='https://github.com/ohmyangboy/bobo';
+async function loadApp(){
+ appInfo=await api('app');
+ renderVersion();renderAbout();
+}
+function renderVersion(){
+ if(!appInfo)return;
+ const state=appInfo.state||{},release=state.release||{};
+ const version='v'+appInfo.version;
+ $('#appVersion').textContent=version;
+ const pending=['available','downloading','ready'].includes(state.kind);
+ $('#appVersion').classList.toggle('has-update',pending);
+ $('#appVersion').title=pending?'新版本 '+release.displayVersion+' 正在准备，点击查看更新详情':'当前版本 '+version;
+}
+function renderAbout(){
+ if(!appInfo)return;
+ const state=appInfo.state||{},release=state.release||{};
+ $('#aboutVersion').textContent='v'+appInfo.version;
+ $('#aboutBuild').textContent=Number(appInfo.build)>0?'Build '+appInfo.build:'';
+ $('#updateHint').textContent=appInfo.canUpdate?'启动后自动检查，发现新版本会在后台下载':'当前以源码运行；应用内更新只在安装版可用，请用 ./update.sh 更新';
+ const messages={idle:'尚未检查',checking:'正在检查…',upToDate:'已是最新版本',available:'发现新版本 '+release.displayVersion,downloading:'正在下载 '+release.displayVersion,ready:release.displayVersion+' 已就绪',installing:'正在重启安装…'};
+ $('#updateStatus').textContent=state.kind==='failed'?(state.message||'检查失败'):(messages[state.kind]||'尚未检查');
+ const percent=Math.round((state.progress||0)*100);
+ $('#updateProgressRow').hidden=state.kind!=='downloading';
+ $('#updateProgress').textContent=percent+'%';
+ const showNotes=Boolean(release.notes)&&['available','downloading','ready'].includes(state.kind);
+ $('#updateNotes').hidden=!showNotes;
+ if(showNotes)$('#updateNotes').textContent=release.notes.split('\n').slice(0,10).join('\n');
+ $('#updateCheck').disabled=!appInfo.canUpdate||['checking','downloading','installing'].includes(state.kind);
+ const install=$('#updateInstall');
+ install.hidden=state.kind!=='ready'&&state.kind!=='installing';
+ install.disabled=state.kind!=='ready';
+ install.textContent=state.kind==='installing'?'正在重启…':(release.displayVersion?'重启并更新 '+release.displayVersion:'重启并更新');
+}
+function openAbout(){loadApp().catch(()=>{});if(!aboutTimer)aboutTimer=setInterval(()=>loadApp().catch(()=>{}),1500);}
+function aboutClose(){if(aboutTimer){clearInterval(aboutTimer);aboutTimer=null;}}
+const openRepo=()=>api('open',{url:appInfo?.repoUrl||fallbackRepo});
+$('#repoLink').onclick=guard(()=>openRepo());
+$('#aboutRepo').onclick=guard(()=>openRepo());
+$('#aboutReleases').onclick=guard(()=>api('open',{url:appInfo?.releasesUrl||(fallbackRepo+'/releases')}));
+$('#aboutIssues').onclick=guard(()=>api('open',{url:(appInfo?.repoUrl||fallbackRepo)+'/issues/new/choose'}));
+$('#appVersion').onclick=guard(async()=>{await switchView('settings');showSettingsPane('about');});
+$('#updateCheck').onclick=guard(async()=>{
+ $('#updateCheck').disabled=true;
+ try{
+  const state=await api('update/check',{});
+  appInfo={...appInfo,...state};
+  renderVersion();renderAbout();
+  const kind=state.state.kind;
+  toast(kind==='upToDate'||kind==='idle'?'已是最新版本':kind==='failed'?(state.state.message||'检查更新失败'):'发现新版本，正在后台下载');
+ }finally{renderAbout();}
+});
+$('#updateInstall').onclick=guard(async()=>{
+ if(!confirm('立即重启并安装新版本？bobo 会退出，几秒后重新打开。'))return;
+ $('#updateInstall').disabled=true;
+ try{
+  const state=await api('update/install',{});
+  appInfo={...appInfo,...state};
+  renderVersion();renderAbout();
+  toast('正在重启安装，几秒后回来');
+ }catch(e){$('#updateInstall').disabled=false;toast(e.message);}
+});
 
 function setView(next){
  view=next;$('#reader').hidden=next!=='read';$('#editor').hidden=next!=='edit';
@@ -431,7 +494,7 @@ async function createMineSkill(rootPath){
  await api('sources/create',{path:rootPath,name});
  await loadMine();await refresh(true);toast('已创建 '+name);
 }
-$('#folderManage').onclick=guard(async()=>{$('#mineStatus').hidden=true;$('#mineDialog').showModal();await loadMine();});
+$('#folderManage').onclick=guard(async()=>{$('#mineStatus').hidden=true;$('#syncMine').disabled=!mineRoots.length;$('#mineDialog').showModal();await loadMine();});
 $('#syncMine').onclick=guard(async()=>{
  if(!mineRoots.length)return;
  if(!confirm('一键同步 '+mineRoots.length+' 个目录？\n\n1. 把目录里已启用的技能链接到 ~/.agents/skills（已停用的保持不变）\n2. 把已连接 GitHub 的目录提交并推送\n\n'+mineRoots.map(r=>r.name||r.path).join('、')))return;
@@ -499,19 +562,28 @@ $('#syncForm').onsubmit=guard(async e=>{
 
 // 智能体：管理 ~/.config/opencode/agents 里的 OpenCode agent 定义（Markdown 文件），与「技能」互相独立。
 // 文件即配置：ID 就是文件名，frontmatter 是配置，正文是系统提示词；保存、重命名、删除前都会备份。
-let agentActive=false,agentItems=[],agentLoaded=false,agentSel=null,agentOriginal='',agentVersion='',agentRun=0,agentProvider='opencode';
-const agentCodex=()=>agentProvider==='codex';
+let agentActive=false,agentItems=[],agentLoaded=false,agentConfigs=null,agentConfigLoaded=false,agentSel=null,agentOriginal='',agentVersion='',agentRun=0,agentProvider='opencode',agentDetailKind='agent',agentFilter='',agentProviders=null;
+const agentMeta=()=>(agentProviders||[]).find(p=>p.id===agentProvider)||null;
+// 来源 meta 的 agents 字段是子智能体定义的后端（opencode / codex / null）：null 表示这个 Agent 只管理全局配置。
+const agentBackend=()=>agentMeta()?.agents||null;
+const agentCodex=()=>agentBackend()==='codex';
+const agentHasDefs=()=>!!agentBackend();
+// 内容区同时展示「全局配置」与「智能体定义」两个区块；agentDetailKind 记录当前详情属于哪一类。
+const agentIsConfig=()=>agentDetailKind==='config';
 const agentRoute=s=>agentCodex()?'codex/agents'+s:'agents'+s;
+const agentConfigRoute=s=>'configs'+s;
 function agentDirty(){return !!(agentSel&&$('#agentEditor').value!==agentOriginal);}
-function agentLeave(){return !agentDirty()||confirm('智能体定义尚未保存，放弃修改？');}
+function agentLeave(){return !agentDirty()||confirm((agentIsConfig()?'配置文件':'智能体定义')+'尚未保存，放弃修改？');}
 function agentDirtyUI(){$('#agentSave').disabled=!agentDirty();$('#agentDirty').textContent=agentDirty()?'未保存':'';}
-// 来源切换：OpenCode（~/.config/opencode/agents/*.md）与 Codex（~/.codex/agents/*.toml）。
+// 来源切换：OpenCode（~/.config/opencode）与 Codex（~/.codex）。对话框与新建按钮随来源变化。
 function refreshAgentChrome(){
  const codex=agentCodex();
+ // 详情里的管理按钮只对智能体定义有意义：全局配置是固定文件，不改名、不删除、不复制 ID。
+ applyAgentDetailChrome();
+ $('#agentNew').hidden=!agentHasDefs();
  $('#agentNew').title=codex?'在 ~/.codex/agents 下新建 Codex 自定义智能体':'在 ~/.config/opencode/agents 下新建智能体定义';
  $('#agentNew').textContent=codex?'＋ 新建 Codex 智能体':'＋ 新建智能体';
- $('#agentSearch').placeholder=codex?'搜索名称、描述、模型…':'搜索名称、描述、模式…';
- $('#agentToggle').hidden=codex;
+ $('#agentSearch').placeholder='搜索智能体与全局配置…';
  $('#agentDialogTitle').textContent=codex?'新建 Codex 智能体':'新建智能体';
  $('#agentDialogHint').textContent=codex?'在 ~/.codex/agents 下创建一个 Codex 自定义智能体（TOML：name / description / developer_instructions）。Codex 以 name 字段识别它，建议两者一致。':'在 ~/.config/opencode/agents 下创建一个 OpenCode 智能体定义（Markdown + frontmatter）。OpenCode 会自动加载新文件，无需重启。';
  $('#agentModeLabel').hidden=codex;$('#agentColorLabel').hidden=codex;
@@ -519,41 +591,113 @@ function refreshAgentChrome(){
  id.title=codex?'只能使用字母、数字、短横线和下划线':'只能使用小写字母、数字和短横线';
  id.placeholder=codex?'security-reviewer':'reviewer';
 }
-function setAgentProvider(name){
- if(!['opencode','codex'].includes(name)||name===agentProvider)return;
- if(!agentLeave())return;
- agentProvider=name;agentLoaded=false;agentSel=null;agentOriginal='';
- $('#agentDetail').hidden=true;$('#agentEmpty').hidden=false;
- for(const b of document.querySelectorAll('#agentsWorkspace [data-agent-provider]'))b.setAttribute('aria-pressed',String(b.dataset.agentProvider===name));
- refreshAgentChrome();
- loadAgents().catch(e=>toast(e.message));
+// 详情里的管理按钮只对智能体定义有意义：全局配置是固定文件，不改名、不删除、不复制 ID。
+function applyAgentDetailChrome(){
+ const config=agentIsConfig();
+ $('#agentRename').hidden=config;$('#agentDelete').hidden=config;$('#agentCopy').hidden=config;
+ $('#agentToggle').hidden=config||agentCodex();
 }
-async function loadAgents(){
- const r=await api(agentRoute(''));
- agentItems=r.agents;agentLoaded=true;
- $('#agentRoot').textContent=(agentCodex()?'Codex · ':'OpenCode · ')+r.root;
- renderAgents();
- if(agentSel){const a=agentItems.find(x=>x.id===agentSel.id);if(a)agentSel=a;else{agentSel=null;$('#agentDetail').hidden=true;$('#agentEmpty').hidden=false;}}
+// 来源清单由服务端下发（GET /api/configs/providers），已安装且存在配置（installed）的排在前面。
+async function loadAgentProviders(){
+ const r=await api(agentConfigRoute('/providers'));
+ agentProviders=r.providers||[];
+ if(!agentProviders.some(p=>p.id===agentProvider))agentProvider=agentProviders[0]?.id||'opencode';
+ renderAgentSources();refreshAgentChrome();
 }
-function renderAgents(){
- const codex=agentCodex(),q=$('#agentSearch').value.toLowerCase();
- const rows=agentItems.filter(a=>[a.id,a.name,a.description,a.mode,a.model,a.effort,a.sandbox].filter(Boolean).join(' ').toLowerCase().includes(q));
- $('#agentCount').textContent=`${rows.length} / ${agentItems.length}`;
- const list=$('#agentList');list.replaceChildren();
- if(!rows.length){const p=document.createElement('p');p.className='muted';p.textContent=agentItems.length?'没有匹配的智能体':(codex?'还没有 Codex 智能体，点上方「＋ 新建 Codex 智能体」创建。':'还没有智能体，点上方「＋ 新建智能体」创建。');list.append(p);return;}
- for(const a of rows){
-  const b=button('',`skill-item ${agentSel?.id===a.id?'selected':''}`,()=>openAgent(a));
-  b.title=(codex?a.name:a.id)||a.description||a.id;
-  const line=document.createElement('span');line.className='agent-line';
-  const dot=document.createElement('i');dot.className='agent-dot';if(/^#[0-9a-fA-F]{6}$/.test(a.color))dot.style.background=a.color;else if(codex)dot.style.background='#10a37f';
-  const strong=document.createElement('strong');strong.textContent=codex?(a.name||a.id):a.id;line.append(dot,strong);
-  if(!codex&&a.disabled){const tag=document.createElement('span');tag.className='badge';tag.textContent='已停用';line.append(tag);}
-  else if(!codex&&a.mode){const tag=document.createElement('span');tag.className='badge';tag.textContent=a.mode;line.append(tag);}
-  else if(codex&&a.effort){const tag=document.createElement('span');tag.className='badge';tag.textContent=a.effort;line.append(tag);}
-  if(a.problems.length){const tag=document.createElement('span');tag.className='badge conflict';tag.textContent='需检查';tag.title=a.problems.join('\n');line.append(tag);}
-  const small=document.createElement('small');small.textContent=a.description||'（未填写 description）';
-  b.append(line,small);list.append(b);
+// 来源图标：只认真实品牌图标（index.html 的内联 SVG 精灵），没有图标的来源干脆不放图标，不做首字母占位。
+function providerGlyph(p){
+ if(!p.icon)return null;
+ const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('class','sf');
+ const use=document.createElementNS('http://www.w3.org/2000/svg','use');use.setAttribute('href','#'+p.icon);svg.append(use);return svg;
+}
+// 左栏来源列表：已安装且存在配置的排前面。只更新差异、复用按钮节点并保持滚动位置，
+// 避免每次选来源都重建整列，点一下列表就跳一下。
+function renderAgentSources(){
+ const nav=$('#agentSourceNav');if(!nav||!agentProviders)return;
+ const scrollTop=nav.scrollTop;
+ const rows=[...agentProviders].sort((a,b)=>(b.installed?1:0)-(a.installed?1:0));
+ const existing=new Map([...nav.querySelectorAll('button')].map(b=>[b.dataset.agentProvider,b]));
+ for(const b of existing.values())if(!rows.some(p=>p.id===b.dataset.agentProvider))b.remove();
+ for(const p of rows){
+  let b=existing.get(p.id);
+  if(!b){b=document.createElement('button');b.type='button';b.dataset.agentProvider=p.id;b.onclick=guard(()=>setAgentProvider(p.id));}
+  b.setAttribute('aria-pressed',String(p.id===agentProvider));
+  b.title=(p.agents?'管理该来源的智能体与全局配置：':'查看与调节该来源的全局配置：')+p.dir;
+  const name=document.createElement('span');name.className='provider-name';name.textContent=p.label;
+  const dot=document.createElement('span');dot.className='notch-dot';dot.dataset.state=p.installed?'idle':'off';
+  b.replaceChildren(...[providerGlyph(p),name,dot].filter(Boolean));
+  nav.append(b);
  }
+ nav.scrollTop=scrollTop;
+}
+function setAgentProvider(id){
+ if(!id||id===agentProvider||!agentProviders?.some(p=>p.id===id))return;
+ if(!agentLeave())return;
+ agentProvider=id;agentLoaded=false;agentConfigLoaded=false;agentItems=[];agentConfigs=null;agentSel=null;agentOriginal='';agentVersion='';agentDetailKind='agent';agentFilter='';
+ $('#agentSearch').value='';
+ $('#agentDetail').hidden=true;$('#agentEmpty').hidden=false;
+ $('#agentList').scrollTop=0;
+ renderAgentSources();refreshAgentChrome();
+ loadAgentAll().catch(e=>toast(e.message));
+}
+// 一次加载当前来源的两块内容：全局配置（固定清单）与智能体定义（目录扫描，只有支持定义文件的来源才有）。
+async function loadAgentAll(){
+ const reqs=[api(agentConfigRoute('?provider='+encodeURIComponent(agentProvider)))];
+ if(agentHasDefs())reqs.push(api(agentRoute('')));
+ const [configsRes,agentsRes]=await Promise.all(reqs);
+ agentItems=agentsRes?agentsRes.agents:[];agentLoaded=true;
+ agentConfigs={...configsRes,files:configsRes.files.map(f=>({...f,id:f.key}))};agentConfigLoaded=true;
+ $('#agentRoot').textContent=(configsRes.label||agentProvider)+' · '+configsRes.dir;
+ renderAgentList();
+ if(agentSel){
+  const found=agentDetailKind==='config'?agentConfigs.files.find(x=>x.key===agentSel.id):agentItems.find(x=>x.id===agentSel.id);
+  if(found){agentSel=found;applyAgentDetailChrome();renderAgentFacts(found);}
+  else{agentSel=null;$('#agentDetail').hidden=true;$('#agentEmpty').hidden=false;}
+ }
+}
+// 内容区：一个搜索框过滤两个区块，全局配置在前、智能体定义在后。
+function agentSection(title,count,rows){
+ const frag=document.createDocumentFragment();
+ const head=document.createElement('div');head.className='list-caption';
+ const label=document.createElement('span');label.textContent=title;
+ const total=document.createElement('span');total.textContent=String(count);
+ head.append(label,total);
+ const box=document.createElement('div');box.className='agent-section';
+ for(const row of rows)box.append(row);
+ frag.append(head,box);return frag;
+}
+function agentConfigRow(f){
+ const b=button('',`skill-item ${agentIsConfig()&&agentSel?.id===f.id?'selected':''}`,()=>openConfig(f));
+ const line=document.createElement('span');line.className='agent-line';
+ const dot=document.createElement('i');dot.className='agent-dot'+(f.exists?'':' pending');
+ const strong=document.createElement('strong');strong.textContent=f.name||f.file;line.append(dot,strong);
+ const tag=document.createElement('span');tag.className='badge'+(f.exists?'':' conflict');tag.textContent=f.exists?(f.link?'符号链接':f.format.toUpperCase()):'未创建';line.append(tag);
+ const small=document.createElement('small');small.textContent=f.label;b.title=f.path+' · '+f.description;
+ b.append(line,small);return b;
+}
+function agentRow(a){
+ const codex=agentCodex();
+ const b=button('',`skill-item ${!agentIsConfig()&&agentSel?.id===a.id?'selected':''}`,()=>openAgent(a));
+ b.title=(codex?a.name:a.id)||a.description||a.id;
+ const line=document.createElement('span');line.className='agent-line';
+ const dot=document.createElement('i');dot.className='agent-dot';if(/^#[0-9a-fA-F]{6}$/.test(a.color))dot.style.background=a.color;else if(codex)dot.style.background='#10a37f';
+ const strong=document.createElement('strong');strong.textContent=codex?(a.name||a.id):a.id;line.append(dot,strong);
+ if(!codex&&a.disabled){const tag=document.createElement('span');tag.className='badge';tag.textContent='已停用';line.append(tag);}
+ else if(!codex&&a.mode){const tag=document.createElement('span');tag.className='badge';tag.textContent=a.mode;line.append(tag);}
+ else if(codex&&a.effort){const tag=document.createElement('span');tag.className='badge';tag.textContent=a.effort;line.append(tag);}
+ if(a.problems.length){const tag=document.createElement('span');tag.className='badge conflict';tag.textContent='需检查';tag.title=a.problems.join('\n');line.append(tag);}
+ const small=document.createElement('small');small.textContent=a.description||'（未填写 description）';
+ b.append(line,small);return b;
+}
+function renderAgentList(){
+ const list=$('#agentList');list.replaceChildren();
+ if(!agentLoaded&&!agentConfigLoaded){const p=document.createElement('p');p.className='muted';p.textContent='加载中…';list.append(p);return;}
+ const q=agentFilter;
+ const configs=(agentConfigs?.files||[]).filter(f=>[f.file,f.label,f.description,f.format].filter(Boolean).join(' ').toLowerCase().includes(q));
+ const agents=agentItems.filter(a=>[a.id,a.name,a.description,a.mode,a.model,a.effort,a.sandbox].filter(Boolean).join(' ').toLowerCase().includes(q));
+ list.append(agentSection('全局配置',configs.length,configs.map(agentConfigRow)));
+ if(agentHasDefs())list.append(agentSection('智能体定义',agents.length,agents.map(agentRow)));
+ if(!configs.length&&!agents.length){const p=document.createElement('p');p.className='muted';p.textContent=agentFilter?'没有匹配的内容':(agentHasDefs()?'还没有内容，点「＋ 新建智能体」创建一个。':'这个来源暂无可管理的配置文件。');list.append(p);}
 }
 function fact(k,v,cls=''){
  if(v===undefined||v===null||v==='')return null;
@@ -564,6 +708,11 @@ function fact(k,v,cls=''){
 }
 function renderAgentFacts(a){
  const box=$('#agentFacts');box.replaceChildren();
+ if(agentIsConfig()){
+  const rows=[['来源',agentConfigs?.label||agentProvider],['角色',a.label||''],['状态',a.link?'符号链接（只读）':a.exists?'已创建':'未创建（保存后新建）'],['路径',a.path||''],['大小',a.exists?(a.size+' 字节 · '+(a.mtime?new Date(a.mtime).toLocaleString():'')):'—'],['说明',a.description||'']];
+  for(const [k,v] of rows)box.append(fact(k,v));
+  return;
+ }
  const rows=agentCodex()?[
   ['名称',a.name||'未填写'],['描述',a.description||'未填写'],['模型',a.model||'继承会话'],['思考强度',a.effort||'继承会话'],['沙箱',a.sandbox||'继承会话'],
   ['ID / 文件',a.id+'（'+a.file+'）'],['大小',a.size+' 字节 · '+new Date(a.mtime).toLocaleString()],
@@ -574,9 +723,12 @@ function renderAgentFacts(a){
 }
 // 智能体的能力总结与翻译：复用技能的段落对齐和缓存机制（/api/ai/agent/*），只是针对单个定义文件。
 let agentAIData=null,agentAIFile=null,agentAIRun=0,agentAIBilingual=false,agentAISummaryExpanded=false,agentAISummaryKey='',agentAIResumeTimer;
-const agentAIKey=id=>(agentCodex()?'codex-agent:':'agent:')+id+'\nAGENT.md';
+const agentAIKey=id=>agentIsConfig()?'config:'+agentProvider+':'+id+'\nconfig':(agentCodex()?'codex-agent:':'agent:')+id+'\nAGENT.md';
 function renderAgentReading(){
  if(!agentSel)return;
+ // 全局配置尚未创建时没有可总结 / 翻译的内容，隐藏这两处入口。
+ const configMissing=agentIsConfig()&&!agentSel.exists;
+ $('#agentSummaryCard').hidden=configMissing;$('#agentTranslate').hidden=configMissing;
  const id=agentSel.id,loaded=!!(agentAIData&&agentAIFile===id);
  const blocks=loaded?agentAIData.blocks:splitMarkdown($('#agentEditor').value);
  const summary=loaded?agentAIData.summary:null,translation=loaded?agentAIData.translation:null;
@@ -600,7 +752,7 @@ async function loadAgentAI(id,reset=false){
  if(reset){agentAIData=null;agentAIFile=id;agentAIBilingual=false;agentAISummaryExpanded=false;$('#agentSummaryStatus').hidden=true;}
  renderAgentReading();
  try{
-  const data=await api((agentCodex()?'ai/codex/document?id=':'ai/agent/document?id=')+encodeURIComponent(id));
+  const data=await api(agentIsConfig()?'ai/config/document?id='+encodeURIComponent(agentProvider+':'+id):(agentCodex()?'ai/codex/document?id=':'ai/agent/document?id=')+encodeURIComponent(id));
   if(run!==agentAIRun||agentSel?.id!==id)return;
   agentAIData=data;agentAIFile=id;if(reset)agentAISummaryExpanded=!!data.summary;renderAgentReading();
   if(data.pending&&!activeAI.has(agentAIKey(id)))agentAIResumeTimer=setTimeout(()=>{if(agentSel?.id===id)loadAgentAI(id);},1000);
@@ -620,7 +772,7 @@ async function startAgentAI(mode){
  activeAI.set(key,mode);renderAgentReading();
  let streamRevision=loaded?agentAIData.revision:undefined;
  async function generateStream(){
-  const response=await fetch(agentCodex()?'/api/ai/codex/generate':'/api/ai/agent/generate',{method:'POST',headers:{'x-bobo-token':token,'Content-Type':'application/json'},body:JSON.stringify({id,mode,stream:true})});
+  const response=await fetch(agentIsConfig()?'/api/ai/config/generate':agentCodex()?'/api/ai/codex/generate':'/api/ai/agent/generate',{method:'POST',headers:{'x-bobo-token':token,'Content-Type':'application/json'},body:JSON.stringify({id:agentIsConfig()?agentProvider+':'+id:id,mode,stream:true})});
   if(!response.ok)throw Error((await response.json()).error);
   let result;
   for await(const line of responseLines(response)){
@@ -645,7 +797,8 @@ async function startAgentAI(mode){
 }
 async function openAgent(a){
  if(!agentLeave())return;
- const run=++agentRun;agentSel=a;
+ agentDetailKind='agent';agentSel=a;applyAgentDetailChrome();renderAgentList();
+ const run=++agentRun;
  $('#agentEmpty').hidden=true;$('#agentDetail').hidden=false;
  $('#agentName').textContent=agentCodex()?(a.name||a.id):a.id;
  $('#agentDescription').textContent=a.description||'此智能体暂未填写 description。';
@@ -665,94 +818,121 @@ async function openAgent(a){
   await loadAgentAI(a.id,true);
  }catch(e){toast(e.message);}
 }
+// 打开一份全局配置文件：读取真实内容（可能是空文件 / 未创建），复用智能体的阅读、编辑与 AI 能力。
+async function openConfig(f){
+ if(!agentLeave())return;
+ agentDetailKind='config';agentSel=f;applyAgentDetailChrome();renderAgentList();
+ const run=++agentRun;
+ $('#agentEmpty').hidden=true;$('#agentDetail').hidden=false;
+ $('#agentName').textContent=f.name||f.file;
+ $('#agentMeta').textContent=[agentConfigs?.label||agentProvider,f.label,f.format&&f.format.toUpperCase()].filter(Boolean).join(' · ');
+ $('#agentDescription').textContent=f.description||'';
+ renderAgentFacts(f);
+ const problems=$('#agentProblems');
+ problems.hidden=!!f.exists&&!f.link;
+ problems.textContent=f.link?'这是符号链接，只读，不能编辑。':f.exists?'':'文件尚未创建，编辑正文并保存后会新建。';
+ $('#agentFilename').textContent=f.path||f.file;
+ try{
+  const r=await api(agentConfigRoute('/file?provider='+encodeURIComponent(agentProvider)+'&key='+encodeURIComponent(f.key)));
+  if(run!==agentRun)return;
+  r.id=f.key;agentSel=r;renderAgentList();
+  agentOriginal=r.content;agentVersion=r.version;
+  $('#agentEditor').value=r.content;
+  $('#agentFileInfo').textContent=r.exists?r.content.split('\n').length+' 行':'尚未创建';
+  $('#agentReader').scrollTop=0;
+  setAgentView('read');agentDirtyUI();
+  renderAgentFacts(r);
+  if(r.exists)await loadAgentAI(f.key,true);
+  else{agentAIData=null;agentAIFile=null;renderAgentReading();}
+ }catch(e){toast(e.message);}
+}
 function setAgentView(next){
  $('#agentReader').hidden=next!=='read';$('#agentEditor').hidden=next!=='edit';
  $('#agentReadView').setAttribute('aria-pressed',String(next==='read'));$('#agentEditView').setAttribute('aria-pressed',String(next==='edit'));
  $('#agentSave').hidden=next!=='edit';$('#agentSave').disabled=!agentDirty();
  if(next==='read')renderAgentReading();
 }
-// 五个一级视图：技能 / 智能体 / 通知岛 / 用量 / 设置。切换前先处理未保存的编辑。
-// 「设置」是从侧栏左下角打开的临时 tab：打开时出现在 tab 栏，点右侧 × 关闭并回到来源视图。
-let settingsBack='skills';
-function openSettings(){return switchView('settings');}
-function closeSettings(){
- const inSettings=islandView==='settings',back=settingsBack==='settings'?'skills':settingsBack;
- $('#settingsTab').hidden=true;$('#settingsClose').hidden=true;
- return inSettings?switchView(back):null;
-}
+// 六个一级视图：技能 / 智能体 / 通知岛 / 用量 / 设备 / 设置。切换前先处理未保存的编辑。
 async function switchView(next){
  if(next===islandView)return;
  if(islandView==='skills'&&!leave())return;
  if(islandView==='agents'&&!agentLeave())return;
- if(next==='settings'){$('#settingsTab').hidden=false;$('#settingsClose').hidden=false;settingsBack=islandView;}
  islandView=next;agentActive=next==='agents';
  document.body.dataset.view=next;
  $('#skillsWorkspace').hidden=next!=='skills';
  $('#agentsWorkspace').hidden=next!=='agents';
  $('#islandWorkspace').hidden=next!=='island';
  $('#usageWorkspace').hidden=next!=='usage';
+ $('#deviceWorkspace').hidden=next!=='device';
  $('#settingsWorkspace').hidden=next!=='settings';
- for(const [id,name] of [['#skillsTab','skills'],['#agentsTab','agents'],['#islandTab','island'],['#usageTab','usage'],['#settingsTab','settings']])$(id).setAttribute('aria-pressed',String(next===name));
- if(next==='agents'){if(!agentLoaded)await loadAgents();else renderAgents();}
+ for(const [id,name] of [['#skillsTab','skills'],['#agentsTab','agents'],['#islandTab','island'],['#usageTab','usage'],['#deviceTab','device'],['#settingsTab','settings']])$(id).setAttribute('aria-pressed',String(next===name));
+ if(next==='agents'){await loadAgentProviders();if(!agentLoaded||!agentConfigLoaded)await loadAgentAll();else renderAgentList();}
  if(next==='island')openIsland();else islandClose();
  if(next==='usage')openUsage();else usageClose();
- if(next==='settings')await loadAISettings();
+ if(next==='device')openDevice();else deviceClose();
+ if(next==='settings'){await loadAISettings();openAbout();}else aboutClose();
 }
 async function saveAgent(){
  if(!agentSel)return;
  const content=$('#agentEditor').value;
+ if(agentIsConfig()){
+  const r=await api(agentConfigRoute('/save'),{provider:agentProvider,key:agentSel.id,content,version:agentVersion});
+  agentOriginal=content;agentVersion=r.version;agentDirtyUI();
+  await loadAgentAll();
+  const f=(agentConfigs?.files||[]).find(x=>x.key===agentSel?.id);
+  if(f)await openConfig(f);
+  toast(r.created?'已创建 '+r.file+'，原内容已备份':'已保存，原文件已备份');
+  return;
+ }
  const r=await api(agentRoute('/save'),{id:agentSel.id,content,version:agentVersion});
  agentOriginal=content;agentVersion=r.version;agentDirtyUI();
- await loadAgents();
+ await loadAgentAll();
  await loadAgentAI(agentSel.id,true);
  const a=agentItems.find(x=>x.id===agentSel.id);
  if(a){agentSel=a;renderAgentFacts(a);$('#agentDescription').textContent=a.description||'此智能体暂未填写 description。';$('#agentProblems').hidden=!a.problems.length;$('#agentProblems').textContent=a.problems.length?'需要检查：'+a.problems.join('；'):'';}
  toast('已保存，原文件已备份');
 }
 async function toggleAgent(){
- if(!agentSel||agentCodex())return;
+ if(!agentSel||agentCodex()||agentIsConfig())return;
  if(agentDirty()){toast('请先保存修改，再切换启用状态');return;}
  const id=agentSel.id,enable=agentSel.disabled;
  const r=await api('agents/toggle',{id,enabled:enable});
- await loadAgents();
+ await loadAgentAll();
  const a=agentItems.find(x=>x.id===id);
  if(a)await openAgent(a);
  toast(r.enabled?'已启用 '+id:'已停用 '+id+'，OpenCode 不再加载它');
 }
 async function renameAgent(){
- if(!agentSel)return;
+ if(!agentSel||agentIsConfig())return;
  if(agentDirty()){toast('请先保存修改，再重命名');return;}
  const codex=agentCodex();
  const next=(prompt(codex?'新的文件名（字母、数字、短横线和下划线）。\nCodex 实际以 TOML 里的 name 字段识别智能体，这里只改文件名，需要的话请再编辑 name。':'新的 ID（文件名，小写字母、数字和短横线）。\n重命名会改变 ID，已有会话对旧 ID 的引用将失效。',agentSel.id)||'').trim();
  if(!next||next===agentSel.id)return;
  await api(agentRoute('/rename'),{id:agentSel.id,next});
- await loadAgents();
+ await loadAgentAll();
  const a=agentItems.find(x=>x.id===next);
  if(a)await openAgent(a);
  toast('已重命名为 '+next);
 }
 async function deleteAgent(){
- if(!agentSel)return;
+ if(!agentSel||agentIsConfig())return;
  const label=agentCodex()?(agentSel.name||agentSel.id):agentSel.id;
  if(!confirm('删除智能体 '+label+'？定义文件会先备份到 ~/.bobo/backups。'))return;
  await api(agentRoute('/delete'),{id:agentSel.id});
  agentSel=null;agentOriginal='';agentVersion='';
  $('#agentEditor').value='';$('#agentDetail').hidden=true;$('#agentEmpty').hidden=false;
- await loadAgents();
+ await loadAgentAll();
  toast('已删除');
 }
 $('#skillsTab').onclick=guard(()=>switchView('skills'));
 $('#agentsTab').onclick=guard(()=>switchView('agents'));
 $('#islandTab').onclick=guard(()=>switchView('island'));
 $('#usageTab').onclick=guard(()=>switchView('usage'));
+$('#deviceTab').onclick=guard(()=>switchView('device'));
 $('#settingsTab').onclick=guard(()=>switchView('settings'));
-$('#settingsClose').onclick=guard(e=>{e.stopPropagation();return closeSettings();});
-// 侧栏左下角的全局设置入口：三个视图各有一个，共用同一段逻辑。
-for(const b of document.querySelectorAll('.open-settings'))b.onclick=guard(()=>openSettings());
-$('#agentSearch').oninput=renderAgents;
-for(const b of document.querySelectorAll('#agentsWorkspace [data-agent-provider]'))b.onclick=guard(()=>setAgentProvider(b.dataset.agentProvider));
+$('#agentSearch').oninput=()=>{agentFilter=$('#agentSearch').value.trim().toLowerCase();renderAgentList();};
 refreshAgentChrome();
-$('#agentFinder').onclick=guard(()=>api('open',agentCodex()?{codexAgent:true}:{agent:true}));
+$('#agentFinder').onclick=guard(()=>api('open',agentIsConfig()?{config:agentProvider}:agentCodex()?{codexAgent:true}:{agent:true}));
 $('#agentCopy').onclick=guard(async()=>{if(!agentSel)return;const v=agentCodex()?(agentSel.name||agentSel.id):agentSel.id;await navigator.clipboard.writeText(v);toast('已复制 '+(agentCodex()?'name':'ID'));});
 $('#agentSave').onclick=guard(saveAgent);
 $('#agentToggle').onclick=guard(toggleAgent);
@@ -774,7 +954,7 @@ $('#agentForm').onsubmit=guard(async e=>{
  const id=$('#agentIdInput').value.trim();
  const r=await api(agentRoute('/create'),agentCodex()?{id,description:$('#agentDescInput').value}:{id,description:$('#agentDescInput').value,mode:$('#agentModeInput').value,color:$('#agentColorInput').value});
  $('#agentDialog').close();
- await loadAgents();
+ await loadAgentAll();
  const a=agentItems.find(x=>x.id===r.id);
  if(a)await openAgent(a);
  setAgentView('edit');
@@ -782,42 +962,99 @@ $('#agentForm').onsubmit=guard(async e=>{
 });
 
 // 通知岛：打开视图时订阅状态流，离开时断开；设置项写回 ~/.bobo/opencode.json。
-let islandView='skills',islandStream=null,islandReady=false,islandState={sessions:[],settings:{},connected:false};
+let islandView='skills',islandStream=null,islandReady=false,islandWatch=null,islandClock=null,islandState={sessions:[],settings:{},connected:false};
 const ocLabels={working:'运行中',waiting:'等你回答',idle:'已结束',error:'已终止'};
+// 会话来源的显示名（与 Bobo.swift 的 IslandRow 保持一致）。
+const sourceLabels={opencode:'OpenCode',codex:'Codex',omp:'omp',claude:'Claude Code',dsh:'DeepSeek'};
 const islandOn=s=>s.state==='working'||s.state==='waiting';
-// 单个会话行（OpenCode 与 Codex 共用）：状态点 + 标题/来源 + 状态文字，点击跳到 Otty。
-function sessionRow(s){
- const row=document.createElement('div');row.className='oc-item';row.dataset.state=s.state;row.dataset.source=s.source||'opencode';
- row.title=(s.title||s.name||'')+' · 点击跳到 Otty 标签页';
- row.onclick=()=>focusSession(s);
+// 会话计时（对齐 CodeIsland 的 SessionTag）：会话开始至今，`<1m` / `5m` / `2h` / `1d`。
+// 服务端各来源都把开始时间记进 startedAt（epoch 毫秒）；没有就返回空串，行上不显示这一格。
+function elapsedText(startedAt){
+ const ms=Number(startedAt);
+ if(!ms)return '';
+ const seconds=Math.max(0,Math.floor((Date.now()-ms)/1000));
+ if(seconds<60)return '<1m';
+ if(seconds<3600)return Math.floor(seconds/60)+'m';
+ if(seconds<86400)return Math.floor(seconds/3600)+'h';
+ return Math.floor(seconds/86400)+'d';
+}
+// 单个会话行（OpenCode 与 Codex 共用）：状态点 + 标题/来源 + 计时 + 状态文字，点击跳到对应终端。
+function sessionRow(){
+ const row=document.createElement('div');row.className='oc-item';
  const dot=document.createElement('span');dot.className='notch-dot';
  const body=document.createElement('div');body.className='oc-body';
- const strong=document.createElement('strong');strong.textContent=s.title||s.name||s.id;
- const small=document.createElement('small');small.textContent=[s.source==='codex'?'Codex':'OpenCode',s.name,s.detail||s.directory].filter(Boolean).join(' · ');
+ const strong=document.createElement('strong'),small=document.createElement('small');
  body.append(strong,small);
- const st=document.createElement('span');st.className='oc-state';st.dataset.state=s.state;st.textContent=ocLabels[s.state]||s.state;
- row.append(dot,body,st);return row;
+ const time=document.createElement('span');time.className='oc-time';time.hidden=true;
+ const st=document.createElement('span');st.className='oc-state';
+ row.append(dot,body,time,st);
+ row.__time=time;
+ row.onclick=()=>{if(row.__session)focusSession(row.__session);};
+ return {row,strong,small,time,st};
 }
+function fillSessionRow(e,s){
+ const {row}=e;
+ row.dataset.state=s.state;row.dataset.source=s.source||'opencode';
+ row.__session=s;
+ row.title=(s.title||s.name||'')+(s.source==='dsh'?' · 点击打开 dsh 页面':' · 点击跳到对应终端标签页');
+ e.strong.textContent=s.title||s.name||s.id;
+ e.small.textContent=[sourceLabels[s.source]||'OpenCode',s.terminal,s.name,s.detail||s.directory].filter(Boolean).join(' · ');
+ e.st.dataset.state=s.state;e.st.textContent=ocLabels[s.state]||s.state;
+ fillSessionTime(e.time,s);
+}
+// 计时只改文字、不重建节点（与行的复用同一套理由）：打开通知岛时每秒刷一次，不用等状态流推快照。
+function fillSessionTime(timeEl,s){
+ const text=elapsedText(s?.startedAt);
+ timeEl.textContent=text;timeEl.hidden=!text;
+}
+function refreshSessionTimes(){
+ if(document.hidden)return;
+ for(const row of document.querySelectorAll('#islandWorkspace .oc-item'))if(row.__session&&row.__time)fillSessionTime(row.__time,row.__session);
+}
+// 状态流每推一次快照都会重渲染，但设备 / 用量也在同一条流上（约每 2 秒一次）：
+// 若无脑重建 DOM，鼠标底下的行会被换成新节点，:hover 高亮就断了。这里按 id 复用行、只改文字，
+// 顺序变化用 append 移动已有节点（不会重建），悬停高亮因此能一直保持。
+const sessionRowMap=new WeakMap();
 function renderSessionList(listEl,countEl,rows,emptyText){
  countEl.textContent=rows.length?(rows.filter(islandOn).length+' 个进行中 · 共 '+rows.length+' 个'):'';
- listEl.replaceChildren();
- if(!rows.length){const p=document.createElement('p');p.className='muted';p.textContent=emptyText;listEl.append(p);return;}
- for(const s of rows)listEl.append(sessionRow(s));
+ let map=sessionRowMap.get(listEl);
+ if(!map){map=new Map();sessionRowMap.set(listEl,map);}
+ if(!rows.length){
+  if(!map.has('')){listEl.replaceChildren();const p=document.createElement('p');p.className='muted';p.textContent=emptyText;listEl.append(p);map.set('',{row:p});}
+  for(const [id,e] of [...map])if(id!==''){e.row.remove();map.delete(id);}
+  return;
+ }
+ if(map.has('')){map.get('').row.remove();map.delete('');}
+ const seen=new Set();
+ for(const s of rows){
+  seen.add(s.id);
+  let e=map.get(s.id);
+  if(!e){e=sessionRow();map.set(s.id,e);}
+  fillSessionRow(e,s);
+  listEl.append(e.row);
+ }
+ for(const [id,e] of [...map])if(!seen.has(id)){e.row.remove();map.delete(id);}
 }
 function renderIsland(){
  const {sessions=[],settings={},connected=false}=islandState;
- // 服务端把两个 Agent 的会话合并进 sessions，并按 source 区分；这里分栏展示。
- const oc=sessions.filter(s=>s.source!=='codex'),cx=sessions.filter(s=>s.source==='codex');
+ // 服务端把五个 Agent 的会话合并进 sessions，并按 source 区分；这里分栏展示。
+ const oc=sessions.filter(s=>!['codex','omp','claude','dsh'].includes(s.source)),cx=sessions.filter(s=>s.source==='codex'),op=sessions.filter(s=>s.source==='omp'),cl=sessions.filter(s=>s.source==='claude'),ds=sessions.filter(s=>s.source==='dsh');
  $('#islandNavDot').dataset.state=connected?(oc[0]?.state||'idle'):'';
  $('#islandService').textContent=connected?'事件流已连接，OpenCode 换端口会自动重连':'未检测到正在运行的 OpenCode 服务，启动后会自动连上';
  $('#islandCodexDot').dataset.state=cx[0]?.state||'';
- // 顺序照搬服务端：最近发生状态变更的会话排在最上面（见 opencode.mjs / codex.mjs），这里不再按状态分组。
+ $('#islandOmpDot').dataset.state=op[0]?.state||'';
+ $('#islandClaudeDot').dataset.state=cl[0]?.state||'';
+ $('#islandDshDot').dataset.state=ds[0]?.state||'';
+ // 顺序照搬服务端：最近发生状态变更的会话排在最上面（见各来源的 *.mjs），这里不再按状态分组。
  renderSessionList($('#islandList'),$('#islandCount'),oc,'还没有会话记录');
  renderSessionList($('#codexList'),$('#codexCount'),cx,'最近没有 Codex 会话；Codex 运行时会自动出现在这里');
+ renderSessionList($('#ompList'),$('#ompCount'),op,'最近没有 omp 会话；omp 运行时会自动出现在这里');
+ renderSessionList($('#claudeList'),$('#claudeCount'),cl,'最近没有 Claude Code 会话；Claude Code 运行时会自动出现在这里');
+ renderSessionList($('#dshList'),$('#dshCount'),ds,'最近没有 DeepSeek Harness 会话；dsh 运行时会自动出现在这里');
  if(!islandReady){islandReady=true;renderIslandSettings();}
 }
-// 通知岛左侧分类：通知岛设置（提醒 / 刘海面板 / 菜单栏与位置）与 Agent 连接（OpenCode / Codex，含各自会话列表）。
-const islandPanes=['remind','notch','menubar','opencode','codex'];
+// 通知岛左侧分类：通知岛设置（提醒 / 刘海面板 / 菜单栏与位置合并为一个分栏）与 Agent 连接（OpenCode / Codex / omp / Claude Code，含各自会话列表）。
+const islandPanes=['general','opencode','codex','omp','claude','dsh'];
 function showIslandPane(name){
  const next=islandPanes.includes(name)?name:islandPanes[0];
  for(const p of document.querySelectorAll('#islandWorkspace [data-island-pane-content]'))p.hidden=p.dataset.islandPaneContent!==next;
@@ -869,9 +1106,11 @@ async function islandLoop(){
   if(islandStream)await new Promise(r=>setTimeout(r,1500));
  }
 }
-function openIsland(){if(islandStream)return;islandStream=true;islandLoop();}
-function islandClose(){islandStream=null;}
-// 点击会话跳到 Otty 的对应标签页：由 bobo 服务调用 otty-cli 完成匹配与切换。
+function openIsland(){if(islandStream)return;islandStream=true;islandLoop();watchTerminals();islandWatch=setInterval(watchTerminals,4000);islandClock=setInterval(refreshSessionTimes,1000);}
+function islandClose(){islandStream=null;if(islandWatch){clearInterval(islandWatch);islandWatch=null;}if(islandClock){clearInterval(islandClock);islandClock=null;}}
+// 终端归属只在通知岛打开时扫描：定期让服务端续期（10 秒），关掉视图后不再续期，服务端就停扫。
+function watchTerminals(){api('terminals/watch',{}).catch(()=>{});}
+// 点击会话跳到对应终端（Otty / Ghostty / Terminal.app）的标签页：由 bobo 服务完成匹配与切换。
 async function focusSession(s){
  try{await api('opencode/focus',{id:s.id,title:s.title||'',directory:s.directory||'',source:s.source||'opencode'});}catch(e){toast(e.message);}
 }
@@ -953,6 +1192,10 @@ function renderUsage(){
  $('#usageDotOpencode').dataset.state=local?.available?'idle':'';
  usageSwitch('#rowUsageCodex','刘海胶囊可切换到此来源',codex?.enabled!==false,'codex');
  usageSwitch('#rowUsageOpencode','刘海胶囊可切换到此来源',local?.enabled!==false,'opencode-go');
+ // 额度重置提醒：Codex 的窗口回到 100% 时提醒（服务端检测并走通知岛的提醒通道）。
+ const resetRow=$('#rowUsageResetNotify');
+ resetRow.querySelector('.switch')?.remove();
+ resetRow.append(toggleSwitch(data?.notifyReset!==false,'额度重置时提醒',async value=>{usageData=await api('usage/reset-notify',{enabled:value});renderUsage();}));
  $('#usageKeyStatus').textContent=data?(local?.keySource==='manual'?'手动配置'+(local?.keyHint?'（尾号 '+local.keyHint+'）':''):local?.keySource==='env'?'环境变量 OPENCODE_API_KEY':local?.keySource==='auth'?'opencode 本机登录':'未配置（可退回本机估算）'):'读取中…';
  $('#usageKeyClear').disabled=local?.keySource!=='manual';
  renderUsageWindows('#usageCodexWindows',codex);
@@ -1016,4 +1259,152 @@ $('#usageKeyClear').onclick=guard(async()=>{
 function openUsage(){if(usageTimer)return;loadUsage();usageTimer=setInterval(()=>guard(loadUsage)(),60000);}
 function usageClose(){if(usageTimer){clearInterval(usageTimer);usageTimer=null;}}
 
+// 设备：CPU / 内存 / 磁盘三项本机指标。服务端常驻采样，这里每 2 秒读一次快照，离开视图就停掉定时器。
+// 进程列表另走按需接口（服务端缓存 1.5 秒）：只在设备视图可见、当前分栏有进程且页面在前台时每 3 秒拉一次，
+// 切走或切到后台立即停——这块的开销全在这里，不在服务端常驻采样里。
+let deviceData=null,deviceTimer=null,devicePane='cpu',processTimer=null,processRows='',processData=null,processSortSeen='';
+const devicePanes=['cpu','memory','disk'];
+function showDevicePane(name){
+ const next=devicePanes.includes(name)?name:devicePanes[0];
+ devicePane=next;
+ for(const p of document.querySelectorAll('#deviceWorkspace [data-device-pane-content]'))p.hidden=p.dataset.devicePaneContent!==next;
+ for(const b of document.querySelectorAll('#deviceWorkspace [data-device-pane]'))b.setAttribute('aria-pressed',String(b.dataset.devicePane===next));
+ syncProcessPolling();
+}
+for(const b of document.querySelectorAll('#deviceWorkspace [data-device-pane]'))b.onclick=()=>showDevicePane(b.dataset.devicePane);
+// 进程列表：CPU 分栏按占用率、内存分栏按常驻内存（RSS）排序，服务端只回前 15 条。
+function processSort(){return devicePane==='memory'?'memory':'cpu';}
+function processBox(){return devicePane==='memory'?$('#deviceMemoryProcesses'):$('#deviceProcesses');}
+function syncProcessPolling(){
+ const active=!$('#deviceWorkspace').hidden&&(devicePane==='cpu'||devicePane==='memory')&&!document.hidden;
+ if(!active){if(processTimer){clearInterval(processTimer);processTimer=null;}return;}
+ const sort=processSort(),start=!processTimer;
+ if(start)processTimer=setInterval(loadProcesses,3000);
+ if(start||processSortSeen!==sort)loadProcesses();   // 刚进入或切了分栏：立即拉一次，不用等下一个 3 秒
+ processSortSeen=sort;
+}
+document.addEventListener('visibilitychange',syncProcessPolling);
+async function loadProcesses(){
+ const sort=processSort();
+ try{
+  const data=await api('devices/processes?limit=15&sort='+sort);
+  if(sort!==processSort())return;   // 拉取期间切了分栏，这份结果已经不对应当前列表
+  processData=data;renderProcesses(sort);
+ }catch(e){
+  // 失败时保留上一次的列表，只在页脚说明原因，避免面板闪空。
+  processData={error:e.message,processes:processData?.processes||[],count:processData?.count,updatedAt:processData?.updatedAt||0};
+  renderProcesses(sort);
+ }
+}
+// 数据没变就不重建 DOM：省重排，也避免鼠标悬停时整行被替换。
+function renderProcesses(sort){
+ const box=processBox();if(!box)return;
+ const data=processData||{},rows=data.processes||[],key=JSON.stringify([sort,data.error,data.updatedAt,rows]);
+ if(key===processRows)return;
+ processRows=key;box.replaceChildren();
+ if(!rows.length){
+  const p=document.createElement('div');p.className='usage-day muted';p.textContent=data.error||'正在采样…';box.append(p);return;
+ }
+ const head=document.createElement('div');head.className='process-row process-head';
+ for(const [label,cls] of [['进程','name'],['PID','num'],['CPU','num'],['内存','num'],['运行时间','num']]){const s=document.createElement('span');s.className=cls;s.textContent=label;head.append(s);}
+ box.append(head);
+ for(const r of rows){
+  const row=document.createElement('div');row.className='process-row'+(r.self?' self':'');
+  const name=document.createElement('span');name.className='name';name.textContent=r.self?'bobo':(r.name||'');name.title=(r.self?'bobo 本机进程 · ':'')+(r.name||'')+' · PID '+r.pid;
+  if(r.self){const tag=document.createElement('span');tag.className='tag';tag.textContent=/^bobo$/i.test(r.name||'')?'应用':'服务';name.append(tag);}
+  const pid=document.createElement('span');pid.className='num';pid.textContent=String(r.pid);
+  const cpu=document.createElement('span');cpu.className='num';cpu.textContent=(Number(r.cpu)||0).toFixed(1)+'%';
+  const mem=document.createElement('span');mem.className='num';mem.textContent=deviceGB(r.memory);mem.title=devicePercent(r.memoryPercent)+' 的物理内存';
+  const time=document.createElement('span');time.className='num';time.textContent=r.elapsed||'';
+  row.append(name,pid,cpu,mem,time);box.append(row);
+ }
+ const foot=document.createElement('div');foot.className='process-foot';
+ foot.textContent=[data.error||'','bobo 固定在最前',(sort==='memory'?'按内存占用排序':'按 CPU 占用排序'),'共 '+(data.count??rows.length)+' 个进程',data.updatedAt?'更新于 '+deviceClock(data.updatedAt):''].filter(Boolean).join(' · ');
+ box.append(foot);
+}
+// 容量单位照 macOS 的习惯：内存用 About This Mac 的口径（GiB 记作 GB，24 GiB 的机器就是 24 GB），
+// 磁盘用 Finder 的十进制（494 GB 的容器就是 494 GB）。两边都写「GB」，只是各自的进位方式。
+const deviceGB=(bytes,binary=false)=>{const v=(Number(bytes)||0)/(binary?2**30:1e9);return (v>=100?Math.round(v):Math.round(v*10)/10)+' GB';};
+const devicePercent=v=>v===null||v===undefined?'—':Math.round(v*10)/10+'%';
+const deviceClock=ts=>new Date(ts).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+const deviceLoadLevel=ratio=>ratio>=1?'low':ratio>=0.7?'warn':'ok';
+// 大卡片复用「用量」的 usage-card / meter 样式（同一套布局与等级配色），只是数值与页脚不同。
+function deviceCard({label,value,meter,level,foot}){
+ const card=document.createElement('div');card.className='usage-card';card.dataset.level=level||'ok';
+ const head=document.createElement('div');head.className='usage-card-head';
+ const title=document.createElement('span');title.textContent=label;
+ const strong=document.createElement('strong');strong.textContent=value;
+ head.append(title,strong);card.append(head);
+ if(meter!==undefined){const bar=document.createElement('div');bar.className='meter';const fill=document.createElement('i');fill.style.width=Math.min(100,Math.max(0,Number(meter)||0))+'%';bar.append(fill);card.append(bar);}
+ const bits=(foot||[]).filter(Boolean);
+ if(bits.length){const row=document.createElement('div');row.className='usage-card-foot';for(const text of bits){const s=document.createElement('span');s.textContent=text;row.append(s);}card.append(row);}
+ return card;
+}
+// 右侧明细用设置页的 settings-card / settings-row（标签左、值右），读不到的整行跳过。
+function deviceFacts(selector,rows){
+ const box=$(selector);box.replaceChildren();
+ const visible=rows.filter(([,v])=>v!==null&&v!==undefined&&v!=='');
+ if(!visible.length){const row=document.createElement('div');row.className='settings-row';row.textContent='暂时读不到数据';box.append(row);return;}
+ for(const [k,v] of visible){const row=document.createElement('div');row.className='settings-row';const a=document.createElement('span');a.textContent=k;const b=document.createElement('span');b.className='settings-value';b.textContent=v;row.append(a,b);box.append(row);}
+}
+function renderDevice(){
+ const data=deviceData||{},{cpu,memory,disk}=data;
+ $('#deviceState').textContent=data.error?(data.available?'部分不可用':'不可用'):data.available?'本机读数':'读取中';
+ $('#deviceState').title=data.error||'';
+ $('#deviceUpdated').textContent=data.updatedAt?'更新于 '+deviceClock(data.updatedAt):'每 2 秒刷新';
+ const value=(selector,text,level)=>{const el=$(selector);el.textContent=text;el.dataset.level=level||'';};
+ value('#deviceCpuValue',cpu&&cpu.usage!==null?Math.round(cpu.usage)+'%':'—',cpu?.level);
+ value('#deviceMemoryValue',memory?Math.round(memory.usedPercent)+'%':'—',memory?.level);
+ value('#deviceDiskValue',disk?Math.round(disk.usedPercent)+'%':'—',disk?.level);
+ // CPU：占用率与负载均值两张卡片，下面是每个核心的占用条（含百分比）。
+ const cpuCards=$('#deviceCpuCards');cpuCards.replaceChildren();
+ if(cpu){
+  const load=cpu.load||[],ratio=(load[0]||0)/Math.max(1,cpu.cores||1);
+  cpuCards.append(
+   deviceCard({label:'整机占用率',value:Math.round(cpu.usage)+'%',meter:cpu.usage,level:cpu.level,foot:['共 '+(cpu.cores||'?')+' 核',cpu.model]}),
+   deviceCard({label:'负载均值',value:(load[0]??0).toFixed(2),meter:ratio*100,level:deviceLoadLevel(ratio),foot:['5 分钟 '+(load[1]??0).toFixed(2),'15 分钟 '+(load[2]??0).toFixed(2)]}));
+ }else cpuCards.append(deviceCard({label:'整机占用率',value:'—',meter:0,level:'ok',foot:['正在采样…']}));
+ const cores=$('#deviceCores');cores.replaceChildren();
+ const per=cpu?.perCore||[];
+ if(!per.length){const p=document.createElement('div');p.className='usage-day muted';p.textContent='正在采样…';cores.append(p);}
+ else{
+  const grid=document.createElement('div'),labels=document.createElement('div');grid.className='core-grid';labels.className='core-grid-labels';
+  per.forEach((v,i)=>{
+   const cell=document.createElement('div');cell.className='core';cell.title='核心 '+(i+1)+'：'+devicePercent(v);
+   const bar=document.createElement('i');bar.style.height=Math.max(3,Math.min(100,v))+'%';cell.append(bar);grid.append(cell);
+   const label=document.createElement('span');label.textContent=Math.round(v)+'%';labels.append(label);
+  });
+  cores.append(grid,labels);
+ }
+ // 内存：已用大卡 + 明细；磁盘：已用大卡 + 明细。
+ const memoryCards=$('#deviceMemoryCards');memoryCards.replaceChildren();
+ memoryCards.append(memory?deviceCard({label:'已用',value:Math.round(memory.usedPercent)+'%',meter:memory.usedPercent,level:memory.level,foot:[deviceGB(memory.used,true)+' / '+deviceGB(memory.total,true),'可用 '+deviceGB(memory.free,true)]}):deviceCard({label:'已用',value:'—',meter:0,level:'ok',foot:['正在采样…']}));
+ deviceFacts('#deviceMemoryFacts',[
+  ['物理内存',memory?deviceGB(memory.total,true):''],
+  ['已用',memory?deviceGB(memory.used,true)+'（'+devicePercent(memory.usedPercent)+'）':''],
+  ['缓存（非活跃页）',memory?deviceGB(memory.cached,true):''],
+  ['可用',memory?deviceGB(memory.free,true):''],
+  ['联动内存',memory?deviceGB(memory.wired,true):''],
+  ['压缩内存',memory?deviceGB(memory.compressed,true):''],
+  ['内存压力',memory?.pressureLabel||''],
+ ]);
+ const diskCards=$('#deviceDiskCards');diskCards.replaceChildren();
+ diskCards.append(disk?deviceCard({label:'已用',value:Math.round(disk.usedPercent)+'%',meter:disk.usedPercent,level:disk.level,foot:[deviceGB(disk.used)+' / '+deviceGB(disk.total),'可用 '+deviceGB(disk.free)]}):deviceCard({label:'已用',value:'—',meter:0,level:'ok',foot:['正在采样…']}));
+ deviceFacts('#deviceDiskFacts',[
+  ['卷',disk?.mount||''],
+  ['容器总容量',disk?deviceGB(disk.total):''],
+  ['已用',disk?deviceGB(disk.used)+'（'+devicePercent(disk.usedPercent)+'）':''],
+  ['可用',disk?deviceGB(disk.free):''],
+ ]);
+}
+async function loadDevice(force=false){
+ try{deviceData=await api('devices'+(force?'?refresh=1':''));renderDevice();}
+ catch(e){$('#deviceState').textContent='不可用';$('#deviceState').title=e.message;}
+}
+function openDevice(){if(deviceTimer)return;loadDevice();deviceTimer=setInterval(loadDevice,2000);syncProcessPolling();}
+function deviceClose(){if(deviceTimer){clearInterval(deviceTimer);deviceTimer=null;}syncProcessPolling();}
+// 右下角的悬浮「刷新设备」：强制服务端立刻全量采一次（磁盘常驻采样约 60 秒一轮，等不起）。
+$('#deviceRefresh').onclick=guard(async()=>{$('#deviceRefresh').disabled=true;try{await loadDevice(true);toast('已刷新设备信息');}finally{$('#deviceRefresh').disabled=false;}});
+
 guard(async()=>{await refresh(false,true);const first=$('#skills .skill-group');if(first)openFolder(first.dataset.group);const j=await api('job');if(j?.running){showConsole();await poll();}})();
+guard(loadApp);

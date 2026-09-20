@@ -1,0 +1,16 @@
+{
+  "name": "bobo-v2",
+  "private": true,
+  "type": "module",
+  "description": "bobo 的跨平台桌面壳（Tauri 2）：复用主项目的 Node 服务与网页资源，主项目不改动",
+  "scripts": {
+    "runtime": "node scripts/sync-runtime.mjs",
+    "icons": "tauri icon ../macos/assets/bobo-mascot.png -o src-tauri/icons",
+    "dev": "node scripts/sync-runtime.mjs && tauri dev",
+    "build": "node scripts/sync-runtime.mjs && tauri build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

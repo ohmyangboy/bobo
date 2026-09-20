@@ -1,0 +1,25 @@
+name: 功能建议
+description: 提一个想法或需求
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决的问题
+      description: 现在哪里不顺手？在什么场景下会遇到？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的做法
+      description: 如果有具体设想（界面在哪、怎么交互）可以写在这里
+    validations:
+      required: false
+  - type: input
+    id: harness
+    attributes:
+      label: 涉及的 harness（可选）
+      description: 例如 OpenCode、Codex CLI、Claude Code、omp、DeepSeek Harness
+    validations:
+      required: false

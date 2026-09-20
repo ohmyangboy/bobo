@@ -1,0 +1,6 @@
+<svg width="100" height="100" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- omp（Oh My Pi）的品牌标记：官方站 omp.sh 的 favicon 里的 π 形状（can1357/oh-my-pi，MIT），
+       去掉深色底与渐变后在 100×100 画布里居中放大，与 codex / opencode 两份来源图标同一规格。
+       白色是运行时模板染色的底，原生按模板图渲染成白色。 -->
+  <path d="M14 16h36v8H40v32h-8V24h-6v22h-8V24h-4z" fill="#FFFFFF" transform="translate(15.8 12) scale(1.9) translate(-14 -16)"/>
+</svg>

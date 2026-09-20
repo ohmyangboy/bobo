@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "bobo",
+  "version": "2.0.0",
+  "identifier": "local.bobo.v2",
+  "build": {
+    "beforeDevCommand": "node scripts/dev.mjs",
+    "devUrl": "http://127.0.0.1:4318",
+    "frontendDist": "http://127.0.0.1:4318"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "bobo",
+        "width": 1140,
+        "height": 760,
+        "minWidth": 760,
+        "minHeight": 500,
+        "center": true,
+        "visible": false,
+        "url": "http://127.0.0.1:4318/?app=1",
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": { "../runtime/": "runtime/" },
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    }
+  }
+}

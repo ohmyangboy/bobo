@@ -1,0 +1,5 @@
+# v2 构建产物与依赖：runtime 由 scripts/sync-runtime.mjs 从主项目复制，不进版本库。
+runtime/
+node_modules/
+src-tauri/target/
+src-tauri/gen/
