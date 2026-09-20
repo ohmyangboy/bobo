@@ -2,6 +2,12 @@
 
 本文件记录 bobo 面向用户的版本变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。发布在 [GitHub Releases](https://github.com/ohmyangboy/bobo/releases)。
 
+## [1.2.2] - 2026-09-20
+
+### 修复
+
+- 主窗口已经打开但被其他应用遮挡、或处于最小化时，点 Dock 图标 / 菜单栏图标无法回到前台；现在总会激活并置前（最小化的窗口先还原）。⌘Tab 切回来同样受益。
+
 ## [1.2.1] - 2026-09-20
 
 ### 变更
@@ -35,3 +41,4 @@
 
 [1.2.0]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.0
 [1.2.1]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.1
+[1.2.2]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.2

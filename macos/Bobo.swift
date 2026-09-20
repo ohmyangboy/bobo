@@ -1087,14 +1087,17 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     }
 
     @objc private func toggleWindow() {
+        if window.isMiniaturized { showWindow(); return }
         if window.isVisible && NSApp.isActive { hideWindow() } else { showWindow() }
     }
 
     // 窗口打开时作为普通应用出现在 Dock 与 ⌘Tab；关闭后只留状态栏。
+    // 最小化的窗口先还原：makeKeyAndOrderFront 不会自动 deminiaturize。
     @objc private func showWindow() {
         hideDetail()
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
     }
 
@@ -1168,8 +1171,10 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         return false
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+    // 点 Dock 图标（或从 ⌘Tab 切回来）：不管窗口是否已可见，都激活并置前（showWindow 顺带还原最小化）。
+    // 原来的 `if !flag` 会让「窗口被遮挡 / 最小化」时点 Dock 没有反应。
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag { showWindow() }
+        showWindow()
         return true
     }
     func applicationWillTerminate(_ notification: Notification) {
