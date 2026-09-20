@@ -94,6 +94,49 @@ test('Codex 子 agent 的 rollout 不上面板',async()=>{
   assert.deepEqual(client.unviewed(),[]);
  }finally{client.stop();await fs.rm(home,{recursive:true,force:true});}
 });
+// Codex 桌面版 rollover / fork 会给同一个会话再写一份 rollout 文件（`<原会话id>_<新会话id>.jsonl`，
+// 里面的 session_meta.session_id 仍是原 id），两份文件的尾部状态不同（老文件停在 turn_aborted，
+// 续写文件走到 task_complete）。只让最新写入的那份决定状态——不然同一个会话每轮轮询都在两种状态
+// 间来回翻，结束 / 终止提醒每一轮都要落定一次，用户听到的是每 2 秒一响的提示音。
+test('Codex 同一会话的派生 rollout 文件：按最新文件定状态、只提醒一次',async()=>{
+ const home=await fs.mkdtemp(path.join(os.tmpdir(),'bobo-codex-fork-'));
+ const pad=n=>String(n).padStart(2,'0'),now=new Date();
+ const dir=path.join(home,'.codex','sessions',String(now.getFullYear()),pad(now.getMonth()+1),pad(now.getDate()));
+ await fs.mkdir(dir,{recursive:true});
+ const sid='01a0bf13-a48f-7681-b381-bb28259d2386',fork='01a0bf45-e105-7e91-b500-e29a69c64ab0';
+ const startedIso='2026-09-20T13:48:50.743Z',forkIso='2026-09-20T14:43:42.981Z';
+ const meta=stamp=>({timestamp:new Date().toISOString(),type:'session_meta',payload:{session_id:sid,id:sid,cwd:'/tmp/proj',timestamp:stamp,originator:'Codex Desktop',source:'vscode'}});
+ const ev=type=>({timestamp:new Date().toISOString(),type:'event_msg',payload:{type}});
+ const file=name=>path.join(dir,'rollout-'+name+'.jsonl');
+ const base=file('2026-09-20T21-48-50-'+sid),derived=file('2026-09-20T22-43-42-'+sid+'_'+fork);
+ const write=(f,lines,secAgo)=>fs.writeFile(f,lines.map(l=>JSON.stringify(l)).join('\n')+'\n').then(()=>fs.utimes(f,now,new Date(Date.now()-secAgo*1000)));
+ const reminders=[];
+ const client=createCodex({home,remind:(kind,title,message)=>reminders.push([kind,title,message]),interval:40});
+ client.start();
+ const until=async(fn,ms=2500)=>{const end=Date.now()+ms;while(Date.now()<end){if(fn())return true;await new Promise(r=>setTimeout(r,20));}return fn();};
+ const sessions=()=>client.snapshot().sessions;
+ try{
+  // 先让会话以「运行中」被看到（两份文件都刚开了任务）。
+  await write(base,[meta(startedIso),ev('task_started')],20);
+  await write(derived,[meta(forkIso),ev('task_started')],10);
+  assert.ok(await until(()=>sessions().length===1),'没有发现 Codex 会话');
+  assert.equal(sessions()[0].state,'working');
+  // 老文件停在「终止」、续写文件走到「结束」：状态只能按续写文件算，且只该提醒一次。
+  await write(base,[meta(startedIso),ev('task_started'),ev('turn_aborted')],20);
+  await write(derived,[meta(forkIso),ev('task_started'),ev('task_complete')],10);
+  assert.ok(await until(()=>sessions()[0]?.state==='idle',3000),'没有进入已结束：'+(sessions()[0]?.state));
+  assert.ok(await until(()=>reminders.length>0,3000),'没有「运行结束」提醒');
+  assert.equal(reminders.length,1,'同一个会话每轮只该有一个状态，提醒不该重复：'+JSON.stringify(reminders));
+  assert.deepEqual(reminders[0].slice(0,2),['done','运行结束']);
+  // 再等几轮轮询：状态稳定不翻、不补提醒。
+  await new Promise(r=>setTimeout(r,500));
+  assert.equal(sessions()[0].state,'idle');
+  assert.equal(reminders.length,1,'状态不该来回翻：'+JSON.stringify(reminders));
+  // 计时取同组里最早的一份（原会话），fork 文件的创建时间不覆盖它。
+  assert.equal(sessions()[0].startedAt,Date.parse(startedIso),'开始时间应取最早的一份 rollout');
+  assert.equal(sessions()[0].app,true);
+ }finally{client.stop();await fs.rm(home,{recursive:true,force:true});}
+});
 // Codex app 会话：与 CLI 共用同一份 sessions，靠 session_meta 的 originator / source 区分——
 // app 侧写 `Codex Desktop`、`codex_work_desktop` 或 source=vscode / appserver，点会话时跳 `codex://threads/<id>`。
 test('Codex app 会话：originator / source 识别，会话带上 app 标记',async()=>{

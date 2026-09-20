@@ -91,7 +91,8 @@ export function createCodex({home,remind=()=>{},interval=POLL_MS}={}){
   const prev=sessions.get(id);
   const base=prev||{id,state:'idle',at:0,changedAt:Date.now(),changeSeq:++seq,acked:false};
   const next={...base,...patch};
-  const changed=patch.state&&patch.state!==base.state;
+  // 首次发现（bobo 启动前就存在）的会话不算状态变更：这类会话按「看过」处理，不该补一声提醒。
+  const changed=!!prev&&patch.state&&patch.state!==base.state;
   if(!prev){
    // 首次发现：bobo 启动前就已经结束 / 终止的会话按「看过」处理，不堆一屏头像；运行中的仍算未查看。
    next.changedAt=patch.at||base.changedAt;next.changeSeq=++seq;next.acked=next.state==='idle'||next.state==='error';
@@ -138,7 +139,12 @@ export function createCodex({home,remind=()=>{},interval=POLL_MS}={}){
  async function poll(){
   if(closed)return;
   await readNames();
-  const seen=new Set();
+  const seen=new Set(),newest=new Map(),earliest=new Map();
+  // 同一个会话可能有不止一份 rollout 文件：Codex 桌面版 rollover / fork 时会新写一份
+  // `<原会话id>_<新会话id>.jsonl`，里面的 session_meta.session_id 仍是原 id，而老文件停在旧状态
+  // （一份是 turn_aborted、另一份是 task_complete）。逐个文件 update 会让同一个会话每轮轮询在
+  // 两种状态间来回翻，「结束 / 终止」提醒跟着每一轮响一次（2 秒一声）。只让最新写入的那份决定
+  // 状态，其余文件只用来算开始时间与「会话还在」；开始时间取同组里最早的一份，计时才对得上整个线程。
   for(const parts of dayDirs(Date.now())){
    const dir=path.join(root,...parts);
    const entries=await fs.readdir(dir,{withFileTypes:true}).catch(()=>[]);
@@ -150,12 +156,17 @@ export function createCodex({home,remind=()=>{},interval=POLL_MS}={}){
     const parsed=await scanFile(file);
     if(!parsed)continue;
     const id='codex:'+parsed.sid;seen.add(id);
-    const title=names.get(parsed.sid)||'',dirName=parsed.cwd?path.basename(parsed.cwd):'Codex';
-    let state=parsed.state;
-    if(state==='working'&&Date.now()-parsed.lastAt>STALE_MS)state='idle';
-    update(id,{source:'codex',state,title,directory:parsed.cwd,name:dirName,at:parsed.lastAt,
-     sessionId:parsed.sid,app:parsed.app,startedAt:parsed.startedAt});
+    const win=newest.get(id);
+    if(!win||parsed.mtimeMs>win.mtimeMs||(parsed.mtimeMs===win.mtimeMs&&parsed.lastAt>win.lastAt))newest.set(id,parsed);
+    if(!earliest.has(id)||parsed.startedAt<earliest.get(id))earliest.set(id,parsed.startedAt);
    }
+  }
+  for(const [id,parsed] of newest){
+   const title=names.get(parsed.sid)||'',dirName=parsed.cwd?path.basename(parsed.cwd):'Codex';
+   let state=parsed.state;
+   if(state==='working'&&Date.now()-parsed.lastAt>STALE_MS)state='idle';
+   update(id,{source:'codex',state,title,directory:parsed.cwd,name:dirName,at:parsed.lastAt,
+    sessionId:parsed.sid,app:parsed.app,startedAt:earliest.get(id)||parsed.startedAt});
   }
   // 没再出现的会话：结束 / 终止的留一小段时间，其余立刻清掉，避免历史会话堆在面板上。
   for(const [id,s] of sessions){
