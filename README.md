@@ -27,7 +27,7 @@ bobo 可以说是个融合怪：
 3. 系统状态 —— 参考 [stats](https://github.com/exelban/stats)
 4. skill —— 参考 [skills](https://github.com/vercel-labs/skills)
 
-当前项目为个人工具项目，可能存在较多兼容问题，欢迎试用，更建议你 fork 后自己加入任何你想要的任何功能。
+当前项目为个人工具项目，可能存在较多兼容问题，大部分场景只兼容到我实际使用的工具，更建议你 fork 后自己加入任何你想要的任何功能。
 
 ## 支持的 harness
 
