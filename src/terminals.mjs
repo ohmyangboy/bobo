@@ -1,7 +1,9 @@
 // 多终端跳转：按顺序试 Otty → Ghostty → Terminal.app，谁先匹配到会话就跳谁；都没匹配到就激活正在运行的那个（都不在跑就打开第一个装了的）。
-// Codex 桌面版（Codex.app / ChatGPT.app，bundle id com.openai.codex）不算终端：它的界面支持线程级深链
-// `codex://threads/<会话 id>`，直接切到那个线程——app 里跑的会话优先走它，CLI 会话在终端里一个标签页
-// 都没匹配到、而 app 又在跑时也退到这里（比激活一个空终端有用）。
+// Codex 桌面版（ChatGPT.app，bundle id com.openai.codex）不算终端：它的界面支持线程级深链 `codex://threads/<会话 id>`。
+// rollout 里的 `originator: Codex Desktop` / `source: vscode` 只说明线程的出身，不说明现在谁在跑它：app 里起的线程
+// 后来能在 CLI 里 resume，那份 session_meta 照旧（见 codex.mjs）。所以带 app 标记的会话先按标题在终端里认一遍
+// （Codex CLI 的标签标题就是 `<线程名> | <项目>`），认到了就是终端在跑它；没认到、app 又在跑时才跳深链，
+// app 没跑就照常找终端——不把已经退出的 app 重新拉起来。
 // Otty 走自带的 otty-cli；Ghostty 与 Terminal.app 走 AppleScript（osascript，首次会触发 macOS 自动化权限授权）。
 // bobo 的会话只有目录与标题（没有 tty）：Ghostty 按工作目录匹配，Terminal 按 custom title（OpenCode 集成写成 `OC | <标题>`，
 // omp 写成 `π <标题>`），都退到「标题 / 目录名包含」兜底；只有终端在前台、且正停在对应标签页时才算用户「看过了」。
@@ -11,6 +13,7 @@ import { createOtty } from './otty.mjs';
 
 const GHOSTTY_APP = '/Applications/Ghostty.app', GHOSTTY_BUNDLE = 'com.mitchellh.ghostty';
 const TERMINAL_APP = '/System/Applications/Utilities/Terminal.app', TERMINAL_BUNDLE = 'com.apple.Terminal';
+const OTTS_BUNDLE = 'io.appmakes.otty';
 const CODEX_APP = 'Codex App', CODEX_APP_BUNDLE = 'com.openai.codex';
 const OSASCRIPT = '/usr/bin/osascript', LSAPPINFO = '/usr/bin/lsappinfo', OPEN = '/usr/bin/open';
 // 列表输出用 ASCII 单元分隔符（0x1f）分隔字段、换行分隔记录：标题里基本不可能出现，避免撞分隔符。
@@ -18,7 +21,7 @@ const SEP = '\u001f';
 // 标签名前缀：OpenCode 集成按 `OC | <会话标题>` 命名标签，omp 的 TUI 用 `π <标题>`
 // （运行中前缀后多一个 spinner，见 sameTabTitle），Claude Code 用 `✳ <标题>`，
 // Codex 的以实际显示为准逐个尝试。
-const TITLE_PREFIX = { opencode: ['OC | '], codex: ['CX | ', 'Codex | ', 'CDX | '], omp: ['π '], claude: ['✳ '] };
+const TITLE_PREFIX = { opencode: ['OC | '], codex: ['CX | ', 'Codex | ', 'CDX | '], omp: ['π '], claude: ['✳ '], agy: ['AGY | ', 'Antigravity | '] };
 
 const run = (bin, args) => new Promise(resolve => {
  let out = '';
@@ -55,11 +58,12 @@ export function sameTabTitle(tabTitle, prefix, title) {
 // 标签页与会话的匹配（Ghostty / Terminal / Otty 共用）：
 // 1) 工作目录精确相等（Ghostty / Otty 才有 cwd）  2) 标题等于 `<前缀><会话标题>`  3) 标题包含会话标题
 // 4) 同目录下标题包含目录名（会话还没拿到标题时靠它认人）  5) 同目录只剩一个标签页  6) 标题包含目录名（strict 时不做）。
-export function matchTab(tabs, { title, directory, name, source = 'opencode' } = {}, { strict = false } = {}) {
+// titleOnly：只认标题（跳过目录匹配）——「这个标签页在跑这条线程」只有标题能证明，同目录只说明它俩在同一个目录。
+export function matchTab(tabs, { title, directory, name, source = 'opencode' } = {}, { strict = false, titleOnly = false } = {}) {
  const list = (tabs || []).filter(Boolean), t = String(title ?? '').trim(), base = folderName(directory, name);
  const prefixes = [...(TITLE_PREFIX[source] || []), ''];
  const exact = x => t && prefixes.some(p => sameTabTitle(x.title, p, t));
- if (directory) {
+ if (directory && !titleOnly) {
   const same = list.filter(x => x.cwd && samePath(x.cwd, directory));
   if (same.length) return same.find(exact) || same.find(x => t && String(x.title || '').includes(t)) || same.find(x => base && String(x.title || '').includes(base)) || same[0];
  }
@@ -69,18 +73,22 @@ export function matchTab(tabs, { title, directory, name, source = 'opencode' } =
   const contains = list.find(x => String(x.title || '').includes(t));
   if (contains) return contains;
  }
- if (strict) return null;
+ if (strict || titleOnly) return null;
  return (base && list.find(x => String(x.title || '').includes(base))) || null;
 }
 // 当前聚焦的标签页命中了哪些会话（strict：只认目录精确或标题命中会话标题，避免同名目录误判成「看过了」）。
 export function viewedIds(sessions, tabs) { return (sessions || []).filter(s => matchTab(tabs, s, { strict: true })).map(s => s.id); }
+// Otty 正在「被看」的标签页：只有聚焦窗口里 active 的那一个算——别的窗口里选中的标签页用户并没有在看（Otty 才会这样多窗口）。
+export function activeOttyTabs(tabs, focusWindow) {
+ return (tabs || []).filter(t => t?.active === true && (!focusWindow || t.window_id === focusWindow));
+}
 // 会话归属的终端：按适配器优先级（Otty → Ghostty → Terminal.app），第一个列到匹配标签页的终端就是归属。
 // groups：`[{name, tabs}]`，按优先级排好；一个终端都没有时返回空对象（会话显示不出归属）。
-export function locateSessions(sessions, groups) {
+export function locateSessions(sessions, groups, opts) {
  const out = {};
  for (const g of groups || []) for (const s of sessions || []) {
   if (out[s.id] || !s?.id) continue;
-  if (matchTab(g.tabs, s)) out[s.id] = g.name;
+  if (matchTab(g.tabs, s, opts)) out[s.id] = g.name;
  }
  return out;
 }
@@ -90,8 +98,8 @@ export function codexThreadUrl(id) {
  const s = String(id ?? '').trim().replace(/^codex:/, '');
  return s ? 'codex://threads/' + encodeURIComponent(s) : '';
 }
-// app 里跑的会话（rollout 的 session_meta 记了 originator=Codex Desktop 等）归属 Codex app：
-// 只有 app 正在跑时才算归属，点击会走线程深链而不是找终端标签页。
+// app 出身的会话（rollout 的 session_meta 记了 originator=Codex Desktop 等）在终端里没有标题命中的标签页时
+// 归属 Codex app（点击走线程深链，见 focus）；只有 app 正在跑时才算归属——app 没跑还跳，就是把已经退出的 app 拉起来。
 export function locateAppSessions(sessions, running) {
  const out = {};
  if (!running?.has?.(CODEX_APP_BUNDLE)) return out;
@@ -207,9 +215,9 @@ export function createTerminals() {
   available: () => existsSync(GHOSTTY_APP),
   open: () => openApp(GHOSTTY_APP),
   tabs: async () => parseGhosttyTabs((await run(OSASCRIPT, ['-e', ghosttyListScript()])).out),
-  async focus({ title, directory, name, source } = {}) {
+  async focus({ title, directory, name, source } = {}, match) {
    const tabs = parseGhosttyTabs((await run(OSASCRIPT, ['-e', ghosttyListScript()])).out);
-   const target = matchTab(tabs, { title, directory, name, source });
+   const target = matchTab(tabs, { title, directory, name, source }, match);
    if (!target) return { ok: false };
    const r = await run(OSASCRIPT, ['-e', ghosttyFocusScript({ id: target.id, directory })]);
    return r.out.includes('true') ? { ok: true, title: target.title } : { ok: false };
@@ -225,9 +233,9 @@ export function createTerminals() {
   available: () => existsSync(TERMINAL_APP),
   open: () => openApp(TERMINAL_APP),
   tabs: async () => parseTerminalTabs((await run(OSASCRIPT, ['-e', terminalListScript()])).out),
-  async focus({ title, directory, name, source } = {}) {
+  async focus({ title, directory, name, source } = {}, match) {
    const tabs = parseTerminalTabs((await run(OSASCRIPT, ['-e', terminalListScript()])).out);
-   const target = matchTab(tabs, { title, directory, name, source });
+   const target = matchTab(tabs, { title, directory, name, source }, match);
    if (!target) return { ok: false };
    const r = await run(OSASCRIPT, ['-e', terminalFocusScript(target)]);
    return r.out.includes('true') ? { ok: true, title: target.title } : { ok: false };
@@ -239,13 +247,20 @@ export function createTerminals() {
   },
  };
  const adapters = [
-  { name: 'Otty', bundle: 'io.appmakes.otty', available: () => otty.available(), open: () => otty.open(),
+  { name: 'Otty', bundle: OTTS_BUNDLE, available: () => otty.available(), open: () => otty.open(),
    // 用下面这套 matchTab 匹配 Otty 标签页：与「会话归属哪个终端」同一套规则，显示成 Otty 的会话一定跳得过去。
-   focus: async o => { const target = matchTab(await otty.tabs(), o); return target?.id ? otty.focusTab(target.id) : { ok: false }; },
-   viewed: s => otty.viewed(s), tabs: () => otty.tabs() },
+   focus: async (o, m) => { const target = matchTab(await otty.tabs(), o, m); return target?.id ? otty.focusTab(target.id) : { ok: false }; },
+   // 「看过了」与别的终端同样只认「Otty 在前台、且用户正停在会话的标签页上」：多窗口时只认聚焦窗口里 active 的那个，
+   // 别的窗口选中的标签页不算（用户并没有在看）。
+   async viewed(sessions) {
+    if (!sessions?.length || !otty.available() || await frontBundle() !== OTTS_BUNDLE) return [];
+    const focus = (await otty.windows()).find(w => w.focused === true)?.id;
+    return viewedIds(sessions, activeOttyTabs(await otty.tabs(), focus));
+   },
+   tabs: () => otty.tabs() },
   ghostty, terminal,
  ];
- // 打开 Codex app 里的某个线程（`codex://threads/<id>`）：app 不在跑也会被 open 拉起；
+ // 打开 Codex app 里的某个线程（`codex://threads/<id>`）：只在 app 正在跑时调用（见 focus），
  // app 没装 / 装不上时 open 返回非 0，交给上层继续找终端标签页。
  async function focusApp({ id, sessionId } = {}) {
   const url = codexThreadUrl(sessionId || id);
@@ -255,17 +270,18 @@ export function createTerminals() {
  }
  // 只对「装了的、且正在运行」的终端尝试跳转（会话在哪个终端，那个终端就一定开着）；都没匹配到再激活正在运行的那个。
  async function focus(opts = {}) {
-  const running = await runningBundles();
-  // Codex app 里跑的会话（rollout 的 originator 是 Desktop / source 是 vscode、appserver）直接跳线程深链，不找终端。
-  if (opts.app === true) { const r = await focusApp(opts); if (r.ok) return r; }
+  const running = await runningBundles(), appRunning = running.has(CODEX_APP_BUNDLE);
+  // app 出身的会话（rollout 记着 Codex Desktop / vscode）先按标题认终端：它可能已经被 CLI resume，
+  // 这份 meta 却照旧——不认终端就直接跳深链，会把已经退出的 app 拉起来（线程其实在终端里跑着）。
+  // app 在跑时只认标题：同目录不算数，否则会跳到同目录里另一条无关的标签页。
+  const match = opts.app === true && appRunning ? { titleOnly: true } : undefined;
   for (const a of adapters) {
    if (!a.available() || !running.has(a.bundle)) continue;
-   const r = await a.focus(opts);
+   const r = await a.focus(opts, match);
    if (r?.ok) return r;
   }
-  // Codex 会话在终端里一个标签页都没匹配到、而 app 开着：多半是 app 里跑的（同一条 rollout 也可能记成 codex-tui），
-  // 带用户去 app 看比激活一个空终端有用；app 打不开再退回原来的兜底。
-  if (opts.source === 'codex' && running.has(CODEX_APP_BUNDLE)) { const r = await focusApp(opts); if (r.ok) return r; }
+  // 终端里一个标签页都没匹配到、而 app 又在跑：带用户回 app 的那个线程看，比激活一个空终端有用。
+  if (opts.source === 'codex' && appRunning) { const r = await focusApp(opts); if (r.ok) return r; }
   const target = adapters.find(a => a.available() && running.has(a.bundle)) || adapters.find(a => a.available());
   if (!target) return { ok: false, reason: '没有可用的终端' };
   target.open();
@@ -279,12 +295,15 @@ export function createTerminals() {
   return [...ids];
  }
  // 会话归属：只扫正在运行的终端（不为了看一眼归属就把没开的终端拉起来），返回 `{会话 id: 终端名}`；
- // app 里跑的会话归属 Codex app（点击走线程深链），剩下的再按终端标签页匹配。
+ // app 出身的会话先在终端里按标题认一遍（被 CLI resume 的线程只在标题上认得出来，见 focus），
+ // 认不到的：app 在跑就归属 Codex app（点击走线程深链），app 没跑才退回同目录之类的普通匹配。
  async function locate(sessions) {
   if (!sessions?.length) return {};
-  const running = await runningBundles(), groups = [], app = locateAppSessions(sessions, running);
+  const running = await runningBundles(), appRunning = running.has(CODEX_APP_BUNDLE), groups = [];
   for (const a of adapters) { if (a.available() && running.has(a.bundle)) groups.push({ name: a.name, tabs: await a.tabs() }); }
-  return { ...app, ...locateSessions(sessions.filter(s => !app[s.id]), groups) };
+  const app = sessions.filter(s => s.app === true), others = sessions.filter(s => s.app !== true);
+  const byTitle = locateSessions(app, groups, { titleOnly: true }), miss = app.filter(s => !byTitle[s.id]);
+  return { ...byTitle, ...locateSessions(others, groups), ...(appRunning ? locateAppSessions(miss, running) : locateSessions(miss, groups)) };
  }
  return { focus, focusApp, viewed, locate, available: () => adapters.some(a => a.available()) };
 }

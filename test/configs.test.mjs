@@ -36,10 +36,12 @@ test('全局配置：白名单、读取、创建、版本冲突、备份、符�
   assert.equal(omp.files.find(f=>f.key==='config.yml').exists,true);assert.equal(omp.files.find(f=>f.key==='PERSONALITY.md').exists,false);
   const dsh=(await req('configs?provider=dsh')).data;
   assert.equal(dsh.dir,dshDir);assert.deepEqual(dsh.files.map(f=>f.key),['settings.yaml']);assert.equal(dsh.files[0].exists,true);
-  // 来源清单：只收录「通知岛」已接入的 harness（OpenCode / Codex / Claude Code / omp / dsh），每个都有真实品牌图标；
+  const agy=(await req('configs?provider=agy')).data;
+  assert.equal(agy.label,'Antigravity');assert.deepEqual(agy.files.map(f=>f.key),['GEMINI.md','settings.json','antigravity-cli/settings.json','config/config.json','config/hooks.json','config/mcp_config.json']);
+  // 来源清单：只收录「通知岛」已接入的 harness（OpenCode / Codex / Claude Code / omp / dsh / agy），每个都有真实品牌图标；
   // installed 要求「配置目录 + 至少一份配置文件」同时存在。
   const providers=(await req('configs/providers')).data.providers,provById=Object.fromEntries(providers.map(p=>[p.id,p]));
-  assert.deepEqual(providers.map(p=>p.id).sort(),['claude','codex','dsh','omp','opencode']);
+  assert.deepEqual(providers.map(p=>p.id).sort(),['agy','claude','codex','dsh','omp','opencode']);
   assert.equal(provById.opencode.agents,'opencode');assert.equal(provById.codex.agents,'codex');assert.equal(provById.claude.agents,null);
   assert.equal(provById.opencode.installed,true);assert.equal(provById.opencode.dir,ocDir);
   assert.equal(provById.claude.installed,false,'只有目录、没有配置文件的来源不该亮绿灯');

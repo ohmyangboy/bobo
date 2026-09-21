@@ -6,6 +6,25 @@ published: true
 
 本文件记录 bobo 面向用户的版本变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。发布在 [GitHub Releases](https://github.com/ohmyangboy/bobo/releases)。
 
+## [1.2.5] - 2026-09-21
+
+### 新增
+
+- **通知岛**新增 Google Antigravity（agy）来源，从五家扩到六家：只读 `~/.gemini/antigravity-cli` 的会话库（SQLite），运行中 / 等你回答 / 已结束 / 已终止照常提醒；点会话跳到终端里对应的 `AGY | …` 标签页。
+- **额度**新增 Antigravity：Gemini 与 Claude / GPT 两组模型的 5 小时与周额度，优先读本地 Language Server 的 `RetrieveUserQuotaSummary`，读不到退回 `agy` CLI 的 `/usage` 报告。
+- **智能体**的全局配置新增 Antigravity（`~/.gemini` 下的 GEMINI.md、settings.json、CLI 偏好、全局配置、Hooks 与 MCP 配置）。
+- 通知岛点 Codex 桌面版（Codex app / ChatGPT.app）的会话时，优先用线程深链 `codex://threads/<id>` 带你回 app 里的那条线程。
+
+### 变更
+
+- 通知岛与「智能体 → 全局配置」的 harness 清单统一为六家（OpenCode、Codex、Claude Code、omp、dsh、agy）。
+- 终端匹配收敛到一处：会话归属哪个终端、点击跳哪个标签页与「看过了」判断共用同一套标题 / 目录匹配，不再各写一份。
+- 运行要求 Node.js 22.13+（agy 会话库用内置 `node:sqlite` 读取）。
+
+### 修复
+
+- Codex 同一会话的派生 rollout 文件（桌面包 rollover / fork 产生的 `<原 id>_<新 id>.jsonl`）不再让状态每轮轮询来回翻、提醒反复响：状态取最新写入的那份，开始时间取整条线程最早的一份。
+
 ## [1.2.4] - 2026-09-20
 
 ### 变更
@@ -67,3 +86,4 @@ published: true
 [1.2.2]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.2
 [1.2.3]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.3
 [1.2.4]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.4
+[1.2.5]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.5

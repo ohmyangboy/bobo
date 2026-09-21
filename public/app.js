@@ -971,7 +971,7 @@ $('#agentForm').onsubmit=guard(async e=>{
 let islandView='skills',islandStream=null,islandReady=false,islandWatch=null,islandClock=null,islandState={sessions:[],settings:{},connected:false};
 const ocLabels={working:'运行中',waiting:'等你回答',idle:'已结束',error:'已终止'};
 // 会话来源的显示名（与 Bobo.swift 的 IslandRow 保持一致）。
-const sourceLabels={opencode:'OpenCode',codex:'Codex',omp:'omp',claude:'Claude Code',dsh:'DeepSeek'};
+const sourceLabels={opencode:'OpenCode',codex:'Codex',omp:'omp',claude:'Claude Code',dsh:'DeepSeek',agy:'Antigravity'};
 const islandOn=s=>s.state==='working'||s.state==='waiting';
 // 会话计时（对齐 CodeIsland 的 SessionTag）：会话开始至今，`<1m` / `5m` / `2h` / `1d`。
 // 服务端各来源都把开始时间记进 startedAt（epoch 毫秒）；没有就返回空串，行上不显示这一格。
@@ -1043,24 +1043,26 @@ function renderSessionList(listEl,countEl,rows,emptyText){
 }
 function renderIsland(){
  const {sessions=[],settings={},connected=false}=islandState;
- // 服务端把五个 Agent 的会话合并进 sessions，并按 source 区分；这里分栏展示。
- const oc=sessions.filter(s=>!['codex','omp','claude','dsh'].includes(s.source)),cx=sessions.filter(s=>s.source==='codex'),op=sessions.filter(s=>s.source==='omp'),cl=sessions.filter(s=>s.source==='claude'),ds=sessions.filter(s=>s.source==='dsh');
+ // 服务端把六个 Agent 的会话合并进 sessions，并按 source 区分；这里分栏展示。
+ const oc=sessions.filter(s=>!['codex','omp','claude','dsh','agy'].includes(s.source)),cx=sessions.filter(s=>s.source==='codex'),op=sessions.filter(s=>s.source==='omp'),cl=sessions.filter(s=>s.source==='claude'),ds=sessions.filter(s=>s.source==='dsh'),ag=sessions.filter(s=>s.source==='agy');
  $('#islandNavDot').dataset.state=connected?(oc[0]?.state||'idle'):'';
  $('#islandService').textContent=connected?'事件流已连接，OpenCode 换端口会自动重连':'未检测到正在运行的 OpenCode 服务，启动后会自动连上';
  $('#islandCodexDot').dataset.state=cx[0]?.state||'';
  $('#islandOmpDot').dataset.state=op[0]?.state||'';
  $('#islandClaudeDot').dataset.state=cl[0]?.state||'';
  $('#islandDshDot').dataset.state=ds[0]?.state||'';
+ $('#islandAgyDot').dataset.state=ag[0]?.state||'';
  // 顺序照搬服务端：最近发生状态变更的会话排在最上面（见各来源的 *.mjs），这里不再按状态分组。
  renderSessionList($('#islandList'),$('#islandCount'),oc,'还没有会话记录');
  renderSessionList($('#codexList'),$('#codexCount'),cx,'最近没有 Codex 会话；Codex 运行时会自动出现在这里');
  renderSessionList($('#ompList'),$('#ompCount'),op,'最近没有 omp 会话；omp 运行时会自动出现在这里');
  renderSessionList($('#claudeList'),$('#claudeCount'),cl,'最近没有 Claude Code 会话；Claude Code 运行时会自动出现在这里');
  renderSessionList($('#dshList'),$('#dshCount'),ds,'最近没有 DeepSeek Harness 会话；dsh 运行时会自动出现在这里');
+ renderSessionList($('#agyList'),$('#agyCount'),ag,islandState.agy?.reason||'最近没有 Antigravity 会话；agy 运行时会自动出现在这里');
  if(!islandReady){islandReady=true;renderIslandSettings();}
 }
-// 通知岛左侧分类：通知岛设置（提醒 / 刘海面板 / 菜单栏与位置合并为一个分栏）与 Agent 连接（OpenCode / Codex / omp / Claude Code，含各自会话列表）。
-const islandPanes=['general','opencode','codex','omp','claude','dsh'];
+// 通知岛左侧分类：通知岛设置（提醒 / 刘海面板 / 菜单栏与位置合并为一个分栏）与 Agent 连接（OpenCode / Codex / omp / Claude Code / dsh / agy，含各自会话列表）。
+const islandPanes=['general','opencode','codex','omp','claude','dsh','agy'];
 function showIslandPane(name){
  const next=islandPanes.includes(name)?name:islandPanes[0];
  for(const p of document.querySelectorAll('#islandWorkspace [data-island-pane-content]'))p.hidden=p.dataset.islandPaneContent!==next;
@@ -1122,13 +1124,13 @@ async function focusSession(s){
 }
 $('#islandRows').onchange=guard(async()=>{islandState.settings=await api('opencode/settings',{...islandState.settings,rows:Number($('#islandRows').value)});});
 
-// 用量：Codex（chatgpt.com 的订阅额度）与 OpenCode Go（本机数据库估算）两家，服务端把结果挂进状态流。
+// 用量：Codex（chatgpt.com 的订阅额度）、OpenCode Go（官方用量接口，退回本机估算）与 Antigravity（本地语言服务 / agy CLI）三家，服务端把结果挂进状态流。
 // 打开视图时拉一次最新值，之后每分钟刷新一次；关闭视图就停掉定时器。点击左侧来源会同时切到该分栏，
 // 并把刘海胶囊的额度指示也切到这家（POST /api/usage/provider）。
 let usageData=null,usageTimer=null;
-const usagePanes=['codex','opencode'];
-const usageProviderId=pane=>pane==='opencode'?'opencode-go':'codex';
-const usagePaneFor=id=>id==='opencode-go'?'opencode':'codex';
+const usagePanes=['codex','opencode','agy'];
+const usageProviderId=pane=>pane==='opencode'?'opencode-go':pane==='agy'?'agy':'codex';
+const usagePaneFor=id=>id==='opencode-go'?'opencode':id==='agy'?'agy':'codex';
 const fmtPercent=v=>Number.isInteger(v)?String(v):v.toFixed(1);
 // 金额：$0 显示 0；≥ 1 分保留两位（$0.50）；更小的零头保留四位（$0.0027），免得读成 0。
 const money=v=>{if(!v)return '$0';return '$'+(v>=0.01?v.toFixed(2):v.toFixed(4));};
@@ -1191,13 +1193,15 @@ function usageSwitch(row,label,on,id){
 function renderUsage(){
  const data=usageData;
  const byId=id=>data?.providers?.find(p=>p.id===id)||null;
- const codex=byId('codex'),local=byId('opencode-go');
+ const codex=byId('codex'),local=byId('opencode-go'),agy=byId('agy');
  $('#usageState').textContent=!data?'读取中':data.available?'已连接':'暂不可用';
  $('#usageUpdated').textContent=data?.updatedAt?'更新于 '+new Date(data.updatedAt).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'每分钟刷新';
  $('#usageDotCodex').dataset.state=codex?.available?'idle':'';
  $('#usageDotOpencode').dataset.state=local?.available?'idle':'';
+ $('#usageDotAgy').dataset.state=agy?.available?'idle':'';
  usageSwitch('#rowUsageCodex','刘海胶囊可切换到此来源',codex?.enabled!==false,'codex');
  usageSwitch('#rowUsageOpencode','刘海胶囊可切换到此来源',local?.enabled!==false,'opencode-go');
+ usageSwitch('#rowUsageAgy','刘海胶囊可切换到此来源',agy?.enabled!==false,'agy');
  // 额度重置提醒：Codex 的窗口回到 100% 时提醒（服务端检测并走通知岛的提醒通道）。
  const resetRow=$('#rowUsageResetNotify');
  resetRow.querySelector('.switch')?.remove();
@@ -1206,6 +1210,7 @@ function renderUsage(){
  $('#usageKeyClear').disabled=local?.keySource!=='manual';
  renderUsageWindows('#usageCodexWindows',codex);
  renderUsageWindows('#usageOpencodeWindows',local);
+ renderUsageWindows('#usageAgyWindows',agy);
  const codexBits=[];
  if(codex?.plan)codexBits.push('套餐：'+codex.plan);
  if(codex?.credits?.unlimited)codexBits.push('额度无上限（credits unlimited）');
@@ -1213,6 +1218,12 @@ function renderUsage(){
  if(codex?.available&&!codex.windows.length)codexBits.push('这个套餐目前没有返回窗口额度');
  if(codex?.error)codexBits.push('⚠ '+codex.error);
  $('#usageCodexNote').textContent=codexBits.join('；')||'额度窗口由 ChatGPT 返回，重置时间以服务端为准。';
+ const agyBits=[];
+ if(agy?.plan)agyBits.push('方案：'+agy.plan);
+ if(agy?.available&&!agy.windows.length)agyBits.push('当前没有返回窗口额度');
+ if(agy?.error)agyBits.push('⚠ '+agy.error);
+ const agyDefaultNote=agy?.keySource==='local-server'?'配额数据来自本地 Antigravity Language Server 接口（RetrieveUserQuotaSummary），只读不登录。':'配额数据来自 Antigravity CLI 的 /usage 报告（agy -p /usage --output-format json），只读本机登录。';
+ $('#usageAgyNote').textContent=agyBits.join('；')||agyDefaultNote;
  // OpenCode Go：百分比来自官方用量接口（权威），每日花费/模型明细来自本机数据库（估算）。
  const keyLabel=local?.keySource==='manual'?'手动填写的 Key':local?.keySource==='env'?'环境变量 OPENCODE_API_KEY':local?.keySource==='auth'?'opencode 本机登录':'未配置';
  const localBits=[local?.source==='api'

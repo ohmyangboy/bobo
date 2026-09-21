@@ -47,7 +47,7 @@ bobo 可以说是个融合怪：
 
   <img src="assets/screenshots/web-island.png" alt="bobo 网页界面：通知岛设置" width="1140" />
   <br />
-  <sub>网页界面：通知岛设置与五家 harness 的连接状态</sub>
+  <sub>网页界面：通知岛设置与六家 harness 的连接状态</sub>
 
 </div>
 
@@ -62,12 +62,13 @@ bobo 可以说是个融合怪：
 | Claude Code | ✅ 活跃注册表 + 会话日志 | — | 全局技能（链接） | ✅ 全局配置 |
 | omp（Oh My Pi） | ✅ 轮询会话文件 | — | 全局技能（链接） | ✅ 全局配置 |
 | DeepSeek Harness（dsh） | ✅ 投影缓存 | — | 全局技能（链接） | ✅ 全局配置 |
+| Google Antigravity（agy） | ✅ SQLite 会话库 | ✅ 各模型组配额 | 全局技能（链接） | ✅ 全局配置 |
 
 技能统一落在 `~/.agents/skills`，bobo 直接管理技能目录与各 Agent 的符号链接，不依赖 `npx skills` 或其它命令行工具。
 
 ## 安装
 
-**下载安装**：从 [Releases](https://github.com/ohmyangboy/bobo/releases) 下载最新的 `bobo.app.zip`，解压后把 `bobo.app` 拖进「应用程序」；首次打开如果被系统拦下，右键 →「打开」即可。需要本机有 Node.js 22+。
+**下载安装**：从 [Releases](https://github.com/ohmyangboy/bobo/releases) 下载最新的 `bobo.app.zip`，解压后把 `bobo.app` 拖进「应用程序」；首次打开如果被系统拦下，右键 →「打开」即可。需要本机有 Node.js 22.13+（agy 会话库与本机 OpenCode 用量用内置 `node:sqlite` 读取，22.13 起才不需要额外开关）。
 
 **从源码构建**：
 
@@ -84,11 +85,11 @@ npm start                  # 或只跑本地服务 → http://127.0.0.1:4318
 
 ## 功能
 
-- **通知岛**：贴住刘海的常驻胶囊，把 OpenCode、Codex、omp、Claude Code、dsh 的会话状态变成看得见、听得到的提醒；悬停展开会话卡片，点击回到对应终端。
-- **额度**：Codex 与 OpenCode Go 的剩余额度（5 小时 / 本周 / 账单月），只读取本机登录与用量，不改写任何凭据。
+- **通知岛**：贴住刘海的常驻胶囊，把 OpenCode、Codex、omp、Claude Code、dsh、agy 的会话状态变成看得见、听得到的提醒；悬停展开会话卡片，点击回到对应终端。
+- **额度**：Codex、OpenCode Go 与 Antigravity 的剩余额度（5 小时 / 本周 / 账单月），只读取本机登录与用量，不改写任何凭据。
 - **系统状态**：CPU（整机与每核占用、负载）、内存（压力与页统计）、磁盘占用，以及 Top 进程。
 - **技能**：阅读、编辑、安装、更新、删除 `~/.agents/skills` 里的全局技能，浏览 SKILL.md 与子文件；「我的 Skill」管理任意本地技能目录并一键同步到 GitHub。
-- **智能体**：管理 OpenCode 与 Codex CLI 的自定义智能体定义，阅读并调节五家 harness 的全局配置。
+- **智能体**：管理 OpenCode 与 Codex CLI 的自定义智能体定义，阅读并调节六家 harness 的全局配置。
 - **AI**：按段落翻译全文、生成能力总结（OpenAI 兼容接口，可用 DeepSeek）。
 
 详细功能与实现说明见 [docs/features.md](docs/features.md)，一页速览见 [docs/intro.md](docs/intro.md)。

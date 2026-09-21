@@ -6,7 +6,7 @@ import { pruneBackups } from './backups.mjs';
 // Agent 的全局配置白名单。dir 是配置根目录（函数，便于读环境变量），files 是只读写的固定文件，
 // file 是相对根目录的路径（可含子目录）；agents 表示这个 Agent 的「子智能体定义」由哪种后端管理
 // （opencode / codex / null，没有就是纯配置文件）。新增 Agent 只需在这里加一项。
-// 只收录「通知岛」已接入的 harness（OpenCode / Codex / Claude Code / omp / dsh），保持两边一致；
+// 只收录「通知岛」已接入的 harness（OpenCode / Codex / Claude Code / omp / dsh / agy），保持两边一致；
 // 其它 Agent 等接入通知岛后再取消注释，不要提前开放。
 // 安全约定：只认白名单里的路径，绝不扫描目录，避免把 auth.json / *.credentials.json 之类的凭据暴露出来。
 // icon 必须是真实品牌图标（index.html 的内联 SVG 精灵），没有就不放图标，不做首字母占位。
@@ -33,6 +33,14 @@ export const GLOBAL_CONFIGS={
  ]},
  dsh:{label:'DeepSeek',icon:'provider-dsh',dir:({home,env})=>env.DSH_HOME||path.join(home,'.dsh'),files:[
   {file:'settings.yaml',label:'主配置',format:'yaml',description:'模型、预设、界面与语言等全局设置（YAML）'},
+ ]},
+ agy:{label:'Antigravity',icon:'provider-agy',dir:({home,env})=>env.ANTIGRAVITY_CONFIG_DIR||path.join(home,'.gemini'),files:[
+  {file:'GEMINI.md',label:'全局指令',format:'markdown',description:'每次会话都会加载的全局个性化提示词（Markdown）'},
+  {file:'settings.json',label:'主配置',format:'json',description:'模型、安全、MCP、Hooks 等用户级设置（JSON）'},
+  {file:'antigravity-cli/settings.json',label:'CLI 偏好',format:'json',description:'命令行环境权限、工作区信任等设置（JSON）'},
+  {file:'config/config.json',label:'全局配置',format:'json',description:'Antigravity 平台级配置（JSON）'},
+  {file:'config/hooks.json',label:'Hooks',format:'json',description:'生命周期 Hooks 脚本与触发配置（JSON）'},
+  {file:'config/mcp_config.json',label:'MCP 配置',format:'json',description:'全局 MCP 服务器与工具配置（JSON）'},
  ]},
 };
 // 以下 Agent 还未接入「通知岛」，先不开放（同样的白名单结构，接入后取消注释即可）：

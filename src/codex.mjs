@@ -34,7 +34,9 @@ async function readMeta(file,size){
 // 这一轮是不是 Codex 桌面版（Codex app / ChatGPT.app，bundle id com.openai.codex）跑的：与 CLI 共用
 // 同一份 ~/.codex/sessions，靠 session_meta 的 originator / source 区分——app 侧写 `Codex Desktop`、
 // `codex_work_desktop` 或 source=vscode / appserver，CLI 侧写 `codex-tui`、`codex_cli_rs`、source=cli / exec。
-// app 会话在通知岛里点一下要回到 app 里的那个线程（`codex://threads/<id>`），不是去找终端标签页。
+// 这份 meta 只在会话头写一次，记的是**线程的出身**，不是「现在谁在跑它」：CLI `codex resume` 一个 app 里起的
+// 线程时会接着往同一份 rollout 追加，头部照旧是 Codex Desktop。所以这个标记在通知岛里只是「优先跳 app」的
+// 提示（真在终端里跑着、标签标题带着线程名时点一下还是回终端，见 terminals.mjs 的 focus），不能当作「一定不是终端」。
 export function isDesktopOrigin(meta){
  const m=meta||{},origin=String(m.originator||'').toLowerCase();
  const source=typeof m.source==='string'?m.source.toLowerCase():'';
@@ -191,7 +193,8 @@ export function createCodex({home,remind=()=>{},interval=POLL_MS}={}){
  function unviewed(){
   return [...sessions.values()].filter(s=>(s.state==='idle'||s.state==='error')&&!s.acked).map(s=>({id:s.id,title:s.title||'',directory:s.directory||'',source:'codex'}));
  }
- // 这个会话是不是 Codex app 里跑的：点会话时走 app 的线程深链（`codex://threads/<id>`），不再找终端标签页。
+ // 这个会话的 rollout 头部记着 Codex 桌面版（线程出身，见 isDesktopOrigin）：点会话时优先回 app 的线程深链，
+ // 但终端里真有标题命中的标签页、或 app 没在跑时还是走终端（见 terminals.mjs 的 focus）。
  function appSession(id){return sessions.get(id)?.app===true;}
  return {
   snapshot,subscribe,acknowledge,unviewed,appSession,

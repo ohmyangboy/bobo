@@ -1514,14 +1514,14 @@ enum IslandMetrics {
         if seconds < 86400 { return "\(seconds / 3600)h" }
         return "\(seconds / 86400)d"
     }
-    // provider.symbol 缺失时的兜底图标（与服务端 providers 表一致）。
+    // provider.symbol 缺失时的兜底图标（与服务端 providers 表一致：只有 OpenCode Go 是终端图标）。
     static func symbol(for provider: IslandQuotaProvider) -> String {
         if !provider.symbol.isEmpty { return provider.symbol }
-        return provider.id == "codex" ? "sparkles" : "terminal"
+        return provider.id == "opencode-go" ? "terminal" : "sparkles"
     }
     // 来源图标：update.sh 把 bobo-provider-<id>.svg 复制进 App bundle（codex / opencode-go 来自 CodexBar 的
-    // MIT 资源，omp 取自 can1357/oh-my-pi 的 MIT 品牌图标），加载成模板图后按白色渲染；
-    // 加载不到（旧系统或资源缺失）就退回 SF Symbol。
+    // MIT 资源，omp 取自 can1357/oh-my-pi 的 MIT 品牌图标，agy 是自绘的 Antigravity 反重力拱门），
+    // 加载成模板图后按白色渲染；加载不到（旧系统或资源缺失）就退回 SF Symbol。
     nonisolated(unsafe) private static var iconCache: [String: NSImage?] = [:]
     static func icon(id: String) -> NSImage? {
         if let cached = iconCache[id] { return cached }
@@ -1534,10 +1534,10 @@ enum IslandMetrics {
     static func icon(for provider: IslandQuotaProvider) -> NSImage? {
         icon(id: provider.id)
     }
-    // 会话来源（opencode / codex / omp）对应的来源图标 id，展开列表与折叠胶囊都用它显示 Agent 图标；
-    // 三个来源都有打包好的 bobo-provider-<id>.svg（opencode 与额度来源 opencode-go 共用同一枚标记）。
+    // 各来源（opencode / codex / omp / claude / dsh / agy）对应的来源图标 id，展开列表与折叠胶囊都用它显示 Agent 图标；
+    // 都有打包好的 bobo-provider-<id>.svg（opencode 与额度来源 opencode-go 共用同一枚标记）。
     static func providerId(forSource source: String?) -> String {
-        source == "codex" ? "codex" : source == "omp" ? "omp" : source == "claude" ? "claude" : source == "dsh" ? "dsh" : "opencode-go"
+        source == "codex" ? "codex" : source == "omp" ? "omp" : source == "claude" ? "claude" : source == "dsh" ? "dsh" : source == "agy" ? "agy" : "opencode-go"
     }
     // 盒面用各家 IP 的主色区分来源；颜色只作用于很小的品牌牌面，不改变 bobo 本身的配色。
     // OpenCode 的品牌黑在纯黑刘海上会和背景糊成一整块（牌的轮廓、圆角都看不见），提亮成深灰；
@@ -1548,12 +1548,13 @@ enum IslandMetrics {
         case "omp": return Color(red: 0.48, green: 0.64, blue: 0.95)        // omp 蓝
         case "claude": return Color(red: 0.84, green: 0.39, blue: 0.25)    // Claude 橙
         case "dsh": return Color(red: 0.34, green: 0.53, blue: 0.996)      // DeepSeek 蓝
+        case "agy": return Color(red: 0.15, green: 0.58, blue: 0.95)      // Antigravity 蓝
         default: return Color(red: 0.30, green: 0.29, blue: 0.29)            // OpenCode 深灰（品牌黑会和刘海背景重合）
         }
     }
     // 会话来源图标加载不到时（旧系统或资源缺失）的 SF Symbol 兜底。
     static func symbol(forSource source: String?) -> String {
-        source == "codex" ? "sparkles" : "terminal"
+        source == "codex" || source == "agy" ? "sparkles" : "terminal"
     }
 }
 
@@ -1928,7 +1929,7 @@ struct IslandRow: View {
     }
 
     private var subtitle: String? {
-        let source = session.source == "codex" ? "Codex" : session.source == "omp" ? "omp" : session.source == "claude" ? "Claude Code" : session.source == "dsh" ? "DeepSeek" : "OpenCode"
+        let source = session.source == "codex" ? "Codex" : session.source == "omp" ? "omp" : session.source == "claude" ? "Claude Code" : session.source == "dsh" ? "DeepSeek" : session.source == "agy" ? "Antigravity" : "OpenCode"
         let parts = [source, session.terminal, session.name, session.detail].filter { $0?.isEmpty == false }.compactMap { $0 }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }

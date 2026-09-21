@@ -1,15 +1,20 @@
-// 用量：两家额度。Codex 读 ~/.codex/auth.json 的 OAuth token，调 chatgpt.com 的
+// 用量：三家额度。Codex 读 ~/.codex/auth.json 的 OAuth token，调 chatgpt.com 的
 // /backend-api/wham/usage，按 limit_window_seconds 归类窗口（18000 秒 = 5 小时、604800 秒 = 一周，
 // 与 CodexBar 的 CodexRateWindowNormalizer 一致）；OpenCode Go 读
 // ~/.local/share/opencode/opencode.db 里 opencode-go 的费用，按 CodexBar 的 12 / 30 / 60 美元口径估算。
+// Antigravity（agy）优先读本地 Language Server 的 RetrieveUserQuotaSummary，拿不到就退回 agy CLI 的 /usage 报告
+// （见下面的 readAgy）。
 // Codex 走的是官方账号自己的接口、不改任何凭据；本地库只读（没有 sidecar 时用 immutable 直读，不创建文件）。
+import {execFile} from 'node:child_process';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 export const limits={session:12,week:30,month:60};
 export const providers=[
  {id:'codex',name:'Codex',symbol:'sparkles'},
  {id:'opencode-go',name:'OpenCode Go',symbol:'terminal'},
+ {id:'agy',name:'Antigravity',symbol:'sparkles'},
 ];
 const codexUsageURL='https://chatgpt.com/backend-api/wham/usage';
 const opencodeUsageURL='https://opencode.ai/zen/go/v1/usage';
@@ -58,9 +63,8 @@ const clampPercent=v=>Math.min(100,Math.max(0,round10(v)));
 // base64url 的 JWT 载荷；解析失败一律当作没有（token 可能是不透明的 PAT）。
 function jwtPayload(token){
  if(typeof token!=='string')return null;
- const parts=token.split('.');
- if(parts.length!==3||!parts[1])return null;
- try{return JSON.parse(Buffer.from(parts[1].replace(/-/g,'+').replace(/_/g,'/'),'base64').toString('utf8'));}catch{return null;}
+ const parts=token.split('.');if(parts.length<2)return null;
+ try{return JSON.parse(Buffer.from(parts[1],'base64url').toString('utf8'));}catch{return null;}
 }
 function jwtAccountId(token){
  const payload=jwtPayload(token);
@@ -82,7 +86,7 @@ function codexWindow(w,nowMs,key,label){
  const resetInSec=Math.max(0,Math.round(Number.isFinite(after)?after:resetAt-Math.floor(nowMs/1000)));
  return {key,label,usedUSD:null,limitUSD:null,usedPercent,remainingPercent:round10(100-usedPercent),resetInSec,resetsAt:resetAt?resetAt*1000:nowMs+resetInSec*1000,status:''};
 }
-function codexSnapshot(body,nowMs){
+export function codexSnapshot(body,nowMs){
  const rate=body?.rate_limit||{},seen=new Set(),windows=[];
  for(const item of [{w:rate.primary_window,fallback:'session'},{w:rate.secondary_window,fallback:'week'}]){
   const w=item.w;
@@ -94,8 +98,36 @@ function codexSnapshot(body,nowMs){
  const credits=body?.credits&&typeof body.credits==='object'?{unlimited:body.credits.unlimited===true,hasCredits:body.credits.has_credits===true,balance:Number(body.credits.balance)||0}:null;
  return {id:'codex',name:'Codex',symbol:'sparkles',available:true,estimated:false,source:'api',keySource:'auth',keyHint:'',plan:typeof body?.plan_type==='string'?body.plan_type:'',credits,windows,error:null,updatedAt:nowMs};
 }
+export function agySnapshot(body,nowMs){
+ const groups=body?.command?.data?.groups||body?.response?.groups||body?.summary?.groups||body?.groups||[],windows=[];
+ for(const g of groups){
+  const gName=g.displayName||g.name||'Gemini';
+  const isClaude=gName.toLowerCase().includes('claude')||gName.toLowerCase().includes('gpt');
+  const modelPrefix=isClaude?'Claude / GPT':'Gemini';
+  for(const b of (g.buckets||[])){
+   const remainingFraction=typeof b.remainingFraction==='number'?b.remainingFraction:typeof b.remaining_fraction==='number'?b.remaining_fraction:typeof b.remaining?.remainingFraction==='number'?b.remaining.remainingFraction:1;
+   const usedPercent=clampPercent((1-remainingFraction)*100);
+   const remainingPercent=round10(remainingFraction*100);
+   const resetTimeRaw=b.resetTime||b.reset_time;
+   const resetTime=resetTimeRaw?Date.parse(resetTimeRaw):0;
+   const resetInSec=resetTime?Math.max(0,Math.round((resetTime-nowMs)/1000)):0;
+   const bid=String(b.bucketId||b.id||'');
+   const isSession=b.window==='5h'||bid.includes('5h');
+   const key=isSession?(isClaude?'claude-session':'session'):(isClaude?'claude-week':'week');
+   const label=`${modelPrefix} ${isSession?'5 小时额度':'周额度'}`;
+   // status 是给界面看的标记（非空且不是 ok 就显示「已限额」，见 app.js 的 usageCard）：
+   // agy 的 description 是整句说明，不能直接塞进来，否则没限额的窗口也会挂上「已限额」。
+   windows.push({key,label,usedUSD:null,limitUSD:null,usedPercent,remainingPercent,resetInSec,resetsAt:resetTime||(nowMs+resetInSec*1000),status:remainingPercent<=0?'rate-limited':'ok'});
+  }
+ }
+ windows.sort((a,b)=>{
+  const order={'session':0,'week':1,'claude-session':2,'claude-week':3};
+  return (order[a.key]??9)-(order[b.key]??9);
+ });
+ return {id:'agy',name:'Antigravity',symbol:'sparkles',available:true,estimated:false,source:'api',keySource:'cli',keyHint:'',plan:'Google Code Assist',credits:null,windows,error:null,updatedAt:nowMs};
+}
 
-export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,notify=null}={}){
+export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,notify=null,execFileImpl=execFile}={}){
  const dataDir=path.join(home,'.bobo'),settingsFile=path.join(dataDir,'usage.json');
  const opencodeDir=path.join(home,'.local/share/opencode'),dbFile=path.join(opencodeDir,'opencode.db'),authFile=path.join(opencodeDir,'auth.json');
  const codexDir=env.CODEX_HOME||path.join(home,'.codex');
@@ -248,6 +280,150 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   return codexSnapshot(body,nowMs);
  }
 
+  // ---- Antigravity（agy）：双通道获取配额（本地 Language Server 与 agy CLI usage 报告） ----
+  async function agyCredentials(){
+   let address=typeof env.ANTIGRAVITY_LS_ADDRESS==='string'?env.ANTIGRAVITY_LS_ADDRESS.trim():'';
+   let csrfToken=typeof env.ANTIGRAVITY_CSRF_TOKEN==='string'?env.ANTIGRAVITY_CSRF_TOKEN.trim():'';
+   const authFile=path.join(dataDir,'agy-auth.json');
+   if(!address||!csrfToken){
+    try{
+     const cached=JSON.parse(await fs.readFile(authFile,'utf8'));
+     if(!address&&cached.address)address=cached.address;
+     if(!csrfToken&&cached.csrfToken)csrfToken=cached.csrfToken;
+    }catch{}
+   }
+   if(!csrfToken){
+    try{
+     const brainDir=path.join(home,'.gemini','antigravity-cli','brain');
+     const dirs=await fs.readdir(brainDir).catch(()=>[]);
+     for(const d of dirs.slice(-5)){
+      const stepsDir=path.join(brainDir,d,'.system_generated','steps');
+      const steps=await fs.readdir(stepsDir).catch(()=>[]);
+      for(const s of steps.slice(-5)){
+       const outFile=path.join(stepsDir,s,'output.txt');
+       const text=await fs.readFile(outFile,'utf8').catch(()=>'');
+       const m=text.match(/ANTIGRAVITY_CSRF_TOKEN=([a-f0-9-]+)/);
+       if(m){csrfToken=m[1];break;}
+      }
+      if(csrfToken)break;
+     }
+    }catch{}
+   }
+   return {address,csrfToken};
+  }
+
+  async function resolveAgyBinary(){
+   const isTest=home.startsWith(os.tmpdir())||Boolean(env.BOBO_HOME);
+   const candidates=[
+    env.ANTIGRAVITY_CLI_PATH,
+    env.ANTIGRAVITY_AGENTAPI_EXE,
+    path.join(home,'.local','bin','agy'),
+    path.join(home,'.gemini','antigravity-cli','bin','agy'),
+    ...(isTest?[]:[
+     path.join(os.homedir(),'.local','bin','agy'),
+     path.join(os.homedir(),'.gemini','antigravity-cli','bin','agy'),
+     '/opt/homebrew/bin/agy',
+     '/usr/local/bin/agy'
+    ])
+   ].filter(Boolean);
+   for(const candidate of candidates){
+    try{
+     await fs.access(candidate,fs.constants.X_OK);
+     return candidate;
+    }catch{}
+   }
+   if(!isTest){
+    const pathDirs=(env.PATH||process.env.PATH||'').split(':').filter(Boolean);
+    for(const dir of pathDirs){
+     const full=path.join(dir,'agy');
+     try{
+      await fs.access(full,fs.constants.X_OK);
+      return full;
+     }catch{}
+    }
+   }
+   return null;
+  }
+
+  async function readAgyCLI(){
+   const bin=await resolveAgyBinary();
+   if(!bin)throw userError('未检测到 agy CLI');
+   return new Promise((resolve,reject)=>{
+    const childEnv={...process.env,...env};
+    if(!childEnv.PATH)childEnv.PATH='/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin';
+    execFileImpl(bin,['-p','/usage','--output-format','json','--print-timeout','20s'],{
+     timeout:25000,
+     env:childEnv,
+     maxBuffer:2*1024*1024
+    },(err,stdout,stderr)=>{
+     const out=String(stdout||'').trim(),errText=String(stderr||'').trim();
+     if(err){
+      try{
+       const data=JSON.parse(out);
+       if(data?.command?.data?.groups?.length||data?.response?.groups?.length||data?.groups?.length)return resolve(data);
+      }catch{}
+      if(/not logged in|select login method|authentication required/i.test(out)||/not logged in|select login method|authentication required/i.test(errText)){
+       return reject(userError('未登录 Antigravity，请在终端执行 agy 登录'));
+      }
+      return reject(userError('获取 Antigravity 配额失败：'+(errText||err.message)));
+     }
+     try{
+      const data=JSON.parse(out);
+      resolve(data);
+     }catch(e){
+      reject(userError('解析 agy 配额 JSON 失败：'+e.message));
+     }
+    });
+   });
+  }
+
+  async function readAgyServer(address,csrfToken){
+   const url=`http://${address.replace(/\/+$/,'')}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary`;
+   const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),codexTimeoutMs);
+   try{
+    const headers={'Content-Type':'application/json','user-agent':'bobo'};
+    if(csrfToken)headers['x-codeium-csrf-token']=csrfToken;
+    const response=await fetchImpl(url,{
+     method:'POST',
+     headers,
+     body:'{}',
+     signal:controller.signal
+    });
+    if(!response.ok)throw userError('Antigravity 额度接口返回 '+response.status);
+    let body;
+    try{body=await response.json();}catch{throw userError('Antigravity 额度接口返回的不是 JSON');}
+    return body;
+   }finally{
+    clearTimeout(timeout);
+   }
+  }
+
+  async function readAgy(nowMs){
+   const {address,csrfToken}=await agyCredentials();
+   if(address&&csrfToken){
+    try{
+     const body=await readAgyServer(address,csrfToken);
+     try{
+      await fs.mkdir(dataDir,{recursive:true});
+      await fs.writeFile(path.join(dataDir,'agy-auth.json'),JSON.stringify({address,csrfToken},null,1),{mode:0o600});
+     }catch{}
+     const snap=agySnapshot(body,nowMs);
+     snap.keySource='local-server';
+     return snap;
+    }catch{}
+   }
+
+   try{
+    const cliBody=await readAgyCLI();
+    const snap=agySnapshot(cliBody,nowMs);
+    snap.keySource='cli';
+    return snap;
+   }catch(e){
+    if(e?.userFacing)throw e;
+    throw userError('未检测到 agy CLI');
+   }
+  }
+
  // ---- 刷新与推送 ----
  // 只在「有效数据」变化时推送：倒计时（resetInSec/resetsAt/updatedAt）每分钟都会变，不参与比较。
  const signatureOf=s=>JSON.stringify([s.selected,s.providers.map(p=>[p.id,p.available,p.enabled,p.keySource,p.keyHint,p.reason,p.error,p.plan,p.windows.map(w=>[w.key,w.usedPercent,w.usedUSD,w.status]),p.daily,p.models,p.totals,p.credits])]);
@@ -262,10 +438,10 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
    for(const w of p.windows||[])previous.set(p.id+':'+w.key,w.remainingPercent);
   }
   for(const p of after.providers){
-   if(p.id!=='codex'||!p.available)continue;
+   if((p.id!=='codex'&&p.id!=='agy')||!p.available)continue;
    for(const w of p.windows||[]){
     const was=previous.get(p.id+':'+w.key);
-    if(typeof was==='number'&&was<100&&w.remainingPercent>=100)notify('reset','Codex 额度已重置',(w.label||w.key)+' 回到 100%');
+    if(typeof was==='number'&&was<100&&w.remainingPercent>=100)notify('reset',(p.name||p.id)+' 额度已重置',(w.label||w.key)+' 回到 100%');
    }
   }
  }
@@ -281,7 +457,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
     if(cached&&nowMs<cached.hardNextAt)return stamp(cached.snapshot);
     if(cached&&!force&&nowMs<cached.nextAt)return stamp(cached.snapshot);
     let snapshot;
-    try{snapshot=id==='codex'?await readCodex(nowMs):await readOpenCodeGo(nowMs);}
+    try{snapshot=id==='codex'?await readCodex(nowMs):id==='agy'?await readAgy(nowMs):await readOpenCodeGo(nowMs);}
     catch(e){
      const reason=describe(e,'读取用量失败：');
      snapshot=cached?.snapshot.available?{...cached.snapshot,error:reason,updatedAt:nowMs}:{...p,available:false,reason,error:null,windows:[],keySource:'',keyHint:'',updatedAt:nowMs};

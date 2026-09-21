@@ -2,7 +2,7 @@ import {test} from 'node:test';import assert from 'node:assert/strict';import fs
 test('隔离环境：列表、文件增删改、冲突保护、路径保护、本机更新删除及备份',async()=>{
  const home=await fs.mkdtemp(path.join(os.tmpdir(),'bobo-test-')),root=path.join(home,'.agents/skills/demo');await fs.mkdir(root,{recursive:true});await fs.writeFile(path.join(root,'SKILL.md'),'---\nname: demo\ndescription: Demo\n---\nHello');await fs.writeFile(path.join(home,'secret.txt'),'private');await fs.symlink(path.join(home,'secret.txt'),path.join(root,'link.txt'));
  await fs.writeFile(path.join(home,'package.json'),'{"type":"module"}');
- const port=14318;const child=spawn(process.execPath,['../src/server.mjs'],{cwd:import.meta.dirname,env:{...process.env,BOBO_HOME:home,PORT:String(port)},stdio:'pipe'});
+ const port=14318;const env={...process.env,BOBO_HOME:home,PORT:String(port)};delete env.ANTIGRAVITY_LS_ADDRESS;delete env.ANTIGRAVITY_CSRF_TOKEN;const child=spawn(process.execPath,['../src/server.mjs'],{cwd:import.meta.dirname,env,stdio:'pipe'});
  try{
   await new Promise((resolve,reject)=>{child.stdout.once('data',resolve);child.once('error',reject);child.once('exit',c=>reject(Error('server exit '+c)));});
   const base='http://127.0.0.1:'+port,html=await(await fetch(base)).text(),token=html.match(/name="token" content="([^"]+)/)[1];
@@ -12,9 +12,11 @@ test('隔离环境：列表、文件增删改、冲突保护、路径保护、�
   assert.equal((await req('ai/settings',null,{Origin:'https://evil.example'})).status,403);
   assert.equal((await req('ai/settings',{keySource:'manual',baseUrl:'http://127.0.0.1:1/v1',model:'test',clearKey:true})).status,200);
   assert.equal((await req('skills',null,{Origin:'https://evil.example'})).status,403);
-  // 用量接口：隔离环境里没有 OpenCode 数据库与 Codex 登录，两家都不可用但接口本身要正常。
+  // 用量接口：隔离环境里没有 OpenCode 数据库、Codex 登录与 agy 会话，三家都不可用但接口本身要正常。
   const usage=(await req('usage')).data;
-  assert.equal(usage.available,false);assert.equal(usage.providers.length,2);assert.equal(usage.providers[0].id,'codex');assert.equal(usage.providers[1].id,'opencode-go');
+  assert.equal(usage.available,false);assert.equal(usage.providers.length,3);assert.equal(usage.providers[0].id,'codex');assert.equal(usage.providers[1].id,'opencode-go');assert.equal(usage.providers[2].id,'agy');
+  const island=(await req('opencode')).data;
+  assert.ok(island.agy);
   await fs.mkdir(path.join(home,'.bobo'),{recursive:true});
   await fs.writeFile(path.join(home,'.bobo/catalog.json'),JSON.stringify([{name:'cached-demo',path:root,agents:['Codex'],source:'test/demo',id:'cached'}]));
   const startup=(await req('startup')).data;

@@ -1,6 +1,6 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs/promises';import os from 'node:os';import path from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
-import {createUsage} from '../src/usage.mjs';
+import {createUsage, agySnapshot} from '../src/usage.mjs';
 // 每日历史按本地日历分桶，测试固定 UTC，让「天」的断言在任何时区都稳定。
 process.env.TZ='UTC';
 // 与 CodexBar 的 OpenCodeGoLocalUsageReader 测试同一基准：2026-03-06T12:00:00Z。
@@ -402,4 +402,160 @@ test('读取失败后退避：接口降级的自动重试变慢，手动刷新�
   await usage.refresh();
   assert.equal(calls,4,'到点后自动刷新一次');
  }finally{await usage.stop();await cleanup(home);}
+});
+
+test('Antigravity：配额窗口解析与 Language Server 读取',async()=>{
+ const mockBody={
+  response:{
+   groups:[
+    {
+     displayName:'Gemini Models',
+     buckets:[
+      {bucketId:'gemini-5h',displayName:'Five Hour Limit Remaining',window:'5h',remainingFraction:0.8,resetTime:'2026-09-21T18:00:00Z'},
+      {bucketId:'gemini-weekly',displayName:'Weekly Limit Remaining',window:'weekly',remainingFraction:0.95,resetTime:'2026-09-28T12:00:00Z'}
+     ]
+    },
+    {
+     displayName:'Claude and GPT models',
+     buckets:[
+      {bucketId:'3p-5h',displayName:'Five Hour Limit Remaining',window:'5h',remainingFraction:1.0,resetTime:'2026-09-21T18:00:00Z'}
+     ]
+    }
+   ]
+  }
+ };
+ const nowMs=Date.parse('2026-09-21T13:00:00Z');
+ const snap=agySnapshot(mockBody,nowMs);
+ assert.equal(snap.id,'agy');
+ assert.equal(snap.available,true);
+ assert.equal(snap.windows.length,3);
+ const s5h=snap.windows.find(w=>w.key==='session');
+ assert.ok(s5h);
+ assert.equal(s5h.usedPercent,20);
+ assert.equal(s5h.remainingPercent,80);
+ assert.equal(s5h.resetInSec,5*3600);
+ // status 只做「已限额」标记：没用完是 ok，用完才是 rate-limited（agy 的整句 description 不进来）。
+ assert.equal(s5h.status,'ok');
+ const exhausted=agySnapshot({groups:[{displayName:'Gemini',buckets:[{bucketId:'gemini-5h',window:'5h',remainingFraction:0,resetTime:'2026-09-21T18:00:00Z',description:'You have hit your 5-hour limit.'}]}]},nowMs);
+ assert.equal(exhausted.windows[0].status,'rate-limited');
+
+ // 完整 createUsage 流程（本地 Language Server 模拟）
+ const home=await fs.mkdtemp(path.join(os.tmpdir(),'bobo-agy-usage-'));
+ const fetchImpl=async(url,options)=>{
+  assert.match(url,/RetrieveUserQuotaSummary/);
+  assert.equal(options.headers['x-codeium-csrf-token'],'mock-csrf-token');
+  return {ok:true,status:200,json:async()=>mockBody};
+ };
+
+ const usage=createUsage({
+  home,
+  now:()=>nowMs,
+  fetchImpl,
+  env:{ANTIGRAVITY_LS_ADDRESS:'localhost:63111',ANTIGRAVITY_CSRF_TOKEN:'mock-csrf-token'}
+ });
+
+ try{
+  const s=await usage.refresh(true);
+  const agy=s.providers.find(p=>p.id==='agy');
+  assert.ok(agy);
+  assert.equal(agy.available,true);
+  assert.equal(agy.windows.length,3);
+  assert.equal(agy.keySource,'local-server');
+ }finally{
+  await usage.stop();
+  await fs.rm(home,{recursive:true,force:true});
+ }
+});
+
+test('Antigravity：未检测到 CLI 时精准提示，CLI 命令输出及未登录错误处理',async()=>{
+ const nowMs=Date.parse('2026-09-21T13:00:00Z');
+ const home=await fs.mkdtemp(path.join(os.tmpdir(),'bobo-agy-cli-'));
+ try{
+  // 1. 未检测到 CLI
+  const usageNoCli=createUsage({home,now:()=>nowMs,env:{}});
+  try{
+   const s=await usageNoCli.refresh(true);
+   const agy=s.providers.find(p=>p.id==='agy');
+   assert.equal(agy.available,false);
+   assert.equal(agy.reason,'未检测到 agy CLI');
+  }finally{
+   await usageNoCli.stop();
+  }
+
+  // 2. 模拟 CLI 成功返回 JSON
+  const cliOutput={
+   status:'SUCCESS',
+   command:{
+    name:'usage',
+    data:{
+     groups:[
+      {
+       name:'Gemini Models',
+       buckets:[
+        {id:'gemini-5h',name:'Five Hour Limit Remaining',window:'5h',remaining_fraction:0.1,reset_time:'2026-09-21T17:00:00Z'},
+        {id:'gemini-weekly',name:'Weekly Limit Remaining',window:'weekly',remaining_fraction:0.85,reset_time:'2026-09-28T12:00:00Z'}
+       ]
+      },
+      {
+       name:'Claude and GPT models',
+       buckets:[
+        {id:'3p-5h',name:'Five Hour Limit Remaining',window:'5h',remaining_fraction:1.0,reset_time:'2026-09-21T18:00:00Z'},
+        {id:'3p-weekly',name:'Weekly Limit Remaining',window:'weekly',remaining_fraction:1.0,reset_time:'2026-09-28T13:00:00Z'}
+       ]
+      }
+     ]
+    }
+   }
+  };
+
+  const fakeBin=path.join(home,'.local/bin/agy');
+  await fs.mkdir(path.dirname(fakeBin),{recursive:true});
+  await fs.writeFile(fakeBin,'#!/bin/sh\n',{mode:0o755});
+
+  let execCalled=false;
+  const mockExecFile=(file,args,options,cb)=>{
+   execCalled=true;
+   assert.deepEqual(args,['-p','/usage','--output-format','json','--print-timeout','20s']);
+   cb(null,JSON.stringify(cliOutput),'');
+  };
+
+  const usageWithCli=createUsage({home,now:()=>nowMs,env:{},execFileImpl:mockExecFile});
+  try{
+   const s=await usageWithCli.refresh(true);
+   assert.ok(execCalled);
+   const agy=s.providers.find(p=>p.id==='agy');
+   assert.equal(agy.available,true);
+   assert.equal(agy.keySource,'cli');
+   assert.equal(agy.windows.length,4);
+   assert.equal(agy.windows[0].key,'session');
+   assert.equal(agy.windows[0].label,'Gemini 5 小时额度');
+   assert.equal(agy.windows[0].usedPercent,90);
+   assert.equal(agy.windows[1].key,'week');
+   assert.equal(agy.windows[1].label,'Gemini 周额度');
+   assert.equal(agy.windows[2].key,'claude-session');
+   assert.equal(agy.windows[2].label,'Claude / GPT 5 小时额度');
+   assert.equal(agy.windows[3].key,'claude-week');
+   assert.equal(agy.windows[3].label,'Claude / GPT 周额度');
+  }finally{
+   await usageWithCli.stop();
+  }
+
+  // 3. 模拟未登录
+  const mockExecLoginRequired=(file,args,options,cb)=>{
+   const err=new Error('Command failed');
+   err.code=1;
+   cb(err,'Please select login method: not logged in','');
+  };
+  const usageLogin=createUsage({home,now:()=>nowMs,env:{},execFileImpl:mockExecLoginRequired});
+  try{
+   const s=await usageLogin.refresh(true);
+   const agy=s.providers.find(p=>p.id==='agy');
+   assert.equal(agy.available,false);
+   assert.equal(agy.reason,'未登录 Antigravity，请在终端执行 agy 登录');
+  }finally{
+   await usageLogin.stop();
+  }
+ }finally{
+  await fs.rm(home,{recursive:true,force:true});
+ }
 });

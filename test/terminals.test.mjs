@@ -1,5 +1,5 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
-import {matchTab,viewedIds,locateSessions,locateAppSessions,codexThreadUrl,parseGhosttyTabs,parseTerminalTabs,parseTerminalActive,folderName,samePath,sameTabTitle,escapeAppleScript,ghosttyFocusScript,terminalFocusScript} from '../src/terminals.mjs';
+import {matchTab,viewedIds,activeOttyTabs,locateSessions,locateAppSessions,codexThreadUrl,parseGhosttyTabs,parseTerminalTabs,parseTerminalActive,folderName,samePath,sameTabTitle,escapeAppleScript,ghosttyFocusScript,terminalFocusScript} from '../src/terminals.mjs';
 const SEP='\u001f';
 // 目录比较：结尾斜杠与 /private 前缀（/tmp、/var 在 macOS 上指向私有目录）都算同一处。
 test('目录比较：忽略结尾斜杠与 /private 前缀',()=>{
@@ -65,10 +65,33 @@ test('标签页匹配：Claude Code 的 ✳ 前缀',()=>{
  assert.equal(matchTab(tabs,{title:'没有的标题',directory:'/tmp/a',source:'claude'})?.id,'c1');
  assert.deepEqual(viewedIds([{id:'s1',title:'修复登录',directory:'/tmp/a'}],[{title:'✳ 修复登录',cwd:''}]),['s1']);
 });
+// Antigravity（agy）的标签名依次是 `AGY | <标题>` 与 `Antigravity | <标题>`，两种前缀都要认。
+test('标签页匹配：agy 的 AGY / Antigravity 前缀',()=>{
+ const tabs=[{id:'a1',title:'AGY | 反重力任务',cwd:'/tmp/a'},{id:'a2',title:'Antigravity | 旧前缀任务',cwd:'/tmp/b'}];
+ assert.equal(matchTab(tabs,{title:'反重力任务',source:'agy'})?.id,'a1');
+ assert.equal(matchTab(tabs,{title:'旧前缀任务',source:'agy'})?.id,'a2');
+ assert.equal(matchTab([tabs[1]],{title:'反重力任务',source:'agy'}),null);
+ assert.deepEqual(viewedIds([{id:'s1',title:'反重力任务',directory:'/tmp/a'}],[{title:'AGY | 反重力任务',cwd:''}]),['s1']);
+});
 test('标签页匹配：strict 时不再用目录名兜底',()=>{
  const tabs=[{id:'t1',title:'~/code/proj — zsh',cwd:''}];
  assert.equal(matchTab(tabs,{title:'别的标题',directory:'/other/proj'})?.id,'t1');
  assert.equal(matchTab(tabs,{title:'别的标题',directory:'/other/proj'},{strict:true}),null);
+});
+// app 出身的会话（rollout 记着 Codex Desktop，见 codex.mjs）的 titleOnly 匹配：只认标题——「这个标签页在跑这条线程」
+// 只有标题能证明（Codex CLI 的标签标题就是 `<线程名> | <项目>`），同目录只说明它俩在同一个目录。
+test('标签页匹配：titleOnly 只认标题',()=>{
+ const tabs=[
+  {id:'t1',title:'lives-mobile — zsh',cwd:'/tmp/proj'},
+  {id:'t2',title:'⠇ 重构胶片条选取交互 | lives-mobile',cwd:'/other'},
+ ];
+ // CLI resume 过的 app 线程：标题带着线程名就认得出，cwd 对不上也没关系。
+ assert.equal(matchTab(tabs,{title:'重构胶片条选取交互',directory:'/tmp/proj',source:'codex'},{titleOnly:true})?.id,'t2');
+ // 同目录里另一条无关的标签页：titleOnly 不认，普通匹配才认。
+ assert.equal(matchTab(tabs,{title:'别的线程',directory:'/tmp/proj',name:'proj',source:'codex'},{titleOnly:true}),null);
+ assert.equal(matchTab(tabs,{title:'别的线程',directory:'/tmp/proj',name:'proj',source:'codex'})?.id,'t1');
+ // 目录名兜底也不做。
+ assert.equal(matchTab([{id:'t3',title:'proj — zsh',cwd:'/tmp/proj'}],{title:'',directory:'/tmp/proj',name:'proj',source:'codex'},{titleOnly:true}),null);
 });
 // 「看过了」只认严格命中：目录精确相等或标题里真的带会话标题，避免同名目录误判。
 test('看过终端：strict 匹配',()=>{
@@ -77,6 +100,16 @@ test('看过终端：strict 匹配',()=>{
  assert.deepEqual(viewedIds(sessions,[{title:'~/tmp/a',cwd:''}]),[]);
  assert.deepEqual(viewedIds(sessions,[]),[]);
  assert.deepEqual(viewedIds([], [{title:'OC | 任务一',cwd:'/tmp/a'}]),[]);
+});
+// Otty 多窗口：只有聚焦窗口里 active 的标签页算「正在看」，别的窗口里选中的标签页不算（头像别提前消失）。
+test('Otty：只有聚焦窗口里 active 的标签页算看过',()=>{
+ const tabs=[{id:'t1',title:'OC | 任务一',cwd:'/tmp/a',window_id:'w1',active:false},{id:'t2',title:'AGY | 反重力任务',cwd:'/tmp/b',window_id:'w1',active:true},{id:'t3',title:'OC | 任务一',cwd:'/tmp/a',window_id:'w2',active:true}];
+ const sessions=[{id:'s1',title:'任务一',directory:'/tmp/a',source:'opencode'},{id:'s2',title:'反重力任务',directory:'/tmp/b',source:'agy'},{id:'s3',title:'没开的会话',directory:'/tmp/c',source:'opencode'}];
+ assert.deepEqual(activeOttyTabs(tabs,'w2').map(t=>t.id),['t3']);
+ assert.deepEqual(viewedIds(sessions,activeOttyTabs(tabs,'w1')),['s2']);
+ assert.deepEqual(viewedIds(sessions,activeOttyTabs(tabs,'w2')),['s1']);
+ assert.deepEqual(viewedIds(sessions,activeOttyTabs(tabs)),['s1','s2']);
+ assert.deepEqual(activeOttyTabs(undefined),[]);
 });
 // Ghostty 列表解析：每行 id / 标题 / 工作目录。
 test('Ghostty 标签页解析',()=>{
@@ -122,6 +155,18 @@ test('Codex app 会话归属与线程深链',()=>{
  assert.equal(codexThreadUrl('a b'),'codex://threads/a%20b');
  assert.equal(codexThreadUrl(''),'');
  assert.equal(codexThreadUrl(undefined),'');
+});
+// CLI 在终端里 resume 了一个 app 里起的线程：rollout 头部仍旧写着 Codex Desktop，但标签标题带着线程名——
+// 归属该是终端（点一下回终端），不能因为 app 标记就归给 Codex app，更不该把已经退出的 app 拉起来。
+test('Codex app 会话：终端标题命中就归终端，认不到才归 app',()=>{
+ const groups=[{name:'Otty',tabs:[{title:'⠇ 重构胶片条选取交互 | lives-mobile',cwd:'/tmp/proj'}]}];
+ const restored={id:'codex:a',app:true,title:'重构胶片条选取交互',directory:'/tmp/proj',source:'codex'};
+ const inApp={id:'codex:b',app:true,title:'别的线程',directory:'/tmp/其他',source:'codex'};
+ assert.deepEqual(locateSessions([restored,inApp],groups,{titleOnly:true}),{'codex:a':'Otty'});
+ // 认不到的：app 在跑归 Codex app（点击走深链），app 没跑才退回普通匹配（同目录的标签页也算）。
+ assert.deepEqual(locateAppSessions([inApp],new Set(['com.openai.codex'])),{'codex:b':'Codex App'});
+ assert.deepEqual(locateAppSessions([inApp],new Set(['io.appmakes.otty'])),{});
+ assert.deepEqual(locateSessions([{...inApp,directory:'/tmp/proj'}],groups),{'codex:b':'Otty'});
 });
 // 聚焦脚本：id / 窗口序号经过转义与数字校验后拼进 AppleScript。
 test('聚焦脚本拼接',()=>{

@@ -11,6 +11,7 @@ import { createCodex } from './codex.mjs';
 import { createOmp } from './omp.mjs';
 import { createClaude } from './claude.mjs';
 import { createDsh } from './dsh.mjs';
+import { createAgy } from './agy.mjs';
 import { createUsage } from './usage.mjs';
 import { createDevices } from './devices.mjs';
 import { createTerminals } from './terminals.mjs';
@@ -67,8 +68,11 @@ claude.start();
 // DeepSeek Harness（dsh）读 ~/.dsh/storages/session_projcache 的投影缓存；提醒同样走通知岛通道。
 const dsh=createDsh({home,remind:(kind,title,message)=>opencode.remind(kind,title,message)});
 dsh.start();
-// 五个 Agent 的会话合成一份列表：各自模块给出 order（按最近一次状态变更），这里统一倒序后截断。
-function sessionsMerged(){return [...opencode.snapshot().sessions,...codex.snapshot().sessions,...omp.snapshot().sessions,...claude.snapshot().sessions,...dsh.snapshot().sessions].sort((a,b)=>(b.order??0)-(a.order??0)).slice(0,40);}
+// Google Antigravity（agy）读 ~/.gemini/antigravity-cli/conversation_summaries.db；提醒同样走通知岛通道。
+const agy=createAgy({home,remind:(kind,title,message)=>opencode.remind(kind,title,message)});
+agy.start();
+// 六个 Agent 的会话合成一份列表：各自模块给出 order（按最近一次状态变更），这里统一倒序后截断。
+function sessionsMerged(){return [...opencode.snapshot().sessions,...codex.snapshot().sessions,...omp.snapshot().sessions,...claude.snapshot().sessions,...dsh.snapshot().sessions,...agy.snapshot().sessions].sort((a,b)=>(b.order??0)-(a.order??0)).slice(0,40);}
 // dsh 通常是 web profile：界面是本地页面 127.0.0.1:3080（dsh 默认端口）。点 dsh 会话时能连上就直接把页面打开
 // ——前端没有会话级深链，只能打开首页让用户在页面里自己选；连不上（例如跑的是 tui profile）再照常找终端标签页。
 const dshWebUrl='http://127.0.0.1:'+(Number(process.env.DSH_WEB_PORT)||3080)+'/';
@@ -82,10 +86,10 @@ let terminalWatchUntil=0, sessionTerminals={};
 async function scanTerminals(){const rows=sessionsMerged();sessionTerminals=rows.length?await terminals.locate(rows):{};}
 setInterval(()=>{if(Date.now()<terminalWatchUntil)scanTerminals().catch(()=>{});},3000);
 // 状态流与 /api/opencode 共用的快照：OpenCode 的设置 / 连接 / 通知 + 合并后的会话（带终端归属）+ 各来源信息。
-function islandSnapshot(){return {...opencode.snapshot(),sessions:sessionsMerged().map(s=>({...s,terminal:sessionTerminals[s.id]})),codex:codex.snapshot(),omp:omp.snapshot(),claude:claude.snapshot(),dsh:dsh.snapshot()};}
+function islandSnapshot(){return {...opencode.snapshot(),sessions:sessionsMerged().map(s=>({...s,terminal:sessionTerminals[s.id]})),codex:codex.snapshot(),omp:omp.snapshot(),claude:claude.snapshot(),dsh:dsh.snapshot(),agy:agy.snapshot()};}
 // 结束 / 终止的头像要留到用户看过终端才收起：对应终端在前台且正停在那个标签页时算已查看；
 // 手动切标签页与点会话行跳过去（/api/opencode/focus）命中同一套匹配。
-async function ackViewed(){for(const id of await terminals.viewed([...opencode.unviewed(),...codex.unviewed(),...omp.unviewed(),...claude.unviewed(),...dsh.unviewed()])){if(!opencode.acknowledge(id)&&!codex.acknowledge(id)&&!omp.acknowledge(id)&&!claude.acknowledge(id))dsh.acknowledge(id);}}
+async function ackViewed(){for(const id of await terminals.viewed([...opencode.unviewed(),...codex.unviewed(),...omp.unviewed(),...claude.unviewed(),...dsh.unviewed(),...agy.unviewed()])){if(!opencode.acknowledge(id)&&!codex.acknowledge(id)&&!omp.acknowledge(id)&&!claude.acknowledge(id)&&!dsh.acknowledge(id))agy.acknowledge(id);}}
 setInterval(()=>{ackViewed().catch(()=>{});},3000);
 // 用量：Codex（chatgpt.com）与 OpenCode Go（官方接口 / 本机估算）的额度，随事件流一起推给刘海面板。
 // 额度重置提醒走通知岛的统一通道（remind 受通知岛的系统通知 / 提示音开关控制）。
@@ -245,8 +249,8 @@ const server=http.createServer(async(req,res)=>{
     res.flushHeaders();
     const send=()=>{if(!res.destroyed)res.write(JSON.stringify({...islandSnapshot(),usage:usage.snapshot(),device:devices.snapshot()})+'\n');};
     send();
-    const stop=opencode.subscribe(send),stopUsage=usage.subscribe(send),stopCodex=codex.subscribe(send),stopOmp=omp.subscribe(send),stopClaude=claude.subscribe(send),stopDsh=dsh.subscribe(send),stopDevices=devices.subscribe(send);
-    const close=()=>{stop();stopUsage();stopCodex();stopOmp();stopClaude();stopDsh();stopDevices();};
+    const stop=opencode.subscribe(send),stopUsage=usage.subscribe(send),stopCodex=codex.subscribe(send),stopOmp=omp.subscribe(send),stopClaude=claude.subscribe(send),stopDsh=dsh.subscribe(send),stopAgy=agy.subscribe(send),stopDevices=devices.subscribe(send);
+    const close=()=>{stop();stopUsage();stopCodex();stopOmp();stopClaude();stopDsh();stopAgy();stopDevices();};
     req.on('close',close);res.on('close',close);
     return;
    }
@@ -274,7 +278,7 @@ const server=http.createServer(async(req,res)=>{
    // 点会话跳到对应终端（Otty / Ghostty / Terminal.app）或 Codex 桌面版：真的切到了那个标签页 / 线程才算「已查看」，
    // 结束/终止的头像才会消失。Codex app 里跑的会话（rollout 里 originator 是 Desktop）直接跳 `codex://threads/<id>` 深链。
    if(url.pathname==='/api/opencode/focus'){
-    const id=String(b.id||''),source=id.startsWith('codex:')?'codex':id.startsWith('omp:')?'omp':id.startsWith('claude:')?'claude':id.startsWith('dsh:')?'dsh':'opencode';
+    const id=String(b.id||''),source=id.startsWith('codex:')?'codex':id.startsWith('omp:')?'omp':id.startsWith('claude:')?'claude':id.startsWith('dsh:')?'dsh':id.startsWith('agy:')?'agy':'opencode';
     // dsh 的 web 界面在跑就把用户带过去：先切到浏览器里已经打开的那个标签（不新开），没有才打开。
     if(source==='dsh'&&await dshWebAlive()){
      const r=await browser.focus(dshWebUrl);
@@ -284,7 +288,7 @@ const server=http.createServer(async(req,res)=>{
     const r=await terminals.focus({...b,source,app:source==='codex'&&codex.appSession(id)});
     // 点会话行就当作「处理过了」：终端页可能已经关掉、跳不过去，也照样标记已查看，
     // 已结束 / 已终止的会话因此从列表与头像里收起，不会一直残留。
-    if(b.id){if(source==='codex')codex.acknowledge(b.id);else if(source==='omp')omp.acknowledge(b.id);else if(source==='claude')claude.acknowledge(b.id);else if(source==='dsh')dsh.acknowledge(b.id);else opencode.acknowledge(b.id);}
+    if(b.id){if(source==='codex')codex.acknowledge(b.id);else if(source==='omp')omp.acknowledge(b.id);else if(source==='claude')claude.acknowledge(b.id);else if(source==='dsh')dsh.acknowledge(b.id);else if(source==='agy')agy.acknowledge(b.id);else opencode.acknowledge(b.id);}
     return json(r);
    }
    // 终端归属按需扫描的续期：网页打开通知岛 / 刘海面板展开时每几秒调一次，服务端据此决定要不要扫。
