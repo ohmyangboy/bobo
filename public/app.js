@@ -1059,6 +1059,7 @@ function renderIsland(){
  renderSessionList($('#claudeList'),$('#claudeCount'),cl,'最近没有 Claude Code 会话；Claude Code 运行时会自动出现在这里');
  renderSessionList($('#dshList'),$('#dshCount'),ds,'最近没有 DeepSeek Harness 会话；dsh 运行时会自动出现在这里');
  renderSessionList($('#agyList'),$('#agyCount'),ag,islandState.agy?.reason||'最近没有 Antigravity 会话；agy 运行时会自动出现在这里');
+ renderQuotaSource(islandState.usage);
  if(!islandReady){islandReady=true;renderIslandSettings();}
 }
 // 通知岛左侧分类：通知岛设置（提醒 / 刘海面板 / 菜单栏与位置合并为一个分栏）与 Agent 连接（OpenCode / Codex / omp / Claude Code / dsh / agy，含各自会话列表）。
@@ -1075,6 +1076,22 @@ function islandSwitch(row,key,label,on){
  cell.append(toggleSwitch(on,label,async value=>{
   islandState.settings=await api('opencode/settings',{...islandState.settings,[key]:value});
  }));
+}
+// 「默认展示的额度」下拉：列出当前「可用且开启」的来源（折叠胶囊能显示的那些）+ 自动（第一个可用来源）；
+// 只在来源集合变化时重建选项，免得状态流每秒推快照把用户正打开的菜单打断。
+let quotaSourceOptions='';
+function renderQuotaSource(usage){
+ const select=$('#quotaSourceSelect');
+ const list=(usage?.providers||[]).filter(p=>p.available&&p.enabled);
+ const signature=list.map(p=>p.id+':'+p.name).join(',');
+ if(signature!==quotaSourceOptions){
+  quotaSourceOptions=signature;
+  select.replaceChildren(...[['','自动（第一个可用来源）'],...list.map(p=>[p.id,p.name])].map(([value,label])=>{
+   const option=document.createElement('option');option.value=value;option.textContent=label;return option;
+  }));
+ }
+ const value=usage?.selected&&list.some(p=>p.id===usage.selected)?usage.selected:'';
+ if(select.value!==value)select.value=value;
 }
 function renderIslandSettings(){
  const s=islandState.settings;
@@ -1106,6 +1123,14 @@ function renderIslandSettings(){
  quotaCount.value=quotaCounts.includes(String(s.quotaCount??0))?String(s.quotaCount??0):'0';
  quotaCount.disabled=quotaView.value!=='expand';
  quotaCount.onchange=guard(async()=>{islandState.settings=await api('opencode/settings',{...islandState.settings,quotaCount:Number(quotaCount.value)});});
+ // 默认展示的额度：折叠胶囊显示哪一家（与「用量」页点来源、面板点圆环是同一个选择，存在 usage.json）。
+ renderQuotaSource(islandState.usage);
+ $('#quotaSourceSelect').onchange=guard(async()=>{
+  const id=$('#quotaSourceSelect').value;
+  islandState.usage=await api('usage/provider',id?{id}:{auto:true});
+  renderQuotaSource(islandState.usage);
+  toast('默认展示的额度：'+(id?$('#quotaSourceSelect').selectedOptions[0].textContent:'自动'));
+ });
 }
 async function islandLoop(){
  while(islandStream){

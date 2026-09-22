@@ -503,10 +503,12 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   })();
   try{return await reading;}finally{reading=null;}
  }
- // 刘海胶囊显示哪一家：只能选「可用且开启」的来源（{next:true} 时在这些来源里循环）。
+ // 刘海胶囊显示哪一家：只能选「可用且开启」的来源（{next:true} 时在这些来源里循环）；
+ // 空 id = 自动（回到第一个可用且开启的来源，与刷新时的兜底一致）。
  function selectProvider(id){
-  if(!state.providers.some(p=>p.id===id&&p.available&&p.enabled))return state;
-  if(selected!==id){selected=id;void saveSettings();state={...state,selected:id};signature=signatureOf(state);emit();}
+  const wanted=id||state.providers.find(p=>p.available&&p.enabled)?.id||'';
+  if(!wanted||!state.providers.some(p=>p.id===wanted&&p.available&&p.enabled))return state;
+  if(selected!==wanted){selected=wanted;void saveSettings();state={...state,selected:wanted};signature=signatureOf(state);emit();}
   return state;
  }
  function cycleProvider(){

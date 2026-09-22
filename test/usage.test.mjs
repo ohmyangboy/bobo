@@ -216,6 +216,10 @@ test('Codex：正常读取 5 小时 + 周两个窗口，selected 点击后循环
   const again=createUsage({home,now:()=>NOW,env:{},fetchImpl:async()=>fakeFetch(codexBody())});
   try{assert.equal((await again.refresh()).selected,'opencode-go');}
   finally{await again.stop();}
+  // 「自动」（空 id）回到第一个可用且开启的来源，并同样落盘。
+  assert.equal(usage.selectProvider('').selected,'codex');
+  await waitProvider('codex');
+  assert.equal(usage.selectProvider('不存在的来源'),usage.snapshot(),'认不出的来源不动任何状态');
  }finally{await usage.stop();await cleanup(home);}
 });
 

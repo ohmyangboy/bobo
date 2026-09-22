@@ -6,6 +6,17 @@ published: true
 
 本文件记录 bobo 面向用户的版本变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。发布在 [GitHub Releases](https://github.com/ohmyangboy/bobo/releases)。
 
+## [1.3.0-beta.2] - 2026-09-22
+
+### 新增
+
+- 「通知岛 → 内容」新增**默认展示的额度**：折叠刘海收起时显示哪一家的额度可以自己选（默认「自动」= 第一个可用来源）。这个选择与「用量」页点来源是同一个，存在 `~/.bobo/usage.json`，重启后保留。
+
+### 变更
+
+- 「展开并排」下点圆环**只切换这一家的显示范围**（5 小时 / 本周 / 账单月…），不再顺手把折叠胶囊切到那家——胶囊显示哪一家由「默认展示的额度」决定，点圆环不会把它改掉。
+- beta 轮次也走应用内更新：带 `-beta.N` 后缀的版本按普通 Release 发布（不再标预发布），安装了 1.2.5 及以后版本的应用会像正式版一样在顶栏提示更新。
+
 ## [1.3.0-beta.1] - 2026-09-22
 
 这是额度功能的一轮预览版（beta）：应用内更新会照常提示它——点右上角的版本按钮检查一下，就能看到 `v1.3.0-beta.1` 并下载，下载好后再点一次即重启安装（按钮与确认框里显示的就是带 beta 的版本号；不想上预览版就先别点）。
@@ -103,3 +114,4 @@ published: true
 [1.2.4]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.4
 [1.2.5]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.5
 [1.3.0-beta.1]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0-beta.1
+[1.3.0-beta.2]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0-beta.2

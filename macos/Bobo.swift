@@ -238,10 +238,9 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             },
             onQuotaRange: { [weak self] id in
                 guard let self, !self.islandDragging else { return }
-                // 「展开并排」模式里点圆环：切这一家的显示范围（服务端在它自己的窗口之间循环并推回快照），
-                // 顺带把它设为折叠胶囊显示的那家——这个模式下不再有点圆环切换来源。
+                // 「展开并排」模式里点圆环：只切这一家圆环的显示范围（服务端在它自己的窗口之间循环并推回快照）。
+                // 折叠胶囊显示哪一家由「通知岛 → 内容 → 默认展示的额度」决定，点圆环不会改它。
                 self.postIsland("/api/usage/range", ["id": id])
-                self.postIsland("/api/usage/provider", ["id": id])
             },
             onDevice: { [weak self] in
                 guard let self, !self.islandDragging else { return }
@@ -1855,7 +1854,7 @@ struct IslandView: View {
     var onSelect: (IslandSession) -> Void
     var onActivate: () -> Void
     var onQuota: () -> Void
-    // 「展开并排」模式下点圆环：切这一家圆环的显示范围（5 小时 / 本周 / 账单月…），顺带把它设为折叠胶囊那家。
+    // 「展开并排」模式下点圆环：切这一家圆环的显示范围（5 小时 / 本周 / 账单月…），不改折叠胶囊显示的那家。
     var onQuotaRange: (String) -> Void
     var onDevice: () -> Void
     // 额度 / 设备指示的悬停变化：满半秒由原生弹明细卡（见 Bobo.detailHoverChanged）。
