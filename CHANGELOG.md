@@ -6,6 +6,12 @@ published: true
 
 本文件记录 bobo 面向用户的版本变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。发布在 [GitHub Releases](https://github.com/ohmyangboy/bobo/releases)。
 
+## [1.3.0-beta.4] - 2026-09-22
+
+### 新增
+
+- 「通知岛 → 内容」新增**额度显示顺序**：几枚来源图标按住拖动就能排序（和「用量」页的来源顺序是同一份），第一个显示在折叠刘海胶囊上；当前显示的那枚描蓝框，不可用或关掉的淡显。
+
 ## [1.3.0-beta.3] - 2026-09-22
 
 ### 变更
@@ -124,3 +130,4 @@ published: true
 [1.3.0-beta.1]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0-beta.1
 [1.3.0-beta.2]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0-beta.2
 [1.3.0-beta.3]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0-beta.3
+[1.3.0-beta.4]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0-beta.4

@@ -1059,6 +1059,7 @@ function renderIsland(){
  renderSessionList($('#claudeList'),$('#claudeCount'),cl,'最近没有 Claude Code 会话；Claude Code 运行时会自动出现在这里');
  renderSessionList($('#dshList'),$('#dshCount'),ds,'最近没有 DeepSeek Harness 会话；dsh 运行时会自动出现在这里');
  renderSessionList($('#agyList'),$('#agyCount'),ag,islandState.agy?.reason||'最近没有 Antigravity 会话；agy 运行时会自动出现在这里');
+ renderQuotaOrder(islandState.usage);
  if(!islandReady){islandReady=true;renderIslandSettings();}
 }
 // 通知岛左侧分类：通知岛设置（提醒 / 刘海面板 / 菜单栏与位置合并为一个分栏）与 Agent 连接（OpenCode / Codex / omp / Claude Code / dsh / agy，含各自会话列表）。
@@ -1074,6 +1075,72 @@ function islandSwitch(row,key,label,on){
  const cell=$(row);cell.querySelector('.switch')?.remove();
  cell.append(toggleSwitch(on,label,async value=>{
   islandState.settings=await api('opencode/settings',{...islandState.settings,[key]:value});
+ }));
+}
+// 「内容 → 额度显示顺序」：几枚来源图标按住拖动排序。写的是同一份 order（usage.json 的 order），
+// 所以通知岛里的这个顺序、「用量」页的来源顺序、刘海面板上圆环的顺序始终一致。
+const quotaSymbols={codex:'provider-codex','opencode-go':'provider-opencode',agy:'provider-agy'};
+let quotaOrderIds='';
+function renderQuotaOrder(usage){
+ const box=$('#quotaOrderList');if(!box)return;
+ const list=usage?.providers||[];
+ if(!list.length){
+  if(box.dataset.empty!=='1'){box.dataset.empty='1';box.replaceChildren();const p=document.createElement('span');p.className='muted';p.textContent='正在读取额度…';box.append(p);}
+  return;
+ }
+ delete box.dataset.empty;
+ const signature=list.map(p=>p.id).join(',');
+ if(signature!==quotaOrderIds){
+  quotaOrderIds=signature;
+  box.replaceChildren(...list.map(p=>{
+   const chip=document.createElement('button');
+   chip.type='button';chip.className='quota-chip';chip.dataset.provider=p.id;chip.draggable=true;
+   chip.title=p.name+'：按住拖动调整顺序';
+   const glyph=providerGlyph({icon:quotaSymbols[p.id]});
+   if(glyph)chip.append(glyph);else chip.textContent=p.name;
+   return chip;
+  }));
+ }
+ // 状态就地更新，不重建节点（拖动过程中状态流推快照也不会打断拖动）。
+ for(const chip of box.querySelectorAll('.quota-chip')){
+  const p=list.find(x=>x.id===chip.dataset.provider);
+  chip.dataset.state=p&&p.available?(p.enabled===false?'disabled':'ok'):'off';
+  chip.dataset.current=String(!!p&&p.id===usage.selected);
+ }
+}
+let quotaDragId=null;
+const quotaOrderBox=$('#quotaOrderList');
+if(quotaOrderBox){
+ const chipAt=e=>e.target?.closest?.('.quota-chip')||null;
+ quotaOrderBox.addEventListener('dragstart',e=>{
+  const chip=chipAt(e);if(!chip)return;
+  quotaDragId=chip.dataset.provider;chip.dataset.dragging='true';
+  if(e.dataTransfer){e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',quotaDragId);}
+ });
+ quotaOrderBox.addEventListener('dragend',e=>{
+  const chip=chipAt(e);if(chip)delete chip.dataset.dragging;
+  quotaDragId=null;
+ });
+ quotaOrderBox.addEventListener('dragover',e=>{
+  const chip=chipAt(e);
+  if(!chip||!quotaDragId||chip.dataset.provider===quotaDragId)return;
+  e.preventDefault();
+  if(e.dataTransfer)e.dataTransfer.dropEffect='move';
+ });
+ quotaOrderBox.addEventListener('drop',guard(async e=>{
+  const chip=chipAt(e);
+  if(!chip||!quotaDragId||chip.dataset.provider===quotaDragId)return;
+  e.preventDefault();
+  const ids=[...quotaOrderBox.querySelectorAll('.quota-chip')].map(c=>c.dataset.provider);
+  const from=ids.indexOf(quotaDragId),to=ids.indexOf(chip.dataset.provider);
+  if(from<0||to<0)return;
+  // 鼠标落在目标图标左半 → 插到它前面；右半 → 插到它后面。
+  const rect=chip.getBoundingClientRect(),after=e.clientX>rect.left+rect.width/2;
+  const next=ids.filter(id=>id!==quotaDragId);
+  next.splice(next.indexOf(chip.dataset.provider)+(after?1:0),0,quotaDragId);
+  islandState.usage=await api('usage/order',{ids:next});
+  renderQuotaOrder(islandState.usage);
+  toast('额度显示顺序已更新');
  }));
 }
 function renderIslandSettings(){
