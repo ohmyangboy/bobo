@@ -401,6 +401,12 @@ body[data-view=usage] #usageRefresh,body[data-view=device] #deviceRefresh{displa
 /* 侧栏分组标题（通知岛视图的「通知岛设置 / Agent 连接」）。 */
 .menu-group{margin:14px 10px 5px;color:var(--muted);font-size:11px;font-weight:600;letter-spacing:.2px}
 .menu-group:first-child{margin-top:4px}
+/* 通知岛侧栏：设置项与 Agent 连接之间用一条细线分区，分组之间留出呼吸空间 */
+#islandWorkspace .menu-group{border-top:1px solid var(--line-soft);margin-top:16px;padding-top:12px}
+/* 用量侧栏：按住拖动调整来源顺序，排在最前的来源显示在刘海胶囊上 */
+#usageWorkspace [data-usage-pane]{cursor:grab}
+#usageWorkspace [data-usage-pane][data-dragging=true]{opacity:.55}
+.usage-order-hint{margin:10px 18px 0;flex:none}
 /* 侧栏条目右侧的状态点（来源安装状态 / 会话状态）。 */
 .settings-menu .notch-dot{margin-left:auto}
 .settings-menu .notch-dot[data-state=working]{background:#0a84ff}

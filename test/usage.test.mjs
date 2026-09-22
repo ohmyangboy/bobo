@@ -205,20 +205,24 @@ test('Codex：正常读取 5 小时 + 周两个窗口，selected 点击后循环
   assert.equal(s.selected,'opencode-go','点击切换');
   s=usage.cycleProvider();
   assert.equal(s.selected,'codex','再点回到 Codex');
-  // 写盘是异步的：等到文件里就是当前选择（而不是更早那一次），避免和下一次切换赛跑。
+  // 写盘是异步的：等到文件里的顺序就是当前顺序（而不是更早那一次），避免和下一次切换赛跑。
   const readSettings=async()=>JSON.parse(await fs.readFile(path.join(home,'.bobo/usage.json'),'utf8'));
-  const waitProvider=want=>waitFor(async()=>{const r=await readSettings();if(r.provider!==want)throw Error('设置还没写到 '+want);return r;});
-  const saved=await waitProvider('codex');
-  assert.equal(saved.provider,'codex');
-  // 新进程读同一份设置：选中的 provider 会被记住。
+  const waitOrder=want=>waitFor(async()=>{const r=await readSettings();if((r.order||[]).join()!==want)throw Error('顺序还没写到 '+want);return r;});
+  const saved=await waitOrder('agy,codex,opencode-go');
+  assert.equal(saved.order.join(),'agy,codex,opencode-go','两次点击切换把前两家依次挪到了末尾');
+  // 新进程读同一份设置：顺序被记住，折叠胶囊显示顺序里第一个可用的那家。
   usage.selectProvider('opencode-go');
-  await waitProvider('opencode-go');
+  await waitOrder('opencode-go,agy,codex');
   const again=createUsage({home,now:()=>NOW,env:{},fetchImpl:async()=>fakeFetch(codexBody())});
-  try{assert.equal((await again.refresh()).selected,'opencode-go');}
-  finally{await again.stop();}
-  // 「自动」（空 id）回到第一个可用且开启的来源，并同样落盘。
-  assert.equal(usage.selectProvider('').selected,'codex');
-  await waitProvider('codex');
+  try{
+   const s2=await again.refresh();
+   assert.equal(s2.selected,'opencode-go');
+   assert.deepEqual(s2.providers.map(p=>p.id),['opencode-go','agy','codex'],'快照按用户排的顺序返回');
+  }finally{await again.stop();}
+  // 拖动排序（setOrder）：认不出的 id 忽略、没提到的按默认顺序补在后面；agy 不可用时显示下一个可用的。
+  assert.deepEqual(usage.setOrder(['agy','codex']).providers.map(p=>p.id),['agy','codex','opencode-go']);
+  assert.equal(usage.snapshot().selected,'codex','顺序里第一家不可用就显示下一家');
+  await waitOrder('agy,codex,opencode-go');
   assert.equal(usage.selectProvider('不存在的来源'),usage.snapshot(),'认不出的来源不动任何状态');
  }finally{await usage.stop();await cleanup(home);}
 });
@@ -329,13 +333,14 @@ test('来源开关与手动 Key：关掉的不参与切换，手动 Key 优先�
   const saved=JSON.parse(await fs.readFile(path.join(home,'.bobo/usage.json'),'utf8'));
   assert.equal(saved.keys['opencode-go'],'sk-manual-abcd');
   assert.equal((await fs.stat(path.join(home,'.bobo/usage.json'))).mode&0o777,0o600,'Key 文件必须只有当前用户可读写');
-  // 开关：关掉当前显示的那家时会自动换到另一家，循环也只在开启的来源里走。
+  // 开关：关掉当前显示的那家时，顺序里下一家可用的自动顶上来；点击切换也只在开启的来源里走。
   s=usage.selectProvider('codex');assert.equal(s.selected,'codex');
   s=usage.setEnabled('codex',false);
   assert.equal(provider(s,'codex').enabled,false);assert.equal(s.selected,'opencode-go','关掉当前来源后自动换一家');
   assert.equal(usage.cycleProvider().selected,'opencode-go','只剩一家开启时不循环');
   s=usage.setEnabled('codex',true);
-  assert.equal(usage.cycleProvider().selected,'codex','重新开启后可以切回去');
+  assert.equal(s.selected,'codex','重新开启后顺序里第一家可用的又显示出来');
+  assert.equal(usage.cycleProvider().selected,'opencode-go','点击切换轮到顺序里的下一家');
   // 清除手动 Key 后回退到环境变量。
   s=await usage.clearKey();
   local=provider(s,'opencode-go');

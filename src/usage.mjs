@@ -131,24 +131,39 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
  const dataDir=path.join(home,'.bobo'),settingsFile=path.join(dataDir,'usage.json');
  const opencodeDir=path.join(home,'.local/share/opencode'),dbFile=path.join(opencodeDir,'opencode.db'),authFile=path.join(opencodeDir,'auth.json');
  const codexDir=env.CODEX_HOME||path.join(home,'.codex');
- let sqlite=null,selected='',state=empty(),signature='',listeners=new Set(),timer=null,reading=null,closed=false;
+ let sqlite=null,order=providers.map(p=>p.id),state=empty(),signature='',listeners=new Set(),timer=null,reading=null,closed=false;
  const cache=new Map(),backoff=new Map();
- // 持久化设置（~/.bobo/usage.json）：刘海显示哪家、各来源的启停、手动填的 API Key、额度重置提醒、
- // 各来源圆环显示哪一档窗口（ranges，见 cycleRange）。
+ // 持久化设置（~/.bobo/usage.json）：各来源的显示顺序（order，折叠胶囊显示顺序里第一个可用且开启的）、
+ // 各来源的启停、手动填的 API Key、额度重置提醒、各来源圆环显示哪一档窗口（ranges，见 cycleRange）。
  const settings={keys:{},enabled:{},ranges:{},notifyReset:true};
  const isEnabled=id=>settings.enabled[id]!==false;
+ // 顺序规范化：只认已知来源、去掉重复，没提到的按默认顺序补在后面。
+ function normalizeOrder(ids){
+  const known=providers.map(p=>p.id),seen=new Set(),list=[];
+  for(const id of Array.isArray(ids)?ids:[])if(known.includes(id)&&!seen.has(id)){seen.add(id);list.push(id);}
+  for(const id of known)if(!seen.has(id))list.push(id);
+  return list;
+ }
+ // 折叠胶囊显示哪一家：顺序里第一个「可用且开启」的来源（都没有就退回第一个可用的）。
+ function displayOf(list){
+  const selectable=list.filter(p=>p.available&&p.enabled);
+  return selectable[0]?.id||list.find(p=>p.available)?.id||list[0]?.id||'';
+ }
+ const orderOf=list=>[...list].sort((a,b)=>order.indexOf(a.id)-order.indexOf(b.id));
  // 圆环显示这一家的哪一档窗口：认得出（这家真返回了这一档）就用记住的，否则退回 5 小时窗口、再退回第一档。
  function rangeFor(id,windows){
   const keys=(windows||[]).map(w=>w.key);
   if(keys.includes(settings.ranges[id]))return settings.ranges[id];
   return keys.includes('session')?'session':(keys[0]||'');
  }
- function empty(){return {available:false,selected:providers[0].id,providers:providers.map(p=>({id:p.id,name:p.name,symbol:p.symbol,available:false,enabled:true,keySource:'',keyHint:'',reason:'正在读取用量…',windows:[],updatedAt:0})),updatedAt:0};}
+ function empty(){return {available:false,selected:order[0]||providers[0].id,providers:providers.map(p=>({id:p.id,name:p.name,symbol:p.symbol,available:false,enabled:true,keySource:'',keyHint:'',reason:'正在读取用量…',windows:[],updatedAt:0})),updatedAt:0};}
  const emit=()=>{for(const listener of listeners){try{listener();}catch{}}};
  async function loadSettings(){
   try{
    const raw=JSON.parse(await fs.readFile(settingsFile,'utf8'));
-   if(providers.some(p=>p.id===raw?.provider))selected=raw.provider;
+   // 旧版本存的是单个 provider（当前显示的那家）：读进来时把它排到最前，升级前后显示不变。
+   if(Array.isArray(raw?.order))order=normalizeOrder(raw.order);
+   else if(providers.some(p=>p.id===raw?.provider))order=normalizeOrder([raw.provider,...order]);
    if(typeof raw?.notifyReset==='boolean')settings.notifyReset=raw.notifyReset;
    for(const p of providers){
     if(typeof raw?.enabled?.[p.id]==='boolean')settings.enabled[p.id]=raw.enabled[p.id];
@@ -159,10 +174,10 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
    }
   }catch{}
  }
- // 串行写盘（原子改名，避免半截 JSON）：连点切换时最后一次调用写入的就是当前选择。
+ // 串行写盘（原子改名，避免半截 JSON）：连点切换时最后一次调用写入的就是当前顺序。
  let saving=Promise.resolve();
  function saveSettings(){
-  saving=saving.then(async()=>{try{await fs.mkdir(dataDir,{recursive:true});await fs.writeFile(settingsFile+'.tmp',JSON.stringify({provider:selected,enabled:settings.enabled,keys:settings.keys,ranges:settings.ranges,notifyReset:settings.notifyReset},{},1),{mode:0o600});await fs.rename(settingsFile+'.tmp',settingsFile);}catch{}});
+  saving=saving.then(async()=>{try{await fs.mkdir(dataDir,{recursive:true});await fs.writeFile(settingsFile+'.tmp',JSON.stringify({order,enabled:settings.enabled,keys:settings.keys,ranges:settings.ranges,notifyReset:settings.notifyReset},{},1),{mode:0o600});await fs.rename(settingsFile+'.tmp',settingsFile);}catch{}});
   return saving;
  }
 
@@ -492,10 +507,10 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
     return stamp(snapshot);
    }));
    const available=results.filter(r=>r.available);
-   // 刘海胶囊只在「可用且开启」的来源里选；关掉当前来源时自动换到下一家。
-   const selectable=available.filter(r=>r.enabled);
-   if(!selectable.some(r=>r.id===selected))selected=selectable[0]?.id||available[0]?.id||providers[0].id;
-   const next={available:available.length>0,selected,providers:results,notifyReset:settings.notifyReset,updatedAt:nowMs};
+   // 快照按用户排的顺序（usage.json 的 order）返回：折叠胶囊、并排的圆环、点击切换都用这个顺序；
+   // 折叠胶囊显示顺序里第一个「可用且开启」的来源，关掉或不可用会自动让位给下一家。
+   const ordered=orderOf(results);
+   const next={available:available.length>0,selected:displayOf(ordered),providers:ordered,notifyReset:settings.notifyReset,updatedAt:nowMs};
    detectResets(state,next);
    const key=signatureOf(next);
    if(key!==signature){signature=key;state=next;emit();}else state=next;
@@ -503,19 +518,35 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   })();
   try{return await reading;}finally{reading=null;}
  }
- // 刘海胶囊显示哪一家：只能选「可用且开启」的来源（{next:true} 时在这些来源里循环）；
- // 空 id = 自动（回到第一个可用且开启的来源，与刷新时的兜底一致）。
- function selectProvider(id){
-  const wanted=id||state.providers.find(p=>p.available&&p.enabled)?.id||'';
-  if(!wanted||!state.providers.some(p=>p.id===wanted&&p.available&&p.enabled))return state;
-  if(selected!==wanted){selected=wanted;void saveSettings();state={...state,selected:wanted};signature=signatureOf(state);emit();}
+ // 顺序变了（拖拽排序 / 点来源 / 点击切换下一家）后重排快照：providers 按新顺序返回，
+ // selected 取顺序里第一个「可用且开启」的来源，然后推一次快照。
+ function applyOrder(){
+  const list=orderOf(state.providers);
+  state={...state,providers:list,selected:displayOf(list)};
+  signature=signatureOf(state);emit();
   return state;
  }
+ // 把某一家排到最前（网页「用量」页点来源 / 面板点圆环）：它就成了折叠胶囊显示的那家。
+ function selectProvider(id){
+  if(!state.providers.some(p=>p.id===id&&p.available&&p.enabled))return state;
+  if(order[0]===id)return state;
+  order=normalizeOrder([id,...order]);void saveSettings();
+  return applyOrder();
+ }
+ // 点击切换：把当前显示的那家挪到顺序末尾，顺序里下一家「可用且开启」的顶上来（选择写进 usage.json）。
  function cycleProvider(){
   const list=state.providers.filter(p=>p.available&&p.enabled);
   if(list.length<2)return state;
-  const index=list.findIndex(p=>p.id===state.selected);
-  return selectProvider(list[(index+1)%list.length].id);
+  const current=list[0].id;
+  order=normalizeOrder([...order.filter(id=>id!==current),current]);void saveSettings();
+  return applyOrder();
+ }
+ // 拖动排序（网页「用量」页）：直接写顺序，顺序里第一个「可用且开启」的来源显示在折叠胶囊上。
+ function setOrder(ids){
+  const next=normalizeOrder(ids);
+  if(next.join()===order.join())return state;
+  order=next;void saveSettings();
+  return applyOrder();
  }
  // 圆环显示哪一档窗口（「展开并排」模式下点某家的圆环循环它自己的范围）：
  // 在这家返回的窗口之间循环（5 小时 → 本周 → 账单月 → …），只有一档就不动，选择写进 usage.json。
@@ -535,11 +566,9 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   const row=state.providers.find(p=>p.id===id);
   if(!row)return state;
   settings.enabled[id]=enabled!==false;void saveSettings();
-  const next={...state,providers:state.providers.map(p=>p.id===id?{...p,enabled:settings.enabled[id]}:p)};
-  // 关掉当前显示的那家时换到下一家「可用且开启」的来源（selected 与 state.selected 必须一起改）。
-  const selectable=next.providers.filter(p=>p.available&&p.enabled);
-  if(!selectable.some(p=>p.id===selected))selected=selectable[0]?.id||selected;
-  state={...next,selected};
+  // 关掉当前显示的那家时，顺序里下一家「可用且开启」的自动顶上来（selected 是派生值，一起更新）。
+  const next=state.providers.map(p=>p.id===id?{...p,enabled:settings.enabled[id]}:p);
+  state={...state,providers:next,selected:displayOf(next)};
   signature=signatureOf(state);emit();
   return state;
  }
@@ -576,6 +605,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   refresh,
   selectProvider,
   cycleProvider,
+  setOrder,
   cycleRange,
   setEnabled,
   setNotifyReset,

@@ -6,6 +6,14 @@ published: true
 
 本文件记录 bobo 面向用户的版本变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。发布在 [GitHub Releases](https://github.com/ohmyangboy/bobo/releases)。
 
+## [1.3.0-beta.3] - 2026-09-22
+
+### 变更
+
+- **折叠胶囊显示哪一家，改成由「用量」页的来源顺序决定**：在「用量」页按住拖动来源就能排序，顺序里第一个「可用且开启」的来源显示在刘海胶囊上（第一个不可用或关掉时自动让给下一家）；顺序存在 `~/.bobo/usage.json`，重启后保留，「点击切换」方式也按这个顺序轮换。
+- 上一版加的「通知岛 → 内容 → 默认展示的额度」下拉去掉了：这个配置挪到「用量」页，改成拖动排序；「用量」页点来源只切换右侧分栏，不再顺手改刘海胶囊显示的那家。
+- **通知岛侧栏**补上「通知岛」标题，设置项与「Agent 连接」之间用一条细线分区、分组之间留出间距——之前设置项顶在侧栏最上面，看起来像个标题而不是可点的项。
+
 ## [1.3.0-beta.2] - 2026-09-22
 
 ### 新增
@@ -115,3 +123,4 @@ published: true
 [1.2.5]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.5
 [1.3.0-beta.1]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0-beta.1
 [1.3.0-beta.2]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0-beta.2
+[1.3.0-beta.3]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0-beta.3

@@ -264,9 +264,10 @@ const server=http.createServer(async(req,res)=>{
    const b=await body(req);
    if(url.pathname==='/api/ai/settings')return json(await ai.save(b));
    if(url.pathname==='/api/opencode/settings')return json(await opencode.saveSettings(b));
-   // 刘海额度指示显示哪一家：{next:true} 循环切换（只在开启的来源里），或指定 {id}；
-   // {auto:true}（或 id 为空）= 自动，回到第一个「可用且开启」的来源；选择保存在 ~/.bobo/usage.json。
-   if(url.pathname==='/api/usage/provider')return json(b.next?usage.cycleProvider():usage.selectProvider(b.auto?'':b.id));
+   // 刘海额度指示显示哪一家：{next:true} 点击切换（按显示顺序轮换），或 {id} 把这家排到最前；顺序存在 usage.json。
+   if(url.pathname==='/api/usage/provider')return json(b.next?usage.cycleProvider():usage.selectProvider(b.id));
+   // 拖动排序：{ids:[...]} 直接写显示顺序（顺序里第一个「可用且开启」的来源显示在折叠胶囊上）。
+   if(url.pathname==='/api/usage/order')return json(usage.setOrder(b.ids));
    // 额度圆环显示哪一档窗口：{id} 让这一家在它自己的窗口之间循环（5 小时 / 本周 / 账单月…），选择保存在 usage.json。
    if(url.pathname==='/api/usage/range')return json(usage.cycleRange(b.id));
    // 来源启停：关掉的来源不参与刘海胶囊的切换循环。

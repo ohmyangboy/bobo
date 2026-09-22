@@ -1059,7 +1059,6 @@ function renderIsland(){
  renderSessionList($('#claudeList'),$('#claudeCount'),cl,'最近没有 Claude Code 会话；Claude Code 运行时会自动出现在这里');
  renderSessionList($('#dshList'),$('#dshCount'),ds,'最近没有 DeepSeek Harness 会话；dsh 运行时会自动出现在这里');
  renderSessionList($('#agyList'),$('#agyCount'),ag,islandState.agy?.reason||'最近没有 Antigravity 会话；agy 运行时会自动出现在这里');
- renderQuotaSource(islandState.usage);
  if(!islandReady){islandReady=true;renderIslandSettings();}
 }
 // 通知岛左侧分类：通知岛设置（提醒 / 刘海面板 / 菜单栏与位置合并为一个分栏）与 Agent 连接（OpenCode / Codex / omp / Claude Code / dsh / agy，含各自会话列表）。
@@ -1076,22 +1075,6 @@ function islandSwitch(row,key,label,on){
  cell.append(toggleSwitch(on,label,async value=>{
   islandState.settings=await api('opencode/settings',{...islandState.settings,[key]:value});
  }));
-}
-// 「默认展示的额度」下拉：列出当前「可用且开启」的来源（折叠胶囊能显示的那些）+ 自动（第一个可用来源）；
-// 只在来源集合变化时重建选项，免得状态流每秒推快照把用户正打开的菜单打断。
-let quotaSourceOptions='';
-function renderQuotaSource(usage){
- const select=$('#quotaSourceSelect');
- const list=(usage?.providers||[]).filter(p=>p.available&&p.enabled);
- const signature=list.map(p=>p.id+':'+p.name).join(',');
- if(signature!==quotaSourceOptions){
-  quotaSourceOptions=signature;
-  select.replaceChildren(...[['','自动（第一个可用来源）'],...list.map(p=>[p.id,p.name])].map(([value,label])=>{
-   const option=document.createElement('option');option.value=value;option.textContent=label;return option;
-  }));
- }
- const value=usage?.selected&&list.some(p=>p.id===usage.selected)?usage.selected:'';
- if(select.value!==value)select.value=value;
 }
 function renderIslandSettings(){
  const s=islandState.settings;
@@ -1123,14 +1106,6 @@ function renderIslandSettings(){
  quotaCount.value=quotaCounts.includes(String(s.quotaCount??0))?String(s.quotaCount??0):'0';
  quotaCount.disabled=quotaView.value!=='expand';
  quotaCount.onchange=guard(async()=>{islandState.settings=await api('opencode/settings',{...islandState.settings,quotaCount:Number(quotaCount.value)});});
- // 默认展示的额度：折叠胶囊显示哪一家（与「用量」页点来源、面板点圆环是同一个选择，存在 usage.json）。
- renderQuotaSource(islandState.usage);
- $('#quotaSourceSelect').onchange=guard(async()=>{
-  const id=$('#quotaSourceSelect').value;
-  islandState.usage=await api('usage/provider',id?{id}:{auto:true});
-  renderQuotaSource(islandState.usage);
-  toast('默认展示的额度：'+(id?$('#quotaSourceSelect').selectedOptions[0].textContent:'自动'));
- });
 }
 async function islandLoop(){
  while(islandStream){
@@ -1169,6 +1144,8 @@ let usageData=null,usageTimer=null;
 const usagePanes=['codex','opencode','agy'];
 const usageProviderId=pane=>pane==='opencode'?'opencode-go':pane==='agy'?'agy':'codex';
 const usagePaneFor=id=>id==='opencode-go'?'opencode':id==='agy'?'agy':'codex';
+// 侧栏来源顺序（拖动排序用）：记录上一次应用过的顺序，避免状态流每次推送都重排 DOM。
+let usageSidebarOrder='';
 const fmtPercent=v=>Number.isInteger(v)?String(v):v.toFixed(1);
 // 金额：$0 显示 0；≥ 1 分保留两位（$0.50）；更小的零头保留四位（$0.0027），免得读成 0。
 const money=v=>{if(!v)return '$0';return '$'+(v>=0.01?v.toFixed(2):v.toFixed(4));};
@@ -1185,11 +1162,36 @@ function showUsagePane(name){
  for(const p of document.querySelectorAll('#usageWorkspace [data-usage-pane-content]'))p.hidden=p.dataset.usagePaneContent!==next;
  for(const b of document.querySelectorAll('#usageWorkspace [data-usage-pane]'))b.setAttribute('aria-pressed',String(b.dataset.usagePane===next));
 }
-for(const b of document.querySelectorAll('#usageWorkspace [data-usage-pane]'))b.onclick=guard(async()=>{
- showUsagePane(b.dataset.usagePane);
- usageData=await api('usage/provider',{id:usageProviderId(b.dataset.usagePane)});
- renderUsage();
-});
+for(const b of document.querySelectorAll('#usageWorkspace [data-usage-pane]'))b.onclick=()=>showUsagePane(b.dataset.usagePane);
+// 按住拖动调整来源顺序：顺序写在 usage.json 的 order 里，排在最前的来源显示在刘海胶囊上
+// （不可用或关掉的会自动让给下一家）。拖动松手后立刻把新顺序发给服务端并重画侧栏。
+let usageDragPane=null;
+for(const b of document.querySelectorAll('#usageWorkspace [data-usage-pane]')){
+ b.addEventListener('dragstart',e=>{
+  usageDragPane=b.dataset.usagePane;b.dataset.dragging='true';
+  if(e.dataTransfer){e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',usageDragPane);}
+ });
+ b.addEventListener('dragend',()=>{delete b.dataset.dragging;usageDragPane=null;});
+ b.addEventListener('dragover',e=>{
+  if(!usageDragPane||usageDragPane===b.dataset.usagePane)return;
+  e.preventDefault();
+  if(e.dataTransfer)e.dataTransfer.dropEffect='move';
+ });
+ b.addEventListener('drop',guard(async e=>{
+  e.preventDefault();
+  if(!usageDragPane||usageDragPane===b.dataset.usagePane)return;
+  const panes=[...document.querySelectorAll('#usageWorkspace [data-usage-pane]')].map(x=>x.dataset.usagePane);
+  const from=panes.indexOf(usageDragPane),to=panes.indexOf(b.dataset.usagePane);
+  if(from<0||to<0)return;
+  // 鼠标落在目标项上半 → 插到它前面；下半 → 插到它后面。
+  const rect=b.getBoundingClientRect(),after=e.clientY>rect.top+rect.height/2;
+  const next=panes.filter(p=>p!==usageDragPane);
+  next.splice(next.indexOf(b.dataset.usagePane)+(after?1:0),0,usageDragPane);
+  usageData=await api('usage/order',{ids:next.map(usageProviderId)});
+  renderUsage();
+  toast('来源顺序已更新：'+(usageData?.providers?.[0]?.name||'')+' 显示在刘海胶囊上');
+ }));
+}
 function usageCard(w){
  const card=document.createElement('div');card.className='usage-card';card.dataset.level=usageLevel(w.remainingPercent);
  const head=document.createElement('div');head.className='usage-card-head';
@@ -1232,6 +1234,14 @@ function renderUsage(){
  const data=usageData;
  const byId=id=>data?.providers?.find(p=>p.id===id)||null;
  const codex=byId('codex'),local=byId('opencode-go'),agy=byId('agy');
+ // 侧栏按服务端返回的顺序排列（拖动排序后立刻反映出来）：只在顺序变化时 append 移动已有节点，不重建。
+ const sidebarIds=(data?.providers||[]).map(p=>usagePaneFor(p.id));
+ const sidebarOrder=sidebarIds.join(',');
+ if(sidebarOrder!==usageSidebarOrder){
+  usageSidebarOrder=sidebarOrder;
+  const nav=document.querySelector('#usageWorkspace .settings-menu');
+  for(const pane of sidebarIds){const button=nav.querySelector('[data-usage-pane="'+pane+'"]');if(button)nav.append(button);}
+ }
  $('#usageState').textContent=!data?'读取中':data.available?'已连接':'暂不可用';
  $('#usageUpdated').textContent=data?.updatedAt?'更新于 '+new Date(data.updatedAt).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'每分钟刷新';
  $('#usageDotCodex').dataset.state=codex?.available?'idle':'';
