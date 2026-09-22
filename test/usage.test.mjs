@@ -219,6 +219,49 @@ test('Codex：正常读取 5 小时 + 周两个窗口，selected 点击后循环
  }finally{await usage.stop();await cleanup(home);}
 });
 
+test('额度圆环的范围：每家在它自己的窗口之间循环，选择持久化，认不出的范围回退',async()=>{
+ const {home}=await makeHomeWithDb({authKey:'sk-test-opencode',build:({message})=>message('m1',at(NOW,-60000),1.0)});
+ await writeCodexAuth(home);
+ const fetchImpl=async url=>{const target=String(url);if(/opencode\.ai\/zen\/go\/v1\/usage/.test(target))return fakeFetch(opencodeBody());if(/chatgpt\.com/.test(target))return fakeFetch(codexBody());throw Error('测试没有为该地址准备响应：'+url);};
+ const usage=createUsage({home,now:()=>NOW,env:{},fetchImpl});
+ const readSettings=async()=>JSON.parse(await fs.readFile(path.join(home,'.bobo/usage.json'),'utf8'));
+ try{
+  let s=await usage.refresh();
+  assert.equal(provider(s,'codex').range,'session','默认显示 5 小时窗口');
+  assert.equal(provider(s,'opencode-go').range,'session');
+  // 各切各的：OpenCode Go 三档循环（5 小时 → 本周 → 账单月 → 5 小时），Codex 只有两档，互不影响。
+  s=usage.cycleRange('opencode-go');assert.equal(provider(s,'opencode-go').range,'week');
+  s=usage.cycleRange('codex');assert.equal(provider(s,'codex').range,'week');
+  assert.equal(provider(s,'opencode-go').range,'week','切 Codex 不该动 OpenCode Go');
+  s=usage.cycleRange('opencode-go');assert.equal(provider(s,'opencode-go').range,'month');
+  s=usage.cycleRange('opencode-go');assert.equal(provider(s,'opencode-go').range,'session','三档循环回第一档');
+  s=usage.cycleRange('codex');assert.equal(provider(s,'codex').range,'session','两档来回切');
+  assert.equal(usage.cycleRange('不存在的来源'),s,'认不出的来源不动任何状态');
+  // 写盘：ranges 按来源记，重启后还在（Codex 的切到本周、OpenCode Go 的切到账单月）。
+  usage.cycleRange('opencode-go');
+  usage.cycleRange('opencode-go');
+  usage.cycleRange('codex');
+  const saved=await waitFor(async()=>{const r=await readSettings();if(r?.ranges?.['opencode-go']!=='month'||r?.ranges?.codex!=='week')throw Error('范围还没写盘');return r;});
+  assert.deepEqual(saved.ranges,{'opencode-go':'month',codex:'week'});
+  const again=createUsage({home,now:()=>NOW,env:{},fetchImpl});
+  try{
+   const s2=await again.refresh();
+   assert.equal(provider(s2,'opencode-go').range,'month','重启后记住的范围要读回来');
+   assert.equal(provider(s2,'codex').range,'week');
+  }finally{await again.stop();}
+  // 服务端不再返回记住的那一档时自动回退（按 5 小时 → 第一档的顺序），不会留下一个空范围。
+  const shrunk=createUsage({home,now:()=>NOW,env:{},fetchImpl:async url=>{
+   if(/opencode\.ai/.test(String(url)))return fakeFetch({usage:{weekly:{status:'ok',percent:11,resetsAt:new Date(NOW+86400e3).toISOString()}}});
+   return fakeFetch(codexBody());
+  }});
+  try{
+   const s3=await shrunk.refresh();
+   assert.equal(provider(s3,'opencode-go').range,'week','没有记住的那一档就回退到第一档');
+   assert.equal(shrunk.cycleRange('opencode-go'),s3,'只有一档时不循环');
+  }finally{await shrunk.stop();}
+ }finally{await usage.stop();await cleanup(home);}
+});
+
 test('Codex：登录过期、API Key、401、网络失败都给出可读原因，且失败不覆盖上一次成功的数据',async()=>{
  // 过期：连请求都不该发。
  const expired=await makeHome();await writeCodexAuth(expired,{accessToken:jwt({exp:Math.floor(NOW/1000)-600})});

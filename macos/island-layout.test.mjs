@@ -102,3 +102,69 @@ test('通知岛计时：会话时长的文案分档', {skip:process.platform!=='
  precondition(IslandMetrics.elapsedText(now + 5_000, now: now) == "<1m")
 `);
 });
+
+// 额度并排显示的取舍（展开并排 + 自适应）：固定上限（3 / 5 / 7）只封顶，自适应按「中轴线到屏幕边缘」
+// 的剩余空间算——不管怎么变，排出来的宽度都不越过展开后的中轴线，装不下时至少留一枚。
+test('通知岛额度：并排显示的固定上限与自适应数量', {skip:process.platform!=='darwin'}, async()=>{
+ await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable {','struct IslandSnapshot: Decodable {'),`
+ let wide: CGFloat = 1512, keepOut: CGFloat = 214
+ // 没有可用来源 → 0 枚；只有一家 → 1 枚（不并排，但也不隐藏）。
+ precondition(IslandBarGeometry.quotaChips(count: 0, limit: 0, screenWidth: wide, keepOut: keepOut, device: true, hoverButtons: true) == 0)
+ precondition(IslandBarGeometry.quotaChips(count: 1, limit: 0, screenWidth: wide, keepOut: keepOut, device: true, hoverButtons: true) == 1)
+ // 固定上限：3 家封顶时 5 家只排 3 枚；上限大于来源数时按来源数。
+ precondition(IslandBarGeometry.quotaChips(count: 5, limit: 3, screenWidth: wide, keepOut: keepOut, device: true, hoverButtons: true) == 3)
+ precondition(IslandBarGeometry.quotaChips(count: 3, limit: 7, screenWidth: wide, keepOut: keepOut, device: true, hoverButtons: true) == 3)
+ // 自适应：内置刘海屏（1512 宽）上 5 家都排得下。
+ precondition(IslandBarGeometry.quotaChips(count: 5, limit: 0, screenWidth: wide, keepOut: keepOut, device: true, hoverButtons: true) == 5)
+ // 窄屏 / 有刘海时按空间收缩：600 宽、设备指示占一格、中轴线到右缘剩 159pt，
+ // 5 枚额度 + 设备共 6 格 = 157pt（再来一枚 184pt 就放不下）。
+ precondition(IslandBarGeometry.quotaChips(count: 8, limit: 0, screenWidth: 600, keepOut: keepOut, device: true, hoverButtons: false) == 5)
+ // 遍历各种屏幕宽度与悬停状态：数量在 1...count 之间，且排出来的宽度不越过中轴线。
+ for width in stride(from: 320.0, through: 1800.0, by: 40.0) {
+  for device in [false, true] {
+   for hover in [false, true] {
+    let shown = IslandBarGeometry.quotaChips(count: 8, limit: 0, screenWidth: width, keepOut: keepOut, device: device, hoverButtons: hover)
+    precondition(shown >= 1 && shown <= 8, "自适应数量越界")
+    if shown > 1 {
+     let reserved = (device ? 1 : 0) + (hover ? 2 : 0)
+     let chips = shown + reserved
+     let used = CGFloat(chips) * IslandMetrics.itemSize + IslandMetrics.itemSpacing * CGFloat(max(0, chips - 1))
+     let space = (width - IslandMetrics.screenEdgeMargin * 2) / 2 - keepOut / 2 - IslandMetrics.barEdge
+     precondition(used <= space + 0.0001, "并排显示越过了展开后的中轴线")
+    }
+   }
+  }
+ }
+ // 固定上限同样受空间约束：窄屏上即使选了 7 家也不会越过中轴线。
+ let capped = IslandBarGeometry.quotaChips(count: 8, limit: 7, screenWidth: 400, keepOut: keepOut, device: true, hoverButtons: true)
+ precondition(capped < 7 && capped >= 1)
+`);
+});
+
+// 每枚圆环各自显示一档窗口：快照里的 range（服务端记住）决定这一家画哪一档，
+// 认不出的范围退回 5 小时、再退回第一档；并排显示的来源只算「可用 + 开启」，顺序稳定。
+test('通知岛额度：圆环显示的范围与并排来源的取舍', {skip:process.platform!=='darwin'}, async()=>{
+ await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable {','struct IslandSnapshot: Decodable {'),`
+ func provider(_ json: String) throws -> IslandQuotaProvider { try JSONDecoder().decode(IslandQuotaProvider.self, from: Data(json.utf8)) }
+ let three = try! provider(#"{"id":"opencode-go","available":true,"enabled":true,"range":"month","windows":[{"key":"session","remainingPercent":97},{"key":"week","remainingPercent":86},{"key":"month","remainingPercent":48}]}"#)
+ precondition(three.displayWindow?.key == "month", "记住的范围没有生效")
+ precondition(three.showable)
+ // 认不出的范围（这家没返回这一档）退回 5 小时窗口；只有周窗口的套餐退回第一档。
+ let unknown = try! provider(#"{"id":"codex","available":true,"range":"month","windows":[{"key":"session","remainingPercent":75},{"key":"week","remainingPercent":70}]}"#)
+ precondition(unknown.displayWindow?.key == "session", "认不出的范围该退回 5 小时")
+ let weekOnly = try! provider(#"{"id":"codex","available":true,"range":"session","windows":[{"key":"week","remainingPercent":70}]}"#)
+ precondition(weekOnly.displayWindow?.key == "week", "没有 5 小时窗口该退回第一档")
+ // 关掉 / 不可用的来源不画圆环。
+ let off = try! provider(#"{"id":"agy","available":true,"enabled":false,"windows":[{"key":"session","remainingPercent":90}]}"#)
+ precondition(!off.showable, "关掉的来源不该参与并排")
+ let gone = try! provider(#"{"id":"agy","available":false,"windows":[{"key":"session","remainingPercent":90}]}"#)
+ precondition(!gone.showable, "不可用的来源不该参与并排")
+ // 并排显示的来源：可用 + 开启 + 有窗口，顺序照服务端；provider(id:) 只认这一组，displayed 认选中的那家。
+ let quota = try! JSONDecoder().decode(IslandQuota.self, from: Data(#"{"available":true,"selected":"agy","providers":[{"id":"codex","available":true,"windows":[{"key":"session","remainingPercent":75}]},{"id":"opencode-go","available":true,"enabled":false,"windows":[{"key":"session","remainingPercent":97}]},{"id":"agy","available":true,"range":"week","windows":[{"key":"session","remainingPercent":90},{"key":"week","remainingPercent":80}]}]}"#.utf8))
+ precondition(quota.subscriptions.map { $0.id } == ["codex","agy"], "并排来源的顺序或过滤不对")
+ precondition(quota.displayed?.id == "agy")
+ precondition(quota.switchable)
+ precondition(quota.provider(id: "opencode-go") == nil, "关掉的来源不该出现在明细卡里")
+ precondition(quota.provider(id: "agy")?.displayWindow?.key == "week")
+`);
+});

@@ -1093,6 +1093,19 @@ function renderIslandSettings(){
  islandSwitch('#rowMenubar','menubar','显示状态栏图标',s.menubar===true);
  islandSwitch('#rowMovable','movable','刘海面板可移动',s.movable===true);
  $('#islandRows').value=String(s.rows||3);
+ // 额度查看方式：默认「展开并排」——面板展开时把各来源的额度并排显示；「点击切换」是原来的单圆环切换。
+ const quotaViews=['expand','cycle'],quotaView=$('#quotaViewSelect');
+ quotaView.value=quotaViews.includes(s.quotaView)?s.quotaView:'expand';
+ quotaView.onchange=guard(async()=>{
+  islandState.settings=await api('opencode/settings',{...islandState.settings,quotaView:quotaView.value});
+  renderIslandSettings();
+  toast('额度查看方式：'+quotaView.selectedOptions[0].textContent);
+ });
+ // 并排显示数量：3 / 5 / 7 / 自适应（0，按屏幕剩余空间算）；只在「展开并排」时生效。
+ const quotaCount=$('#quotaCountSelect'),quotaCounts=['0','3','5','7'];
+ quotaCount.value=quotaCounts.includes(String(s.quotaCount??0))?String(s.quotaCount??0):'0';
+ quotaCount.disabled=quotaView.value!=='expand';
+ quotaCount.onchange=guard(async()=>{islandState.settings=await api('opencode/settings',{...islandState.settings,quotaCount:Number(quotaCount.value)});});
 }
 async function islandLoop(){
  while(islandStream){

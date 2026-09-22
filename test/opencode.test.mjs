@@ -170,3 +170,40 @@ test('子 agent 的子会话不上面板',async()=>{
   client?.stop();await new Promise(r=>service.close(r));await fs.rm(home,{recursive:true,force:true});
  }
 });
+// 通知岛的额度查看方式：默认「展开并排 + 自适应」，非法值一律回退到这两个默认值；
+// 合法值（点击切换、3 / 5 / 7）落盘后重新加载还在。
+test('额度查看方式设置默认展开并排与自适应，非法值回退',async()=>{
+ const home=await fs.mkdtemp(path.join(os.tmpdir(),'bobo-opencode-quota-'));
+ try{
+  const file=path.join(home,'.bobo/opencode.json');
+  await fs.mkdir(path.join(home,'.bobo'),{recursive:true});
+  // 没有配置文件时用默认值：展开并排 + 自适应（0）。
+  const fresh=createOpenCode({home});
+  await fresh.loadSettings();
+  assert.equal(fresh.settings().quotaView,'expand');
+  assert.equal(fresh.settings().quotaCount,0);
+  // 非法值（认不出的方式、不在 3 / 5 / 7 里的数量）回退到默认。
+  await fresh.saveSettings({...fresh.settings(),quotaView:'grid',quotaCount:4});
+  assert.equal(fresh.settings().quotaView,'expand');
+  assert.equal(fresh.settings().quotaCount,0);
+  // 合法值保留并落盘：点击切换 + 最多 7 家。
+  await fresh.saveSettings({...fresh.settings(),quotaView:'cycle',quotaCount:7});
+  const again=createOpenCode({home});
+  await again.loadSettings();
+  assert.equal(again.settings().quotaView,'cycle');
+  assert.equal(again.settings().quotaCount,7);
+  // 文件里手写的合法值照样读进来，认不出的值一律回退到默认。
+  await fs.writeFile(file,JSON.stringify({quotaView:'cycle',quotaCount:5}));
+  const loaded=createOpenCode({home});
+  await loaded.loadSettings();
+  assert.equal(loaded.settings().quotaView,'cycle');
+  assert.equal(loaded.settings().quotaCount,5);
+  await fs.writeFile(file,JSON.stringify({quotaView:'list',quotaCount:9}));
+  const bad=createOpenCode({home});
+  await bad.loadSettings();
+  assert.equal(bad.settings().quotaView,'expand');
+  assert.equal(bad.settings().quotaCount,0);
+ }finally{
+  await fs.rm(home,{recursive:true,force:true});
+ }
+});

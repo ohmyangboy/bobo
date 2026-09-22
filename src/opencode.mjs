@@ -10,6 +10,9 @@ export const stateLabels={working:'运行中',waiting:'等你回答',idle:'已�
 const sounds={question:'Ping.aiff',done:'Glass.aiff',error:'Basso.aiff',reset:'Hero.aiff'};
 // 刘海面板显示在哪块屏幕：auto 跟随当前使用的应用（由原生判定），builtin 内置刘海屏，main 主屏。
 const displayModes=['auto','builtin','main'];
+// 额度查看方式：cycle 点圆环在可用来源之间切换；expand 展开时并排显示各来源。quotaCount 是并排时
+// 最多显示几家（3 / 5 / 7），0 = 自适应——原生按屏幕剩余空间算，不越过展开后的中轴线（见 IslandBarGeometry.quotaChips）。
+const quotaViews=['cycle','expand'],quotaCounts=[0,3,5,7];
 
 export function createOpenCode({home}){
  const dataDir=path.join(home,'.bobo'),settingsFile=path.join(dataDir,'opencode.json');
@@ -19,7 +22,7 @@ export function createOpenCode({home}){
  // 之后任何带这个 id 的事件（工具调用、结束、提问）都一律不处理。集合超过上限就丢掉最早记住的一批。
  const children=new Set(),CHILD_LIMIT=300;
  function rememberChild(id){if(!id)return;children.add(id);sessions.delete(id);if(children.size>CHILD_LIMIT)children.delete(children.values().next().value);}
- let settings={notify:true,sound:true,notch:true,hideWhenIdle:false,autoExpand:true,rows:3,menubar:false,movable:false,display:'auto'},connected=false,closed=false,controller=null,retryTimer=null;
+ let settings={notify:true,sound:true,notch:true,hideWhenIdle:false,autoExpand:true,rows:3,menubar:false,movable:false,display:'auto',quotaView:'expand',quotaCount:0},connected=false,closed=false,controller=null,retryTimer=null;
  let noticeSeq=0,notice=null;
  const emit=()=>{for(const l of listeners){try{l();}catch{}}};
  // 清理超过一天的旧会话，避免状态列表无限增长（正在跑或等回答的保留）。
@@ -62,13 +65,15 @@ export function createOpenCode({home}){
  // 订阅状态变化（HTTP 流式响应用它推送）：返回取消函数。
  function subscribe(fn){listeners.add(fn);return()=>listeners.delete(fn);}
  async function loadSettings(){
-  try{const raw=JSON.parse(await fs.readFile(settingsFile,'utf8'));for(const k of ['notify','sound','notch','hideWhenIdle','autoExpand','menubar','movable'])if(typeof raw?.[k]==='boolean')settings[k]=raw[k];if(displayModes.includes(raw?.display))settings.display=raw.display;if(Number.isFinite(raw?.rows))settings.rows=Math.max(1,Math.min(8,Math.round(raw.rows)));}catch{}
+  try{const raw=JSON.parse(await fs.readFile(settingsFile,'utf8'));for(const k of ['notify','sound','notch','hideWhenIdle','autoExpand','menubar','movable'])if(typeof raw?.[k]==='boolean')settings[k]=raw[k];if(displayModes.includes(raw?.display))settings.display=raw.display;if(quotaViews.includes(raw?.quotaView))settings.quotaView=raw.quotaView;if(quotaCounts.includes(raw?.quotaCount))settings.quotaCount=raw.quotaCount;if(Number.isFinite(raw?.rows))settings.rows=Math.max(1,Math.min(8,Math.round(raw.rows)));}catch{}
   return settings;
  }
  async function saveSettings(patch){
   settings={notify:patch.notify!==false,sound:patch.sound!==false,notch:patch.notch!==false,
    hideWhenIdle:patch.hideWhenIdle===true,autoExpand:patch.autoExpand!==false,menubar:patch.menubar===true,movable:patch.movable===true,
    display:displayModes.includes(patch.display)?patch.display:'auto',
+   quotaView:quotaViews.includes(patch.quotaView)?patch.quotaView:'expand',
+   quotaCount:quotaCounts.includes(Number(patch.quotaCount))?Number(patch.quotaCount):0,
    rows:Math.max(1,Math.min(8,Number(patch.rows)||3))};
   try{await fs.mkdir(dataDir,{recursive:true});await fs.writeFile(settingsFile,JSON.stringify(settings));}catch{}
   emit();return settings;

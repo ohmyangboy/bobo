@@ -133,9 +133,16 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
  const codexDir=env.CODEX_HOME||path.join(home,'.codex');
  let sqlite=null,selected='',state=empty(),signature='',listeners=new Set(),timer=null,reading=null,closed=false;
  const cache=new Map(),backoff=new Map();
- // 持久化设置（~/.bobo/usage.json）：刘海显示哪家、各来源的启停、手动填的 API Key、额度重置提醒。
- const settings={keys:{},enabled:{},notifyReset:true};
+ // 持久化设置（~/.bobo/usage.json）：刘海显示哪家、各来源的启停、手动填的 API Key、额度重置提醒、
+ // 各来源圆环显示哪一档窗口（ranges，见 cycleRange）。
+ const settings={keys:{},enabled:{},ranges:{},notifyReset:true};
  const isEnabled=id=>settings.enabled[id]!==false;
+ // 圆环显示这一家的哪一档窗口：认得出（这家真返回了这一档）就用记住的，否则退回 5 小时窗口、再退回第一档。
+ function rangeFor(id,windows){
+  const keys=(windows||[]).map(w=>w.key);
+  if(keys.includes(settings.ranges[id]))return settings.ranges[id];
+  return keys.includes('session')?'session':(keys[0]||'');
+ }
  function empty(){return {available:false,selected:providers[0].id,providers:providers.map(p=>({id:p.id,name:p.name,symbol:p.symbol,available:false,enabled:true,keySource:'',keyHint:'',reason:'正在读取用量…',windows:[],updatedAt:0})),updatedAt:0};}
  const emit=()=>{for(const listener of listeners){try{listener();}catch{}}};
  async function loadSettings(){
@@ -145,6 +152,8 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
    if(typeof raw?.notifyReset==='boolean')settings.notifyReset=raw.notifyReset;
    for(const p of providers){
     if(typeof raw?.enabled?.[p.id]==='boolean')settings.enabled[p.id]=raw.enabled[p.id];
+    const range=raw?.ranges?.[p.id];
+    if(typeof range==='string'&&range.trim())settings.ranges[p.id]=range.trim();
     const key=raw?.keys?.[p.id];
     if(typeof key==='string'&&key.trim())settings.keys[p.id]=key.trim();
    }
@@ -153,7 +162,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
  // 串行写盘（原子改名，避免半截 JSON）：连点切换时最后一次调用写入的就是当前选择。
  let saving=Promise.resolve();
  function saveSettings(){
-  saving=saving.then(async()=>{try{await fs.mkdir(dataDir,{recursive:true});await fs.writeFile(settingsFile+'.tmp',JSON.stringify({provider:selected,enabled:settings.enabled,keys:settings.keys,notifyReset:settings.notifyReset},{},1),{mode:0o600});await fs.rename(settingsFile+'.tmp',settingsFile);}catch{}});
+  saving=saving.then(async()=>{try{await fs.mkdir(dataDir,{recursive:true});await fs.writeFile(settingsFile+'.tmp',JSON.stringify({provider:selected,enabled:settings.enabled,keys:settings.keys,ranges:settings.ranges,notifyReset:settings.notifyReset},{},1),{mode:0o600});await fs.rename(settingsFile+'.tmp',settingsFile);}catch{}});
   return saving;
  }
 
@@ -426,7 +435,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
 
  // ---- 刷新与推送 ----
  // 只在「有效数据」变化时推送：倒计时（resetInSec/resetsAt/updatedAt）每分钟都会变，不参与比较。
- const signatureOf=s=>JSON.stringify([s.selected,s.providers.map(p=>[p.id,p.available,p.enabled,p.keySource,p.keyHint,p.reason,p.error,p.plan,p.windows.map(w=>[w.key,w.usedPercent,w.usedUSD,w.status]),p.daily,p.models,p.totals,p.credits])]);
+ const signatureOf=s=>JSON.stringify([s.selected,s.providers.map(p=>[p.id,p.available,p.enabled,p.range,p.keySource,p.keyHint,p.reason,p.error,p.plan,p.windows.map(w=>[w.key,w.usedPercent,w.usedUSD,w.status]),p.daily,p.models,p.totals,p.credits])]);
  // 额度重置提醒：Codex 的窗口从「用过」（剩余 < 100%）回到 100% 时提醒一次（5 小时窗口用满后恢复、
  // 周窗口刷新都算）。只在前后两次都是有效读数时比较：服务刚启动、上一次不可用、这次降级都不报。
  // 开关在「用量 → Codex」里（settings.notifyReset），实际投递走通知岛的统一提醒通道（notify）。
@@ -453,7 +462,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
    await loadSettings();
    const results=await Promise.all(providers.map(async p=>{
     const id=p.id,cached=cache.get(id);
-    const stamp=snapshot=>{snapshot.enabled=isEnabled(id);return snapshot;};
+    const stamp=snapshot=>{snapshot.enabled=isEnabled(id);snapshot.range=rangeFor(id,snapshot.windows);return snapshot;};
     if(cached&&nowMs<cached.hardNextAt)return stamp(cached.snapshot);
     if(cached&&!force&&nowMs<cached.nextAt)return stamp(cached.snapshot);
     let snapshot;
@@ -506,6 +515,19 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   const index=list.findIndex(p=>p.id===state.selected);
   return selectProvider(list[(index+1)%list.length].id);
  }
+ // 圆环显示哪一档窗口（「展开并排」模式下点某家的圆环循环它自己的范围）：
+ // 在这家返回的窗口之间循环（5 小时 → 本周 → 账单月 → …），只有一档就不动，选择写进 usage.json。
+ function cycleRange(id){
+  const row=state.providers.find(p=>p.id===id);
+  const keys=(row?.windows||[]).map(w=>w.key);
+  if(keys.length<2)return state;
+  const current=rangeFor(id,row.windows)||keys[0];
+  settings.ranges[id]=keys[(keys.indexOf(current)+1)%keys.length];
+  void saveSettings();
+  state={...state,providers:state.providers.map(p=>p.id===id?{...p,range:settings.ranges[id]}:p)};
+  signature=signatureOf(state);emit();
+  return state;
+ }
  // 来源启停：只影响刘海胶囊的可选项（和切换循环），数据照常读取、页面照常查看。
  function setEnabled(id,enabled){
   const row=state.providers.find(p=>p.id===id);
@@ -552,6 +574,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   refresh,
   selectProvider,
   cycleProvider,
+  cycleRange,
   setEnabled,
   setNotifyReset,
   setKey,

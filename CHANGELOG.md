@@ -6,6 +6,21 @@ published: true
 
 本文件记录 bobo 面向用户的版本变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。发布在 [GitHub Releases](https://github.com/ohmyangboy/bobo/releases)。
 
+## [1.3.0-beta.1] - 2026-09-22
+
+这是额度功能的一轮预览版（beta）：带后缀的 tag 会发成 GitHub 预发布，**应用内更新只推正式版**，想试这个版本请到 Releases 手动下载 `bobo.app.zip`。
+
+### 新增
+
+- **额度查看方式**（通知岛 → 内容）：默认「展开并排」——刘海面板展开时把所有订阅的额度圆环并排显示出来，画几枚按屏幕剩余空间自适应（不越过面板中轴线），也可以固定成最多 3 / 5 / 7 家；原来的一枚圆环切换来源保留为「点击切换」。
+- **每枚额度圆环可以各自切换显示范围**：在「展开并排」下点某枚圆环，就在这一家的窗口之间循环（5 小时 → 本周 → 账单月 → …），圆环的圆弧与悬停明细卡跟着换；选择按来源记在本机（`~/.bobo/usage.json`），重启后保留。折叠态点圆环也是换这一家的显示范围，并顺带把它设为折叠胶囊显示的那家。
+- 悬停明细卡里，折叠胶囊显示的那家带一枚「当前」徽标，圆环当前画的那一档窗口标题加粗提亮。
+
+### 变更
+
+- 额度圆环统一画「这一家记住的那一档窗口」，「点击切换」方式下也跟随（没设置过就还是 5 小时窗口）；明细卡提示按查看方式区分「点击圆环切换显示范围」/「点击圆环切换来源」。
+- 「用量」页面里关掉的来源不参与刘海胶囊的并排显示与切换（说明文案同步）。
+
 ## [1.2.5] - 2026-09-21
 
 ### 新增
@@ -87,3 +102,4 @@ published: true
 [1.2.3]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.3
 [1.2.4]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.4
 [1.2.5]: https://github.com/ohmyangboy/bobo/releases/tag/v1.2.5
+[1.3.0-beta.1]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0-beta.1

@@ -215,5 +215,6 @@ test('源码运行不提供应用内更新；检查失败进入 failed 并可重
 
 test('版本真源：读到的 package.json 版本就是 package.json 的 version',async()=>{
  const pkg=await readPackage();
- assert.match(pkg.version,/^\d+\.\d+\.\d+$/);
+ // 正式版是 x.y.z；beta 轮次带预发布后缀（1.3.0-beta.1），语义化版本比较照样认（见 parseVersion）。
+ assert.match(pkg.version,/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/);
 });

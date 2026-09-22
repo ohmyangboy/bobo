@@ -236,6 +236,13 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
                 guard let self, !self.islandDragging else { return }
                 self.cycleUsage()
             },
+            onQuotaRange: { [weak self] id in
+                guard let self, !self.islandDragging else { return }
+                // 「展开并排」模式里点圆环：切这一家的显示范围（服务端在它自己的窗口之间循环并推回快照），
+                // 顺带把它设为折叠胶囊显示的那家——这个模式下不再有点圆环切换来源。
+                self.postIsland("/api/usage/range", ["id": id])
+                self.postIsland("/api/usage/provider", ["id": id])
+            },
             onDevice: { [weak self] in
                 guard let self, !self.islandDragging else { return }
                 self.showDeviceStatus()
@@ -397,12 +404,15 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         let notch = notched ? notchWidth(screen) : 0
         islandModel.avatarLimit = notched ? IslandMetrics.notchAvatars : IslandMetrics.maxAvatars
         let plan = islandModel.avatarPlan
-        // 内容宽度按同一套图标规格算：头像（空位时是默认的置灰 bobo）+ 额度 + 设备（+ 悬停时的设置与退出）。
+        // 额度圆环画几枚：折叠态与「点击切换」方式只有当前选中的那一枚，「展开并排」方式在展开时
+        // 按设置并排显示各来源，数量由中轴线到屏幕右缘的剩余空间决定（自适应，见 IslandBarGeometry.quotaChips）。
+        islandModel.quotaChipLimit = quotaChipLimit(for: screen, keepOut: notch > 0 ? notch + IslandMetrics.notchGap * 2 : IslandMetrics.itemSpacing)
+        // 内容宽度按同一套图标规格算：头像（空位时是默认的置灰 bobo）+ 额度圆环 + 设备（+ 悬停时的设置与退出）。
         // 头像按脸宽（19）算：圆环外沿是 22，这样画面里每一段间距看起来都是同一个 itemSpacing。
         let widths = IslandBarGeometry.contentWidths(
             faces: max(1, plan.shown),
             hidden: plan.hidden,
-            quota: islandModel.usage?.displayed?.session != nil,
+            quota: islandModel.quotaChipLimit,
             device: islandModel.device != nil,
             hoverButtons: islandModel.hovering)
         // 刘海屏上下同宽，列表沿用顶部内容宽度；外接屏保留原有展开宽度。
@@ -410,11 +420,27 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         let layout = IslandBarGeometry.layout(left: widths.left, right: widths.right, notch: notch)
         islandModel.barLayout = layout
         let barWidth = notched ? layout.keepOut + 2 * max(layout.left, layout.right) : 0
-        let width = IslandBarGeometry.width(layout, minWidth: max(minWidth, barWidth), maxWidth: screen.frame.width - 40)
+        let width = IslandBarGeometry.width(layout, minWidth: max(minWidth, barWidth), maxWidth: screen.frame.width - IslandMetrics.screenEdgeMargin * 2)
         // 展开高度按设置里的条数算（会话不足时跟着变矮），装不下的会话在列表里滚动查看。
         let visibleRows = max(1, min(islandModel.settings.rows, islandModel.listed.count))
         let listHeight: CGFloat = islandModel.expanded ? (islandModel.listed.isEmpty ? 42 : 13.5 + CGFloat(visibleRows) * 38) : 0
         return NSSize(width: width, height: islandBarHeight(screen) + listHeight)
+    }
+
+    // 顶部栏该画几枚额度圆环（写进 IslandModel.quotaChipLimit，SwiftUI 只按它渲染前几家）：
+    // 折叠态与「点击切换」方式恒为当前选中的那一枚（没有窗口可画时 0 枚）；「展开并排」方式在展开时
+    // 把可用来源交给 IslandBarGeometry.quotaChips 按屏幕剩余空间取数量。
+    private func quotaChipLimit(for screen: NSScreen, keepOut: CGFloat) -> Int {
+        guard islandModel.expanded, islandModel.settings.quotaView == "expand" else {
+            return islandModel.usage?.displayed?.session != nil ? 1 : 0
+        }
+        return IslandBarGeometry.quotaChips(
+            count: islandModel.usage?.subscriptions.count ?? 0,
+            limit: islandModel.settings.quotaCount,
+            screenWidth: screen.frame.width,
+            keepOut: keepOut,
+            device: islandModel.device != nil,
+            hoverButtons: islandModel.hovering)
     }
 
     // 窗口包络始终以屏幕中心加拖动偏移定位；刘海屏的顶部栏在包络内独立对齐。
@@ -648,8 +674,10 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     // 悬停额度 / 设备指示：满半秒弹明细卡；离开后 0.4 秒内没落在卡片上就收起。
     private func detailHoverChanged(_ kind: IslandDetailKind, _ hovering: Bool) {
         if hovering {
-            guard islandModel.detail != kind else { return }
+            // 先记下当前悬停的指示：并排显示的额度圆环之间切换时卡片已经在台上（下面提前返回），
+            // 不记就会被另一枚圆环离开时排的收起任务带走。
             detailHover = kind
+            guard islandModel.detail != kind else { return }
             detailShowWork?.cancel()
             let work = DispatchWorkItem { [weak self] in
                 guard let self, self.detailHover == kind else { return }
@@ -1323,7 +1351,11 @@ struct IslandSettings: Decodable {
     // 面板显示在哪块屏：auto（跟随当前使用的应用）/ builtin（内置刘海屏）/ main（主屏）。
     var display = "auto"
     var rows = 3
-    private enum Keys: String, CodingKey { case notify, sound, notch, hideWhenIdle, autoExpand, menubar, movable, display, rows }
+    // 额度查看方式：cycle 点圆环在可用来源之间切换；expand 展开时并排显示各来源（默认）。
+    var quotaView = "expand"
+    // 展开并排时最多显示几家：3 / 5 / 7，0 = 自适应（按屏幕剩余空间算，见 IslandBarGeometry.quotaChips）。
+    var quotaCount = 0
+    private enum Keys: String, CodingKey { case notify, sound, notch, hideWhenIdle, autoExpand, menubar, movable, display, rows, quotaView, quotaCount }
     init() {}
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: Keys.self)
@@ -1337,6 +1369,10 @@ struct IslandSettings: Decodable {
         let mode = (try? container.decode(String.self, forKey: .display)) ?? "auto"
         display = ["auto", "builtin", "main"].contains(mode) ? mode : "auto"
         rows = (try? container.decode(Int.self, forKey: .rows)) ?? 3
+        let view = (try? container.decode(String.self, forKey: .quotaView)) ?? "expand"
+        quotaView = ["cycle", "expand"].contains(view) ? view : "expand"
+        let count = (try? container.decode(Int.self, forKey: .quotaCount)) ?? 0
+        quotaCount = [0, 3, 5, 7].contains(count) ? count : 0
     }
 }
 
@@ -1369,28 +1405,36 @@ struct IslandQuotaWindow: Decodable {
 
 // 一家额度的快照（Codex 走 chatgpt.com，OpenCode Go 读本机数据库估算）。
 struct IslandQuotaProvider: Decodable {
-    var id = "", name = "", symbol = "", available = false, estimated = false, plan = ""
+    var id = "", name = "", symbol = "", available = false, enabled = true, estimated = false, plan = ""
+    // 圆环显示这一家的哪一档窗口（session / week / month …）：服务端记住，点圆环循环（见 Bobo.onQuotaRange）。
+    var range = ""
     var reason: String?
     var error: String?
     var windows: [IslandQuotaWindow] = []
-    private enum Keys: String, CodingKey { case id, name, symbol, available, estimated, plan, reason, error, windows }
+    private enum Keys: String, CodingKey { case id, name, symbol, available, enabled, estimated, plan, range, reason, error, windows }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: Keys.self)
         id = (try? container.decode(String.self, forKey: .id)) ?? ""
         name = (try? container.decode(String.self, forKey: .name)) ?? id
         symbol = (try? container.decode(String.self, forKey: .symbol)) ?? ""
         available = (try? container.decode(Bool.self, forKey: .available)) ?? false
+        enabled = (try? container.decode(Bool.self, forKey: .enabled)) ?? true
         estimated = (try? container.decode(Bool.self, forKey: .estimated)) ?? false
         plan = (try? container.decode(String.self, forKey: .plan)) ?? ""
+        range = (try? container.decode(String.self, forKey: .range)) ?? ""
         reason = try? container.decodeIfPresent(String.self, forKey: .reason)
         error = try? container.decodeIfPresent(String.self, forKey: .error)
         windows = (try? container.decodeIfPresent([IslandQuotaWindow].self, forKey: .windows)) ?? []
     }
     // 折叠胶囊显示 5 小时窗口；没有就退回第一个窗口（例如只返回周窗口的套餐）。
     var session: IslandQuotaWindow? { windows.first { $0.key == "session" } ?? windows.first }
+    // 圆环显示的那一档窗口：记住的 range 认得出就用它，认不出（没有这一档）退回 5 小时窗口、再退回第一档。
+    var displayWindow: IslandQuotaWindow? { windows.first { $0.key == range } ?? session }
+    // 能参与刘海胶囊的来源：可用、在「用量」里开启、且有窗口可以画圆环（关掉的只在网页里看）。
+    var showable: Bool { available && enabled && session != nil }
 }
 
-// 额度总快照：刘海胶囊显示 selected 那家，悬停弹明细卡看每一家的窗口（点击切换）。
+// 额度总快照：刘海胶囊显示 selected 那家；「展开并排」方式在面板展开时并排显示所有可用的来源。
 struct IslandQuota: Decodable {
     var available = false
     var selected = ""
@@ -1402,10 +1446,18 @@ struct IslandQuota: Decodable {
         selected = (try? container.decode(String.self, forKey: .selected)) ?? ""
         providers = (try? container.decodeIfPresent([IslandQuotaProvider].self, forKey: .providers)) ?? []
     }
-    var displayed: IslandQuotaProvider? {
-        providers.first { $0.id == selected && $0.available } ?? providers.first { $0.available }
+    // 参与刘海胶囊的来源（可用 + 开启）：点圆环的切换循环与「展开并排」都在这一组里。
+    var selectable: [IslandQuotaProvider] { providers.filter { $0.available && $0.enabled } }
+    // 展开并排显示的来源：在上面那组里再要求有窗口可画；顺序就是服务端的顺序，不随当前选择跳动。
+    var subscriptions: [IslandQuotaProvider] { selectable.filter(\.showable) }
+    func provider(id: String?) -> IslandQuotaProvider? {
+        guard let id, !id.isEmpty else { return nil }
+        return subscriptions.first { $0.id == id }
     }
-    var switchable: Bool { providers.filter(\.available).count > 1 }
+    var displayed: IslandQuotaProvider? {
+        selectable.first { $0.id == selected } ?? selectable.first
+    }
+    var switchable: Bool { selectable.count > 1 }
 }
 
 // 设备快照（服务端 devices.mjs 挂在状态流里）：折叠胶囊的额度右边那枚设备指示读它。
@@ -1471,6 +1523,8 @@ enum IslandMetrics {
     // 往下留一点（避开刘海底部的圆角）。收拢过程中整块面板淡出到不可见（见 Bobo.setIslandYielding）。
     static let yieldWidth: CGFloat = 44
     static let yieldHeightInset: CGFloat = 6
+    // 面板与屏幕边缘留的边距（islandSize 的 maxWidth 与自适应额度数量共用同一个口径）。
+    static let screenEdgeMargin: CGFloat = 20
     // 折叠态最多显示几个会话头像：外接屏够宽，最多 8 个；有真实刘海时头像只能排进刘海左侧那一小段，
     // 超过就换成「+N」徽标（见 IslandBarGeometry.avatars）。
     static let maxAvatars = 8
@@ -1596,13 +1650,31 @@ enum IslandLayoutTween {
 // 顶部栏的排布计算（纯函数，方便单独验证）：内容宽度、面板宽度、栏内分区、折叠头像的取舍。
 enum IslandBarGeometry {
     // 两侧内容的宽度（不含端帽）：左侧是会话头像 + 分隔线（放不下时最后一格换成「+N」徽标，
-    // 尺寸与头像脸一致），右侧是额度 + 设备（+ 悬停时的设置与退出）。间距与图标规格共用 IslandMetrics。
-    static func contentWidths(faces: Int, hidden: Int, quota: Bool, device: Bool, hoverButtons: Bool) -> (left: CGFloat, right: CGFloat) {
+    // 尺寸与头像脸一致），右侧是额度圆环（展开并排时可能有几枚）+ 设备（+ 悬停时的设置与退出）。
+    // 间距与图标规格共用 IslandMetrics。
+    static func contentWidths(faces: Int, hidden: Int, quota: Int, device: Bool, hoverButtons: Bool) -> (left: CGFloat, right: CGFloat) {
         // 头像之间、头像与徽标 / 分隔线之间都是同一个间距；分隔线自己也占一格的宽度。
         var left = CGFloat(faces) * IslandMetrics.glyphSize + IslandMetrics.itemSpacing * CGFloat(faces) + IslandMetrics.dividerWidth
         if hidden > 0 { left += IslandMetrics.itemSpacing + IslandMetrics.glyphSize }
-        let chips = (quota ? 1 : 0) + (device ? 1 : 0) + (hoverButtons ? 2 : 0)
+        let chips = max(0, quota) + (device ? 1 : 0) + (hoverButtons ? 2 : 0)
         return (left, CGFloat(chips) * IslandMetrics.itemSize + IslandMetrics.itemSpacing * CGFloat(max(0, chips - 1)))
+    }
+
+    // 并排显示几枚额度圆环（纯函数）：count 是可用的来源数，limit 是用户设的上限（3 / 5 / 7），0 = 自适应。
+    // 自适应按屏幕剩余空间算：面板以屏幕正中（展开后的中轴线）为轴，圆环从刘海右侧往右排，中轴线到屏幕
+    // 右缘的那半屏里还要给设备指示、设置 / 退出按钮与端帽留位置——装不下的不显示，至少留一枚。
+    static func quotaChips(count: Int, limit: Int, screenWidth: CGFloat, keepOut: CGFloat, device: Bool, hoverButtons: Bool) -> Int {
+        guard count > 0 else { return 0 }
+        guard count > 1 else { return 1 }
+        let reserved = (device ? 1 : 0) + (hoverButtons ? 2 : 0)
+        let space = (screenWidth - IslandMetrics.screenEdgeMargin * 2) / 2 - keepOut / 2 - IslandMetrics.barEdge
+        func fits(_ shown: Int) -> Bool {
+            let chips = shown + reserved
+            return CGFloat(chips) * IslandMetrics.itemSize + IslandMetrics.itemSpacing * CGFloat(max(0, chips - 1)) <= space
+        }
+        var shown = limit > 0 ? min(limit, count) : count
+        while shown > 1, !fits(shown) { shown -= 1 }
+        return shown
     }
 
     // 刘海两翼按内容较宽的一侧统一宽度，较窄侧补留白，保持左右对称；外接屏仍按内容排布。
@@ -1664,6 +1736,11 @@ final class IslandModel: ObservableObject {
     @Published var settings = IslandSettings()
     // 本机 OpenCode Go 的额度估算（折叠胶囊右侧的剩余额度）。
     @Published var usage: IslandQuota?
+    // 顶部栏画几枚额度圆环：折叠态与「点击切换」方式恒为 1（当前选中的那家），「展开并排」方式由原生
+    // 按屏幕剩余空间算好（见 Bobo.islandSize）；0 = 没有可显示的额度。
+    @Published var quotaChipLimit = 1
+    // 鼠标正停在哪一枚额度圆环上：明细卡显示这一家（并排显示时跟着换）；移开时保留，下一枚圆环悬停时覆盖。
+    @Published var quotaFocus: String?
     // 本机设备（CPU / 内存 / 磁盘，折叠胶囊里额度右边的设备指示）。
     @Published var device: IslandDevice?
     // 悬停明细卡：nil 为不显示；detailMetrics 由 SwiftUI 上报，原生用它定窗口尺寸（见 Bobo.applyDetail）。
@@ -1778,6 +1855,8 @@ struct IslandView: View {
     var onSelect: (IslandSession) -> Void
     var onActivate: () -> Void
     var onQuota: () -> Void
+    // 「展开并排」模式下点圆环：切这一家圆环的显示范围（5 小时 / 本周 / 账单月…），顺带把它设为折叠胶囊那家。
+    var onQuotaRange: (String) -> Void
     var onDevice: () -> Void
     // 额度 / 设备指示的悬停变化：满半秒由原生弹明细卡（见 Bobo.detailHoverChanged）。
     var onDetail: (IslandDetailKind, Bool) -> Void
@@ -1796,6 +1875,15 @@ struct IslandView: View {
             .frame(width: rect.width, height: geometry.size.height, alignment: .top)
             .background(IslandShape(bottomRadius: model.expanded ? 22 : 12).fill(.black))
             .offset(x: rect.minX)
+        }
+    }
+
+    // 额度圆环的悬停：明细卡跟着鼠标停的那一家换（并排显示时尤其重要）。移开时保留焦点——
+    // 鼠标从圆环移到明细卡上时卡片内容不该跳回当前选中的那家（下一枚圆环悬停时会再覆盖）。
+    private func quotaHover(_ id: String) -> (Bool) -> Void {
+        { hovering in
+            if hovering { model.quotaFocus = id }
+            onDetail(.quota, hovering)
         }
     }
 
@@ -1838,8 +1926,22 @@ struct IslandView: View {
                 Spacer(minLength: model.barLayout.keepOut)
             }
             HStack(spacing: IslandMetrics.itemSpacing) {
-                if let quota = model.usage, let provider = quota.displayed, let session = provider.session {
-                    IslandQuotaChip(provider: provider, window: session, action: onQuota, onHover: { onDetail(.quota, $0) })
+                // 额度圆环：折叠态（以及「点击切换」方式）只有当前选中的那一枚；「展开并排」方式在展开时
+                // 按设置并排显示各来源——画几枚由原生按屏幕剩余空间算好（见 Bobo.islandSize 的 quotaChipLimit）。
+                if model.expanded, model.settings.quotaView == "expand", let quota = model.usage {
+                    ForEach(Array(quota.subscriptions.prefix(model.quotaChipLimit)), id: \.id) { provider in
+                        if let window = provider.displayWindow {
+                            IslandQuotaChip(provider: provider, window: window,
+                                            selected: provider.id == quota.displayed?.id,
+                                            action: { onQuotaRange(provider.id) },
+                                            onHover: quotaHover(provider.id))
+                        }
+                    }
+                } else if let provider = model.usage?.displayed, let window = provider.displayWindow {
+                    // 「点击切换」方式点圆环切换来源；「展开并排」的折叠态点圆环换这一家的显示范围（展开看全部）。
+                    IslandQuotaChip(provider: provider, window: window,
+                                    action: model.settings.quotaView == "expand" ? { onQuotaRange(provider.id) } : onQuota,
+                                    onHover: quotaHover(provider.id))
                 }
                 // 额度右边的设备指示（CPU 压力灯 + 磁盘 / 内存双弧）：始终显示，不随悬停出现。
                 if let device = model.device {
@@ -1966,9 +2068,11 @@ struct IslandSessionTag: View {
 
 // 折叠胶囊的额度指示：一枚圆环（底圈 + 剩余比例圆弧），环里是来源图标（模板图，白色）。
 // 不再显示百分比文字——数字放进悬停半秒后弹出的明细卡里，宽度因此恒为一枚图标（见 Bobo.islandSize）。
+// 「展开并排」方式下会并排出现几枚：只有当前选中的那家带底色（收起后留在胶囊上的就是它）。
 struct IslandQuotaChip: View {
     let provider: IslandQuotaProvider
     let window: IslandQuotaWindow
+    var selected = true
     let action: () -> Void
     var onHover: ((Bool) -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -2002,7 +2106,7 @@ struct IslandQuotaChip: View {
         Button(action: action) {
             ring
                 .frame(height: IslandMetrics.itemSize)
-                .background(Capsule().fill(.white.opacity(hovering ? IslandMetrics.fillHover : IslandMetrics.fillIdle)))
+                .background(Capsule().fill(.white.opacity(hovering ? IslandMetrics.fillHover : (selected ? IslandMetrics.fillIdle : 0))))
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -2077,7 +2181,7 @@ struct IslandDetailView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             switch shown {
-            case .quota: IslandQuotaDetail(quota: model.usage)
+            case .quota: IslandQuotaDetail(quota: model.usage, focus: model.quotaFocus, quotaView: model.settings.quotaView)
             case .device: IslandDeviceDetail(device: model.device)
             }
         }
@@ -2137,22 +2241,47 @@ private struct DetailMeter: View {
     }
 }
 
-// 额度明细：只列当前选中这一家（与圆环一致），切换来源后卡片内容跟着换成新的一家。
+// 额度明细：显示鼠标正停的那一家（并排显示时跟着换），没在悬停就退回当前选中的那家。
+// 「展开并排」模式下点圆环切的是这一家的显示范围，「点击切换」模式下点圆环切的是来源——提示文案据此不同；
+// 卡片里当前那家（胶囊显示的那家）与圆环当前那一档窗口都带标记，一眼能看出面板上是什么。
 private struct IslandQuotaDetail: View {
     let quota: IslandQuota?
+    var focus: String? = nil
+    // 额度查看方式（settings.quotaView）：expand = 展开并排，cycle = 点击切换。
+    var quotaView = "expand"
 
     var body: some View {
-        DetailHeader(title: "额度", note: quota?.switchable == true ? "点击圆环切换来源" : nil)
-        if let provider = quota?.displayed {
-            IslandQuotaProviderBlock(provider: provider)
+        let provider = quota?.provider(id: focus) ?? quota?.displayed
+        DetailHeader(title: "额度", note: note(provider))
+        if let provider {
+            IslandQuotaProviderBlock(provider: provider, current: quotaView == "expand" && provider.id == quota?.displayed?.id)
         } else {
             Text("额度暂不可用").font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.5))
         }
+    }
+
+    private func note(_ provider: IslandQuotaProvider?) -> String? {
+        guard let provider else { return nil }
+        // 并排显示：圆环能换的是这一家的窗口（只有一档就没什么可切的）；点击切换：圆环换的是来源。
+        if quotaView == "expand" { return provider.windows.count > 1 ? "点击圆环切换显示范围" : nil }
+        return quota?.switchable == true ? "点击圆环切换来源" : nil
+    }
+}
+
+// 卡片里的小徽标（「当前」「圆环」「本机估算」共用一套观感）。
+private struct IslandBadge: View {
+    let text: String
+    var body: some View {
+        Text(text).font(.system(size: 9.5)).foregroundStyle(.white.opacity(0.55))
+            .padding(.horizontal, 4).padding(.vertical, 1)
+            .background(Capsule().fill(.white.opacity(0.12)))
     }
 }
 
 private struct IslandQuotaProviderBlock: View {
     let provider: IslandQuotaProvider
+    // 这一家是不是折叠胶囊显示的那家（并排显示时给它一枚「当前」徽标）。
+    var current = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -2167,17 +2296,14 @@ private struct IslandQuotaProviderBlock: View {
                 if !provider.plan.isEmpty {
                     Text(provider.plan).font(.system(size: 10.5)).foregroundStyle(.white.opacity(0.5))
                 }
-                if provider.estimated {
-                    Text("本机估算").font(.system(size: 9.5)).foregroundStyle(.white.opacity(0.55))
-                        .padding(.horizontal, 4).padding(.vertical, 1)
-                        .background(Capsule().fill(.white.opacity(0.12)))
-                }
+                if current { IslandBadge(text: "当前") }
+                if provider.estimated { IslandBadge(text: "本机估算") }
                 Spacer(minLength: 0)
             }
             if provider.windows.isEmpty {
                 Text("没有返回额度窗口").font(.system(size: 10.5)).foregroundStyle(.white.opacity(0.45))
             }
-            ForEach(provider.windows, id: \.key) { IslandQuotaWindowRow(window: $0) }
+            ForEach(provider.windows, id: \.key) { IslandQuotaWindowRow(window: $0, onRing: $0.key == provider.displayWindow?.key) }
             if let error = provider.error, !error.isEmpty {
                 Text("⚠ " + error).font(.system(size: 10)).foregroundStyle(IslandMetrics.warnHue)
                     .fixedSize(horizontal: false, vertical: true)
@@ -2189,6 +2315,9 @@ private struct IslandQuotaProviderBlock: View {
 // 一个额度窗口：标题 + 剩余百分比、进度条、已用情况（金额优先）与重置时间。
 private struct IslandQuotaWindowRow: View {
     let window: IslandQuotaWindow
+    // 这一档就是圆环当前显示的范围：标题加粗提亮（卡片里一眼看出面板上画的是哪一档；
+    // 不用徽标是因为 agy 的标签很长，多出来的宽度会把标题挤到换行）。
+    var onRing = false
 
     private var limited: Bool { !window.status.isEmpty && window.status != "ok" }
     private var money: String? {
@@ -2203,7 +2332,9 @@ private struct IslandQuotaWindowRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(window.label.isEmpty ? window.key : window.label).font(.system(size: 11)).foregroundStyle(.white.opacity(0.62))
+                Text(window.label.isEmpty ? window.key : window.label)
+                    .font(.system(size: 11, weight: onRing ? .semibold : .regular))
+                    .foregroundStyle(.white.opacity(onRing ? 0.9 : 0.62))
                 if limited { Text("已限额").font(.system(size: 10, weight: .medium)).foregroundStyle(IslandMetrics.criticalHue) }
                 Spacer(minLength: 4)
                 Text("剩余 \(Int(window.remainingPercent.rounded()))%")
