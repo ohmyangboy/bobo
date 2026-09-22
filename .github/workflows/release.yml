@@ -58,13 +58,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # 带后缀的 tag（v1.3.0-beta.1 等）按预发布创建：应用内更新只认正式版，不会把 beta 推给所有人。
-          PRE=""
-          case "$GITHUB_REF_NAME" in *-*) PRE="--prerelease" ;; esac
+          # 不要加 --prerelease：应用内更新读 /releases/latest，标成预发布的 Release 它看不到
+          # （beta 轮次靠版本号里的后缀区分，见 AGENTS.md 的「构建与发布」）。
           gh release create "$GITHUB_REF_NAME" \
             dist/bobo.app.zip dist/bobo.app.zip.sha256 \
             --title "$GITHUB_REF_NAME" \
-            $PRE \
             --generate-notes
       - name: 未配置签名证书
         if: env.BUILD_CERTIFICATE_BASE64 == ''

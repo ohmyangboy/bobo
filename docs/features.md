@@ -172,11 +172,11 @@
 
 ### 本机发布（当前默认路径）
 
-1. 更新 `package.json` 的 `version`，把变更写进 `CHANGELOG.md`；
+1. 更新 `package.json` 的 `version`，把变更写进 `CHANGELOG.md`（beta 轮次写成 `1.3.0-beta.1` 这种带后缀的形式，发版时保持 tag 与它一致）；
 2. `npm run package`：构建 → 签名（硬化运行时 + 安全时间戳）→ 提交 Apple 公证并等待 → staple → Gatekeeper 校验 → 输出 `dist/bobo.app.zip` 与 `.sha256`；
 3. 打 tag 并推送：`git tag v1.2.1 && git push origin v1.2.1`（Release 工作流没有签名 secrets 时会跳过打包、只跑测试）；
-4. 创建 Release：`gh release create v1.2.1 dist/bobo.app.zip dist/bobo.app.zip.sha256 --title v1.2.1 --generate-notes`；
-5. 应用内更新读取该 Release 的 `bobo.app.zip`，用 GitHub 资产的 sha256 digest 与代码签名双重校验后再安装。
+4. 创建 Release：`gh release create v1.2.1 dist/bobo.app.zip dist/bobo.app.zip.sha256 --title v1.2.1 --generate-notes`；beta 轮次同理（`v1.3.0-beta.1`），但**不要加 `--prerelease`**——应用内更新读的是 `/releases/latest`，预发布 Release 它看不到；
+5. 应用内更新读取该 Release 的 `bobo.app.zip`（按语义化版本比较，beta 也会提示），用 GitHub 资产的 sha256 digest 与代码签名双重校验后再安装。
 
 - 公证凭据：本机钥匙串里的 notarytool profile（默认 `paperrss-notary`，可用 `NOTARY_PROFILE` 覆盖），或 `NOTARY_API_KEY` / `NOTARY_API_KEY_ID` / `NOTARY_API_ISSUER_ID`（App Store Connect API Key）。
 - 没有 Developer ID 证书时会退回 ad-hoc 签名：`npm run package` 默认拒绝发布（本机验证可加 `BOBO_ALLOW_ADHOC=1`），`BOBO_SKIP_NOTARY=1` 可跳过公证。
@@ -184,7 +184,7 @@
 
 ### GitHub Actions 自动发布（可选）
 
-在仓库 secrets 里配置以下项后，推 `v*` tag 就会在 CI 里完成签名、公证与发布（带后缀的 tag，如 `v1.3.0-beta.1`，创建的是**预发布** Release，应用内更新只推正式版）：
+在仓库 secrets 里配置以下项后，推 `v*` tag 就会在 CI 里完成签名、公证与发布（**beta 轮次也不要加 `--prerelease`**：应用内更新读 `/releases/latest`，标成预发布的 Release 它看不到——版本号里的 `-beta.N` 后缀已经能说明这是预览版）：
 
 | Secret | 内容 |
 | --- | --- |
