@@ -17,7 +17,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     private var islandLayoutTimer: Timer?
     private var islandCollapse: DispatchWorkItem?
     private var islandAutoCollapse: DispatchWorkItem?
-    // 悬停明细卡：额度 / 设备指示悬停半秒后弹出的只读小窗（独立窗口，贴在面板下方、层级高于面板）。
+    // 悬停明细卡：额度 / 设备 / 网络指示悬停半秒后弹出的只读小窗（独立窗口，贴在面板下方、层级高于面板）。
     private var detailWindow: NotchPanel!
     private var detailHosting: NSHostingView<IslandDetailView>?
     private var detailShowWork: DispatchWorkItem?
@@ -39,6 +39,8 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     private var islandDragStartMouseX: CGFloat?
     private var islandDragStartOriginX: CGFloat?
     private var islandDragging = false
+    // 正在拖动刘海上的额度圆环排序：这时不要跟着拖面板本身（见 setupIslandDrag）。
+    private var islandQuotaDragging = false
     private var isHopping = false
     private var lastNoticeKey = ""
     private var launchTime = Date().timeIntervalSince1970 * 1000
@@ -228,10 +230,8 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         let hosting = IslandHostingView(rootView: IslandView(
             model: islandModel,
             onSelect: { [weak self] session in self?.focusIsland(session) },
-            onActivate: { [weak self] in
-                guard let self, !self.islandDragging else { return }
-                self.showWindow()
-            },
+            onActivate: { [weak self] in self?.showIslandStatus() },
+            onAvatar: { [weak self] source in self?.showIslandStatus(source: source) },
             onQuota: { [weak self] in
                 guard let self, !self.islandDragging else { return }
                 self.cycleUsage()
@@ -242,10 +242,23 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
                 // 折叠胶囊显示哪一家由「通知岛 → 内容 → 默认展示的额度」决定，点圆环不会改它。
                 self.postIsland("/api/usage/range", ["id": id])
             },
-            onDevice: { [weak self] in
+            onReorder: { [weak self] ids in
                 guard let self, !self.islandDragging else { return }
-                self.showDeviceStatus()
+                // 面板并排的圆环按住拖动：写 usage.json 的 order，与网页「通知岛 → 内容 → 额度显示顺序」同一份。
+                self.postIsland("/api/usage/order", ["ids": ids])
             },
+            onQuotaDrag: { [weak self] dragging in
+                guard let self else { return }
+                // 拖动圆环排序期间不要再去拖面板本身（setupIslandDrag 的「可移动」逻辑）。
+                self.islandQuotaDragging = dragging
+                // 拖完时鼠标可能已经滑到面板外：补一次悬停判定（拖动期间刻意没收起面板）。
+                if !dragging, let panel = self.notchWindow, !panel.frame.contains(NSEvent.mouseLocation) {
+                    self.islandHovering(false)
+                }
+            },
+            onDevice: { [weak self] in self?.showDeviceStatus() },
+            onNetwork: { [weak self] in self?.showNetworkStatus() },
+            onSettings: { [weak self] in self?.showSettingsStatus() },
             onDetail: { [weak self] kind, hovering in self?.detailHoverChanged(kind, hovering) },
             onQuit: {
                 // 退出 bobo：和菜单里的「退出 bobo」同一条路径，applicationWillTerminate 会顺带停掉本地服务。
@@ -406,13 +419,14 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         // 额度圆环画几枚：折叠态与「点击切换」方式只有当前选中的那一枚，「展开并排」方式在展开时
         // 按设置并排显示各来源，数量由中轴线到屏幕右缘的剩余空间决定（自适应，见 IslandBarGeometry.quotaChips）。
         islandModel.quotaChipLimit = quotaChipLimit(for: screen, keepOut: notch > 0 ? notch + IslandMetrics.notchGap * 2 : IslandMetrics.itemSpacing)
-        // 内容宽度按同一套图标规格算：头像（空位时是默认的置灰 bobo）+ 额度圆环 + 设备（+ 悬停时的设置与退出）。
+        // 内容宽度按同一套图标规格算：头像（空位时是默认的置灰 bobo）+ 额度圆环 + 设备 + 网络（+ 悬停时的设置与退出）。
         // 头像按脸宽（19）算：圆环外沿是 22，这样画面里每一段间距看起来都是同一个 itemSpacing。
         let widths = IslandBarGeometry.contentWidths(
             faces: max(1, plan.shown),
             hidden: plan.hidden,
             quota: islandModel.quotaChipLimit,
             device: islandModel.device != nil,
+            network: islandModel.network != nil,
             hoverButtons: islandModel.hovering)
         // 刘海屏上下同宽，列表沿用顶部内容宽度；外接屏保留原有展开宽度。
         let minWidth: CGFloat = islandModel.expanded && !notched ? max(notchWidth(screen) + 280, 460) : 0
@@ -439,6 +453,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             screenWidth: screen.frame.width,
             keepOut: keepOut,
             device: islandModel.device != nil,
+            network: islandModel.network != nil,
             hoverButtons: islandModel.hovering)
     }
 
@@ -619,6 +634,8 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         }
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
+            // 正在拖动额度圆环排序：鼠标可能滑到面板外，这时别把面板收走（拖完由 onQuotaDrag 再判一次）。
+            if self.islandQuotaDragging { return }
             let mouse = NSEvent.mouseLocation
             // mouseExited 有时是误报（滚动、窗口尺寸动画时系统会重算跟踪区）：鼠标还在面板上就别收起。
             if let window = self.notchWindow, window.frame.contains(mouse) { return }
@@ -670,7 +687,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             .sink { [weak self] metrics in self?.applyDetail(metrics) }
     }
 
-    // 悬停额度 / 设备指示：满半秒弹明细卡；离开后 0.4 秒内没落在卡片上就收起。
+    // 悬停额度 / 设备 / 网络指示：满半秒弹明细卡；离开后 0.4 秒内没落在卡片上就收起。
     private func detailHoverChanged(_ kind: IslandDetailKind, _ hovering: Bool) {
         if hovering {
             // 先记下当前悬停的指示：并排显示的额度圆环之间切换时卡片已经在台上（下面提前返回），
@@ -801,10 +818,10 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         URLSession.shared.dataTask(with: request).resume()
     }
 
-    // 明细卡弹出时顺手让服务端立刻采一次最新数据：磁盘常驻采样约 60 秒一轮、额度也各有节奏，
+    // 明细卡弹出时顺手让服务端立刻采一次最新数据：磁盘常驻采样约 60 秒一轮、网络延迟约 6 秒一轮、额度也各有节奏，
     // 等下一轮太慢；数据变了服务端会经状态流推回来，卡片跟着刷新。
     private func refreshDetail(_ kind: IslandDetailKind) {
-        let path = kind == .quota ? "/api/usage?refresh=1" : "/api/devices?refresh=1"
+        let path = kind == .quota ? "/api/usage?refresh=1" : kind == .device ? "/api/devices?refresh=1" : "/api/network?refresh=1"
         guard !apiToken.isEmpty, let url = URL(string: "http://127.0.0.1:4318" + path) else { return }
         var request = URLRequest(url: url)
         request.setValue(apiToken, forHTTPHeaderField: "x-bobo-token")
@@ -816,8 +833,8 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     private func setupIslandDrag() {
         islandDragMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
             guard let self, let panel = self.notchWindow, event.window === panel else { return event }
-            // 所有屏幕都遵循「可移动」开关。
-            guard self.islandModel.settings.movable else { return event }
+            // 所有屏幕都遵循「可移动」开关；拖圆环排序时也别把面板拖走。
+            guard self.islandModel.settings.movable, !self.islandQuotaDragging else { return event }
             switch event.type {
             case .leftMouseDown:
                 self.hideDetail()
@@ -877,7 +894,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             menuBarYielding = false
             menuBarLeftAt = nil
             scheduleIslandLayout()
-        } else if panel.isVisible, bar.contains(mouse), !visibleBar.contains(mouse) {
+        } else if panel.isVisible, IslandBarGeometry.menuBarYields(mouse: mouse, menuBar: bar, visibleBar: visibleBar, foldedWidth: collapsedIslandWidth(for: screen)) {
             menuBarYielding = true
             islandCollapse?.cancel()
             islandAutoCollapse?.cancel()
@@ -887,6 +904,21 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             scheduleIslandLayout()
             stopTerminalWatch()
         }
+    }
+
+    // 折叠（未激活）态的面板宽度：菜单栏让位的左右安全区取它的一半（见 IslandBarGeometry.menuBarYields）。
+    // 按与 islandSize 同一套几何算，但不写模型——让位判定每 0.15 秒跑一次，不能顺手改布局。
+    private func collapsedIslandWidth(for screen: NSScreen) -> CGFloat {
+        let notched = Self.hasNotch(screen) && abs(islandOffset) < 1
+        let notch = notched ? notchWidth(screen) : 0
+        let limit = notched ? IslandMetrics.notchAvatars : IslandMetrics.maxAvatars
+        let plan = IslandBarGeometry.avatars(islandModel.busy.count, cap: limit)
+        let quota = islandModel.usage?.displayed?.session != nil ? 1 : 0
+        let widths = IslandBarGeometry.contentWidths(faces: max(1, plan.shown), hidden: plan.hidden, quota: quota,
+                                                     device: islandModel.device != nil, network: islandModel.network != nil, hoverButtons: false)
+        let layout = IslandBarGeometry.layout(left: widths.left, right: widths.right, notch: notch)
+        let barWidth = notched ? layout.keepOut + 2 * max(layout.left, layout.right) : 0
+        return IslandBarGeometry.width(layout, minWidth: barWidth, maxWidth: screen.frame.width - IslandMetrics.screenEdgeMargin * 2)
     }
 
     // 「没有活跃会话时隐藏」/ 关掉显示：真正把面板收起来（而不是缩成小窗挡点击）；再显示时淡入、收起时淡出，
@@ -937,7 +969,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         } completionHandler: { completion?() }
     }
 
-    // 点刘海上的额度指示：在可用的几家之间切换（服务端记住选择并推回新快照）。
+    // 点刘海上的额度指示：「点击切换」方式在可用的几家之间循环（服务端记住选择并推回新快照）。
     private func cycleUsage() {
         guard let usage = islandModel.usage, usage.switchable else { return }
         postIsland("/api/usage/provider", ["next": true])
@@ -984,6 +1016,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         islandModel.sessions = snapshot.sessions
         islandModel.usage = snapshot.usage
         islandModel.device = snapshot.device
+        islandModel.network = snapshot.network
         let displayChanged = islandModel.settings.display != snapshot.settings.display
         islandModel.settings = snapshot.settings
         // 描边高亮：这次提醒涉及的会话，直到用户去终端看过（acked）才撤掉。
@@ -1091,14 +1124,39 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     }
 
     @objc private func showOpenCodeStatus() {
-        showWindow()
-        webView.evaluateJavaScript("document.getElementById('islandTab')?.click()", completionHandler: nil)
+        showIslandStatus()
     }
 
     // 点刘海上的设备指示：打开窗口并切到「设备」视图（和通知岛菜单同一条路径）。
     private func showDeviceStatus() {
+        openInApp(tab: "deviceTab")
+    }
+
+    // 点刘海上的网络指示：打开窗口并切到「设备 → 网络」分栏（与其它指示同一条 DOM 点击路径）。
+    private func showNetworkStatus() {
+        openInApp(tab: "deviceTab", pane: ("device", "network"))
+    }
+
+    // 点刘海上的空白：打开主窗口，落在默认的第一个 tab（通知岛）。
+    private func showIslandStatus(source: String? = nil) {
+        openInApp(tab: "islandTab", pane: ("island", IslandMetrics.islandPane(forSource: source)))
+    }
+
+    // 点刘海上的齿轮：打开「设置」。
+    private func showSettingsStatus() {
+        openInApp(tab: "settingsTab")
+    }
+
+    // 把主窗口带到前台并落到某个一级 tab（tab 是 index.html 里的按钮 id）：网页与原生之间没有 JS 桥，
+    // 走和菜单一样的老路——对着 DOM 里的 tab / 分栏按钮点一下（见 index.html 的 data-*-pane）。
+    private func openInApp(tab: String, pane: (workspace: String, name: String)? = nil) {
+        // 拖动胶囊后的那一下点击不该当成「打开窗口」。
+        guard !islandDragging else { return }
         showWindow()
-        webView.evaluateJavaScript("document.getElementById('deviceTab')?.click()", completionHandler: nil)
+        webView.evaluateJavaScript("document.getElementById('\(tab)')?.click()", completionHandler: nil)
+        guard let pane else { return }
+        // 分栏按钮的点击是同步的：即便视图刚切过来，这一次点击也能直接定位。
+        webView.evaluateJavaScript("document.querySelector('#\(pane.workspace)Workspace [data-\(pane.workspace)-pane=\"\(pane.name)\"]')?.click()", completionHandler: nil)
     }
 
     // 左键切换窗口显示，右键或 Control+左键弹出菜单。
@@ -1499,6 +1557,66 @@ struct IslandDevice: Decodable {
     }
 }
 
+// 网络快照（服务端 network.mjs 挂在状态流里）：设备指示右边那枚三灯珠指示读它。
+// 延迟 / 下载 / 上传三个等级（ok / warn / low / idle）都由服务端按同一套尺度算好，这里只格式化与上色。
+struct IslandNetwork: Decodable {
+    struct Interface: Decodable {
+        var name: String?
+        var kind: String?
+        var label: String?
+        var address: String?
+    }
+    struct Latency: Decodable {
+        var ms: Double?
+        var level: String?
+        // icmp（ping）或 tcp（封 ICMP 时的兜底握手）。
+        var source: String?
+        // 探测目标（默认 1.1.1.1）。
+        var host: String?
+    }
+    struct Rate: Decodable {
+        var bytesPerSec: Double?
+        var level: String?
+    }
+    struct Totals: Decodable {
+        var download: Double?
+        var upload: Double?
+        var since: Double?
+    }
+    var available: Bool?
+    var online: Bool?
+    var interface: Interface?
+    var latency: Latency?
+    var download: Rate?
+    var upload: Rate?
+    var totals: Totals?
+    var error: String?
+    // 速率文案（与网页「设备 → 网络」同一套口径）：1024 进制，B/s / KB/s / MB/s / GB/s。
+    static func rate(_ bytesPerSec: Double?) -> String {
+        let value = max(0, bytesPerSec ?? 0)
+        if value < 1024 { return String(format: "%.0f B/s", value) }
+        let kb = value / 1024
+        if kb < 1024 { return kb < 100 ? String(format: "%.1f KB/s", kb) : String(format: "%.0f KB/s", kb) }
+        let mb = kb / 1024
+        if mb < 1024 { return mb < 100 ? String(format: "%.1f MB/s", mb) : String(format: "%.0f MB/s", mb) }
+        return String(format: "%.2f GB/s", mb / 1024)
+    }
+    // 本次运行的累计流量（服务端从 bobo 启动后开始累加）。
+    static func bytes(_ value: Double?) -> String {
+        let v = max(0, value ?? 0)
+        if v < 1024 { return String(format: "%.0f B", v) }
+        let kb = v / 1024
+        if kb < 1024 { return String(format: "%.1f KB", kb) }
+        let mb = kb / 1024
+        if mb < 1024 { return String(format: "%.1f MB", mb) }
+        return String(format: "%.2f GB", mb / 1024)
+    }
+    static func latencyText(_ ms: Double?) -> String {
+        guard let ms, ms.isFinite else { return "—" }
+        return ms < 10 ? String(format: "%.1f ms", ms) : String(format: "%.0f ms", ms)
+    }
+}
+
 // 折叠胶囊的几何常量：窗口宽度按内容宽度计算，额度指示的宽度要一起算进去（见 Bobo.islandSize）。
 enum IslandMetrics {
     // 折叠胶囊里每个图标共用一套规格：22 的外框（热区与悬停圆底）、5 的间距、同一套悬停底色；
@@ -1528,7 +1646,7 @@ enum IslandMetrics {
     // 超过就换成「+N」徽标（见 IslandBarGeometry.avatars）。
     static let maxAvatars = 8
     static let notchAvatars = 4
-    // 悬停明细卡（额度 / 设备）：宽度固定，高度由内容决定；圆角与内边距与面板同一套观感。
+    // 悬停明细卡（额度 / 设备 / 网络）：宽度固定，高度由内容决定；圆角与内边距与面板同一套观感。
     static let detailWidth: CGFloat = 236
     // 鼠标停在指示上多久弹出明细卡（秒）。
     static let detailDelay: Double = 0.5
@@ -1549,6 +1667,21 @@ enum IslandMetrics {
     // 服务端的压力等级（ok / warn / low）对应的颜色。
     static func levelColor(_ level: String?) -> Color {
         level == "warn" ? warnHue : level == "low" ? criticalHue : healthyHue
+    }
+    // 网络灯珠的颜色：ok 绿 / warn 橙 / low 红，空闲（idle）与认不出的等级是暗灰。
+    // 三枚灯珠（延迟 / 下载 / 上传）与网页「设备 → 网络」的放大版共用这一套。
+    static func beadColor(_ level: String?) -> Color {
+        switch beadLevel(level) {
+        case "ok": return healthyHue
+        case "warn": return warnHue
+        case "low": return criticalHue
+        default: return Color(white: 0.32)
+        }
+    }
+    // 等级归一化：nil / 认不出的值按「空闲」处理，界面不会画出没有含义的颜色。
+    static func beadLevel(_ level: String?) -> String {
+        let value = level ?? ""
+        return ["ok", "warn", "low", "idle"].contains(value) ? value : "idle"
     }
     // 重置时间的说法与网页「用量」一致；没有重置时间的窗口返回 nil（明细卡里不显示这一行）。
     static func resetText(_ seconds: Double) -> String? {
@@ -1592,6 +1725,19 @@ enum IslandMetrics {
     static func providerId(forSource source: String?) -> String {
         source == "codex" ? "codex" : source == "omp" ? "omp" : source == "claude" ? "claude" : source == "dsh" ? "dsh" : source == "agy" ? "agy" : "opencode-go"
     }
+    // 点刘海上的会话头像要定位到的通知岛分栏（与 index.html 的 data-island-pane 一致）：
+    // 认不出的来源、以及没有活跃会话时的置灰 bobo（source 为 nil）都落回第一项「通知岛设置」。
+    static func islandPane(forSource source: String?) -> String {
+        let panes = ["opencode", "codex", "omp", "claude", "dsh", "agy"]
+        guard let source, panes.contains(source) else { return "general" }
+        return source
+    }
+    // 圆环拖动排序后的完整顺序：把「并排显示的这几家」按新顺序回填进完整 providers 顺序，
+    // 未显示的来源（关掉 / 不可用 / 超出并排数量）保持原位——提交给 /api/usage/order 的就是它。
+    static func mergedQuotaOrder(full: [String], shown: [String]) -> [String] {
+        var next = shown.makeIterator()
+        return full.map { shown.contains($0) ? (next.next() ?? $0) : $0 }
+    }
     // 盒面用各家 IP 的主色区分来源；颜色只作用于很小的品牌牌面，不改变 bobo 本身的配色。
     // OpenCode 的品牌黑在纯黑刘海上会和背景糊成一整块（牌的轮廓、圆角都看不见），提亮成深灰；
     // 别家颜色本来就亮，照旧。
@@ -1614,7 +1760,7 @@ enum IslandMetrics {
 // 顶部栏的水平分区：左翼 + 中间的让位 + 右翼，三者之和就是面板宽度。
 // 没有真实刘海时中间只是一个普通间距（维持原来的居中排布）；有真实刘海时中间正好让给刘海
 // （宽 = 刘海 + 两侧各一个 notchGap），两侧内容各自贴住刘海——摄像头模组那块区域物理上不可见，
-// 内容排进去就会被盖住。两翼各自只包住自己的内容（左翼包头像、右翼包额度与设备），所以窗口左右
+// 内容排进去就会被盖住。两翼各自只包住自己的内容（左翼包头像、右翼包额度与设备 / 网络），所以窗口左右
 // 不对称：定位时让让位区正中（而不是窗口中心）对准屏幕正中，空白就不会全堆在内容少的那一侧。
 struct IslandBarLayout: Equatable {
     var left: CGFloat
@@ -1649,23 +1795,23 @@ enum IslandLayoutTween {
 // 顶部栏的排布计算（纯函数，方便单独验证）：内容宽度、面板宽度、栏内分区、折叠头像的取舍。
 enum IslandBarGeometry {
     // 两侧内容的宽度（不含端帽）：左侧是会话头像 + 分隔线（放不下时最后一格换成「+N」徽标，
-    // 尺寸与头像脸一致），右侧是额度圆环（展开并排时可能有几枚）+ 设备（+ 悬停时的设置与退出）。
+    // 尺寸与头像脸一致），右侧是额度圆环（展开并排时可能有几枚）+ 设备 + 网络（+ 悬停时的设置与退出）。
     // 间距与图标规格共用 IslandMetrics。
-    static func contentWidths(faces: Int, hidden: Int, quota: Int, device: Bool, hoverButtons: Bool) -> (left: CGFloat, right: CGFloat) {
+    static func contentWidths(faces: Int, hidden: Int, quota: Int, device: Bool, network: Bool, hoverButtons: Bool) -> (left: CGFloat, right: CGFloat) {
         // 头像之间、头像与徽标 / 分隔线之间都是同一个间距；分隔线自己也占一格的宽度。
         var left = CGFloat(faces) * IslandMetrics.glyphSize + IslandMetrics.itemSpacing * CGFloat(faces) + IslandMetrics.dividerWidth
         if hidden > 0 { left += IslandMetrics.itemSpacing + IslandMetrics.glyphSize }
-        let chips = max(0, quota) + (device ? 1 : 0) + (hoverButtons ? 2 : 0)
+        let chips = max(0, quota) + (device ? 1 : 0) + (network ? 1 : 0) + (hoverButtons ? 2 : 0)
         return (left, CGFloat(chips) * IslandMetrics.itemSize + IslandMetrics.itemSpacing * CGFloat(max(0, chips - 1)))
     }
 
     // 并排显示几枚额度圆环（纯函数）：count 是可用的来源数，limit 是用户设的上限（3 / 5 / 7），0 = 自适应。
     // 自适应按屏幕剩余空间算：面板以屏幕正中（展开后的中轴线）为轴，圆环从刘海右侧往右排，中轴线到屏幕
-    // 右缘的那半屏里还要给设备指示、设置 / 退出按钮与端帽留位置——装不下的不显示，至少留一枚。
-    static func quotaChips(count: Int, limit: Int, screenWidth: CGFloat, keepOut: CGFloat, device: Bool, hoverButtons: Bool) -> Int {
+    // 右缘的那半屏里还要给设备、网络指示、设置 / 退出按钮与端帽留位置——装不下的不显示，至少留一枚。
+    static func quotaChips(count: Int, limit: Int, screenWidth: CGFloat, keepOut: CGFloat, device: Bool, network: Bool, hoverButtons: Bool) -> Int {
         guard count > 0 else { return 0 }
         guard count > 1 else { return 1 }
-        let reserved = (device ? 1 : 0) + (hoverButtons ? 2 : 0)
+        let reserved = (device ? 1 : 0) + (network ? 1 : 0) + (hoverButtons ? 2 : 0)
         let space = (screenWidth - IslandMetrics.screenEdgeMargin * 2) / 2 - keepOut / 2 - IslandMetrics.barEdge
         func fits(_ shown: Int) -> Bool {
             let chips = shown + reserved
@@ -1705,6 +1851,13 @@ enum IslandBarGeometry {
     static func yieldSize(barHeight: CGFloat) -> NSSize {
         NSSize(width: IslandMetrics.yieldWidth, height: max(18, barHeight - IslandMetrics.yieldHeightInset))
     }
+
+    // 菜单栏让位（防遮挡状态栏图标）的触发判定：鼠标在菜单栏高度里，且不在「面板可见部分 + 左右各
+    // 折叠态宽度一半」的安全带里时才让位——面板附近横向移动、擦着面板边缘路过都不该把面板收走。
+    static func menuBarYields(mouse: NSPoint, menuBar: NSRect, visibleBar: NSRect, foldedWidth: CGFloat) -> Bool {
+        guard menuBar.contains(mouse) else { return false }
+        return !visibleBar.insetBy(dx: -max(0, foldedWidth) / 2, dy: 0).contains(mouse)
+    }
 }
 
 struct IslandSnapshot: Decodable {
@@ -1716,10 +1869,12 @@ struct IslandSnapshot: Decodable {
     var usage: IslandQuota?
     // 设备（CPU / 内存 / 磁盘，服务端 /api/devices 挂在状态流里）；缺字段时胶囊上不画设备指示。
     var device: IslandDevice?
+    // 网络（延迟 / 下载 / 上传，服务端 /api/network 挂在状态流里）；缺字段时胶囊上不画网络指示。
+    var network: IslandNetwork?
 }
 
-// 悬停明细卡的内容类型：额度（额度圆环）或设备（设备指示）。
-enum IslandDetailKind: String { case quota, device }
+// 悬停明细卡的内容类型：额度（额度圆环）、设备（设备指示）或网络（三枚灯珠指示）。
+enum IslandDetailKind: String { case quota, device, network }
 
 // SwiftUI 明细卡量好自身尺寸后回报（kind 是卡片里实际渲染的内容）：
 // 原生按它调整小窗尺寸与位置，尺寸变了也只是重排、不跟着鼠标跑（见 Bobo.applyDetail）。
@@ -1742,6 +1897,8 @@ final class IslandModel: ObservableObject {
     @Published var quotaFocus: String?
     // 本机设备（CPU / 内存 / 磁盘，折叠胶囊里额度右边的设备指示）。
     @Published var device: IslandDevice?
+    // 本机网络（延迟 / 下载 / 上传，设备指示右边的三枚灯珠）。
+    @Published var network: IslandNetwork?
     // 悬停明细卡：nil 为不显示；detailMetrics 由 SwiftUI 上报，原生用它定窗口尺寸（见 Bobo.applyDetail）。
     @Published var detail: IslandDetailKind?
     @Published var detailMetrics = DetailMetrics()
@@ -1852,14 +2009,29 @@ final class IslandModel: ObservableObject {
 struct IslandView: View {
     @ObservedObject var model: IslandModel
     var onSelect: (IslandSession) -> Void
+    // 点顶部栏空白：打开主窗口，落在默认的第一个 tab（通知岛）。
     var onActivate: () -> Void
+    // 点头像（含「+N」徽标）：打开主窗口的通知岛视图并定位这一家的分栏；nil 是默认的置灰 bobo（通知岛设置）。
+    var onAvatar: (String?) -> Void
+    // 点额度圆环：「展开并排」时切这一家的显示范围（5 小时 / 本周 / 账单月…），「点击切换」时切来源。
     var onQuota: () -> Void
-    // 「展开并排」模式下点圆环：切这一家圆环的显示范围（5 小时 / 本周 / 账单月…），不改折叠胶囊显示的那家。
     var onQuotaRange: (String) -> Void
+    // 圆环按住拖动排序：松手时给出完整顺序（未显示的来源保持原位）；dragging 用来压住面板自身的拖动。
+    var onReorder: ([String]) -> Void
+    var onQuotaDrag: (Bool) -> Void
     var onDevice: () -> Void
-    // 额度 / 设备指示的悬停变化：满半秒由原生弹明细卡（见 Bobo.detailHoverChanged）。
+    // 点网络指示（三枚灯珠）：打开「设备 → 网络」分栏。
+    var onNetwork: () -> Void
+    // 点齿轮：打开主窗口的设置视图。
+    var onSettings: () -> Void
+    // 额度 / 设备 / 网络指示的悬停变化：满半秒由原生弹明细卡（见 Bobo.detailHoverChanged）。
     var onDetail: (IslandDetailKind, Bool) -> Void
     var onQuit: () -> Void
+    // 额度圆环的拖动排序：拖动期间按本地草稿顺序渲染（实时互换位置），松手把新顺序合并后提交给服务端；
+    // 草稿保留到快照里的顺序与它一致（或超时兜底），中间不会闪回旧顺序。
+    @State private var quotaDragId: String?
+    @State private var quotaDragBase: [String] = []
+    @State private var quotaOrderDraft: [String] = []
 
     var body: some View {
         GeometryReader { geometry in
@@ -1886,6 +2058,47 @@ struct IslandView: View {
         }
     }
 
+    // 并排显示的圆环（拖动排序的草稿优先；草稿里认不出的来源按服务端顺序补在后面）。
+    private func quotaRowProviders(_ quota: IslandQuota) -> [IslandQuotaProvider] {
+        let shown = Array(quota.subscriptions.prefix(model.quotaChipLimit))
+        guard !quotaOrderDraft.isEmpty else { return shown }
+        let ordered = quotaOrderDraft.compactMap { id in shown.first { $0.id == id } }
+        return ordered + shown.filter { row in !quotaOrderDraft.contains(row.id) }
+    }
+
+    // 圆环按住拖动排序：拖动中实时互换位置（本地草稿），松手把「显示这几家」的新顺序合并进完整
+    // providers 顺序（未显示的来源保持原位）交给服务端；8pt 以内仍算点击（切换显示范围 / 来源）。
+    private func quotaReorderGesture(_ id: String) -> some Gesture {
+        DragGesture(minimumDistance: 8)
+            .onChanged { value in
+                let shown = Array((model.usage?.subscriptions ?? []).prefix(model.quotaChipLimit)).map(\.id)
+                if quotaDragId != id {
+                    quotaDragId = id
+                    quotaDragBase = quotaOrderDraft.isEmpty ? shown : quotaOrderDraft
+                    onQuotaDrag(true)
+                }
+                guard let start = quotaDragBase.firstIndex(of: id) else { return }
+                let step = IslandMetrics.itemSize + IslandMetrics.itemSpacing
+                let shift = Int((value.translation.width / step).rounded())
+                var next = quotaDragBase.filter { $0 != id }
+                next.insert(id, at: min(max(start + shift, 0), next.count))
+                if next != quotaOrderDraft { quotaOrderDraft = next }
+            }
+            .onEnded { _ in
+                let draft = quotaOrderDraft
+                quotaDragId = nil
+                onQuotaDrag(false)
+                guard draft.count > 1 else { quotaOrderDraft = []; return }
+                let full = (model.usage?.providers ?? []).map(\.id)
+                let merged = IslandMetrics.mergedQuotaOrder(full: full, shown: draft)
+                if merged != full { onReorder(merged) }
+                // 服务端推回新快照之前先留着草稿；顺序一致（见 bar 的 onChange）或 2 秒后丢掉。
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                    if quotaDragId == nil, quotaOrderDraft == draft { quotaOrderDraft = [] }
+                }
+            }
+    }
+
     // 折叠态 / 展开态的顶部栏：左右两组内容各自排在刘海两侧的「翼」里（两翼宽度由原生按内容算好，
     // 见 IslandBarLayout）。左翼端帽在左、内容靠右，右翼反过来，于是内容分贴面板两端。
     // 刘海屏中间间距固定，顶部栏独立于列表宽度定位；外接屏仍用可伸缩间距。
@@ -1895,6 +2108,8 @@ struct IslandView: View {
                 // 默认图标（没有活跃会话时的置灰 bobo）固定靠左，占住会话头像的位置。
                 if model.avatars.isEmpty {
                     IslandAvatar(image: model.idleAvatarImage(), color: Color(white: 0.30), state: "idle", stateColor: Color(white: 0.42))
+                        .contentShape(Rectangle())
+                        .onTapGesture { onAvatar(nil) }
                 } else {
                     ForEach(model.avatars) { session in
                         IslandAvatar(
@@ -1905,10 +2120,15 @@ struct IslandView: View {
                             state: session.state,
                             stateColor: model.color(session.state)
                         )
+                        // 点头像不看终端，而是回到主窗口的通知岛视图，定位到这一家的分栏。
+                        .contentShape(Rectangle())
+                        .onTapGesture { onAvatar(session.source) }
                     }
                     // 放不下的会话：最后一格是「+N」徽标，完整列表在展开态里看。
                     if let hidden = model.hiddenAvatarCount {
                         IslandOverflowBadge(count: hidden, color: model.color(model.hiddenAvatarState))
+                            .contentShape(Rectangle())
+                            .onTapGesture { onAvatar(nil) }
                     }
                 }
                 // bobo / 会话头像与右边的状态图标之间用一条细竖线分开；两边的间距与图标之间一样。
@@ -1927,28 +2147,40 @@ struct IslandView: View {
             HStack(spacing: IslandMetrics.itemSpacing) {
                 // 额度圆环：折叠态（以及「点击切换」方式）只有当前选中的那一枚；「展开并排」方式在展开时
                 // 按设置并排显示各来源——画几枚由原生按屏幕剩余空间算好（见 Bobo.islandSize 的 quotaChipLimit）。
+                // 点某一枚：「展开并排」切这一家的显示范围，「点击切换」切来源；并排的几枚还能按住拖动排序。
                 if model.expanded, model.settings.quotaView == "expand", let quota = model.usage {
-                    ForEach(Array(quota.subscriptions.prefix(model.quotaChipLimit)), id: \.id) { provider in
+                    ForEach(quotaRowProviders(quota), id: \.id) { provider in
                         if let window = provider.displayWindow {
                             IslandQuotaChip(provider: provider, window: window,
                                             selected: provider.id == quota.displayed?.id,
-                                            action: { onQuotaRange(provider.id) },
                                             onHover: quotaHover(provider.id))
+                                .contentShape(Circle())
+                                .onTapGesture { onQuotaRange(provider.id) }
+                                // 按住拖动调整来源顺序（写 usage.json 的 order，与网页「通知岛 → 内容 → 额度显示顺序」同一份）。
+                                .simultaneousGesture(quotaReorderGesture(provider.id))
+                                .opacity(quotaDragId == provider.id ? 0.6 : 1)
                         }
                     }
                 } else if let provider = model.usage?.displayed, let window = provider.displayWindow {
                     // 「点击切换」方式点圆环切换来源；「展开并排」的折叠态点圆环换这一家的显示范围（展开看全部）。
                     IslandQuotaChip(provider: provider, window: window,
-                                    action: model.settings.quotaView == "expand" ? { onQuotaRange(provider.id) } : onQuota,
                                     onHover: quotaHover(provider.id))
+                        .contentShape(Circle())
+                        .onTapGesture {
+                            if model.settings.quotaView == "expand" { onQuotaRange(provider.id) } else { onQuota() }
+                        }
                 }
                 // 额度右边的设备指示（CPU 压力灯 + 磁盘 / 内存双弧）：始终显示，不随悬停出现。
                 if let device = model.device {
                     IslandDeviceChip(device: device, action: onDevice, onHover: { onDetail(.device, $0) })
                 }
+                // 设备右边的网络指示（三枚垂直灯珠：上 = 延迟、中 = 下载、下 = 上传）。
+                if let network = model.network {
+                    IslandNetworkChip(network: network, action: onNetwork, onHover: { onDetail(.network, $0) })
+                }
                 // 设置与退出只在鼠标移上来（面板展开）时出现，收起时保持干净。
                 if model.hovering {
-                    NotchIconButton(icon: "gearshape", tooltip: "打开 bobo", action: onActivate)
+                    NotchIconButton(icon: "gearshape", tooltip: "打开设置", action: onSettings)
                     NotchIconButton(icon: "power", tint: Color(red: 1.0, green: 0.40, blue: 0.40), tooltip: "退出 bobo", action: onQuit)
                 }
             }
@@ -1958,6 +2190,10 @@ struct IslandView: View {
         .frame(height: model.barHeight)
         .contentShape(Rectangle())
         .onTapGesture(perform: onActivate)
+        // 快照里的顺序与草稿一致（服务端已接受拖动结果）时丢掉草稿，之后以服务端顺序为准。
+        .onChange(of: model.usage?.subscriptions.map(\.id) ?? []) { _, ids in
+            if quotaDragId == nil, !quotaOrderDraft.isEmpty, ids == quotaOrderDraft { quotaOrderDraft = [] }
+        }
     }
 
     // 会话列表：高度按设置里的条数固定，装不下时可以滚动查看其余会话。
@@ -2068,11 +2304,11 @@ struct IslandSessionTag: View {
 // 折叠胶囊的额度指示：一枚圆环（底圈 + 剩余比例圆弧），环里是来源图标（模板图，白色）。
 // 不再显示百分比文字——数字放进悬停半秒后弹出的明细卡里，宽度因此恒为一枚图标（见 Bobo.islandSize）。
 // 「展开并排」方式下会并排出现几枚：只有当前选中的那家带底色（收起后留在胶囊上的就是它）。
+// 这里只画圆环：点击（切换来源 / 显示范围）与按住拖动排序由 IslandView 在调用处加手势。
 struct IslandQuotaChip: View {
     let provider: IslandQuotaProvider
     let window: IslandQuotaWindow
     var selected = true
-    let action: () -> Void
     var onHover: ((Bool) -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
@@ -2102,15 +2338,12 @@ struct IslandQuotaChip: View {
     }
 
     var body: some View {
-        Button(action: action) {
-            ring
-                .frame(height: IslandMetrics.itemSize)
-                .background(Capsule().fill(.white.opacity(hovering ? IslandMetrics.fillHover : (selected ? IslandMetrics.fillIdle : 0))))
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovering)
-        .background(HoverReporter { hovering = $0; onHover?($0) })
+        ring
+            .frame(height: IslandMetrics.itemSize)
+            .background(Capsule().fill(.white.opacity(hovering ? IslandMetrics.fillHover : (selected ? IslandMetrics.fillIdle : 0))))
+            .contentShape(Capsule())
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovering)
+            .background(HoverReporter { hovering = $0; onHover?($0) })
     }
 }
 
@@ -2167,7 +2400,51 @@ struct IslandDeviceChip: View {
     }
 }
 
-// MARK: - 悬停明细卡（额度 / 设备）
+// 折叠胶囊里的网络指示：三枚垂直排列的灯珠（上 = 延迟、中 = 下载、下 = 上传），颜色按服务端算好的等级——
+// 延迟 < 60ms 绿 / < 200ms 橙 / 其余红（探测失败转红），流量 < 64 KB/s 空闲灰 / < 4 MB/s 绿 / < 64 MB/s 橙 /
+// 其余红。数字都在悬停半秒后弹出的明细卡里；点它打开「设备」的网络分栏。
+struct IslandNetworkChip: View {
+    let network: IslandNetwork
+    let action: () -> Void
+    var onHover: ((Bool) -> Void)? = nil
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hovering = false
+
+    // 22pt 的框里放三枚珠子：4.6 × 3 + 2.4 × 2 = 18.6，比额度圆环 / 设备指示略小，三者并排看着一样重。
+    private static let beadSize: CGFloat = 4.6
+    private static let beadSpacing: CGFloat = 2.4
+
+    // 延迟没有读数时：断网转红，还没探过就按空闲灰（避免刚启动时误报红色）。
+    private var latencyLevel: String {
+        if let level = network.latency?.level { return IslandMetrics.beadLevel(level) }
+        return network.online == false ? "low" : "idle"
+    }
+    private var levels: [String] {
+        [latencyLevel, IslandMetrics.beadLevel(network.download?.level), IslandMetrics.beadLevel(network.upload?.level)]
+    }
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: Self.beadSpacing) {
+                ForEach(Array(levels.enumerated()), id: \.offset) { _, level in
+                    let color = IslandMetrics.beadColor(level)
+                    Circle().fill(color)
+                        .frame(width: Self.beadSize, height: Self.beadSize)
+                        // 亮着的珠子带一点光晕，空闲的没有——纯黑底上灰珠也能看清轮廓，绿 / 橙 / 红更醒目。
+                        .shadow(color: color.opacity(level == "idle" ? 0 : 0.75), radius: 1.6)
+                }
+            }
+            .frame(width: IslandMetrics.itemSize, height: IslandMetrics.itemSize)
+            .background(Circle().fill(.white.opacity(hovering ? IslandMetrics.fillHover : IslandMetrics.fillIdle)))
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovering)
+        .background(HoverReporter { hovering = $0; onHover?($0) })
+    }
+}
+
+// MARK: - 悬停明细卡（额度 / 设备 / 网络）
 
 // 悬停指示半秒后出现的只读卡片：深色底、圆角与通知岛面板同一套观感，内容按类型切换。
 // 卡片只负责画内容并量尺寸；显示、定位与隐藏都由 Bobo 管理（见 detailHoverChanged / applyDetail）。
@@ -2182,6 +2459,7 @@ struct IslandDetailView: View {
             switch shown {
             case .quota: IslandQuotaDetail(quota: model.usage, focus: model.quotaFocus, quotaView: model.settings.quotaView)
             case .device: IslandDeviceDetail(device: model.device)
+            case .network: IslandNetworkDetail(network: model.network)
             }
         }
         .padding(13)
@@ -2427,6 +2705,90 @@ private struct IslandDeviceRow: View {
             }
             DetailMeter(fraction: fraction, color: color)
             Text(detail).font(.system(size: 10.5)).foregroundStyle(.white.opacity(0.45)).lineLimit(2)
+        }
+    }
+}
+
+// 网络明细：延迟（含探测方式与主机）、下载 / 上传速率（含本次运行的累计流量），
+// 底部一行是接口与在线状态；颜色与胶囊上的三枚灯珠同一套等级。
+private struct IslandNetworkDetail: View {
+    let network: IslandNetwork?
+
+    var body: some View {
+        DetailHeader(title: "网络")
+        if let network {
+            let offline = network.online == false
+            IslandNetworkRow(
+                label: "延迟",
+                value: IslandNetwork.latencyText(network.latency?.ms),
+                level: network.latency?.level ?? (offline ? "low" : "idle"),
+                detail: latencyDetail(network)
+            )
+            IslandNetworkRow(
+                label: "下载",
+                value: IslandNetwork.rate(network.download?.bytesPerSec),
+                level: IslandMetrics.beadLevel(network.download?.level),
+                detail: totalsDetail(network)
+            )
+            IslandNetworkRow(
+                label: "上传",
+                value: IslandNetwork.rate(network.upload?.bytesPerSec),
+                level: IslandMetrics.beadLevel(network.upload?.level),
+                detail: totalsDetail(network)
+            )
+            if let line = interfaceLine(network) {
+                Text(line).font(.system(size: 10.5)).foregroundStyle(.white.opacity(0.45)).lineLimit(2)
+            }
+            if let error = network.error, !error.isEmpty {
+                Text("⚠ " + error).font(.system(size: 10)).foregroundStyle(IslandMetrics.warnHue)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else {
+            Text("正在读取…").font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.5))
+        }
+    }
+
+    // 探测方式与主机（默认 1.1.1.1）；没有读数时说清是断网还是还没探过。
+    private func latencyDetail(_ network: IslandNetwork) -> String {
+        if let latency = network.latency {
+            let source = latency.source == "tcp" ? "TCP 握手" : "ICMP ping"
+            return "\(source) · \(latency.host ?? "1.1.1.1")"
+        }
+        return network.online == false ? "探测没有响应" : "等待探测"
+    }
+    // 累计流量（服务端从 bobo 启动后开始算）：两行都写，一眼看出上下行的量级。
+    private func totalsDetail(_ network: IslandNetwork) -> String {
+        guard let totals = network.totals else { return "" }
+        return "本次运行 下载 \(IslandNetwork.bytes(totals.download)) · 上传 \(IslandNetwork.bytes(totals.upload))"
+    }
+    private func interfaceLine(_ network: IslandNetwork) -> String? {
+        guard let iface = network.interface else { return nil }
+        let kind = iface.kind == "wifi" ? "Wi-Fi" : iface.kind == "ethernet" ? "以太网" : (iface.label?.isEmpty == false ? iface.label! : "其它")
+        var parts = [(iface.name ?? "") + "（\(kind)）"]
+        if let address = iface.address, !address.isEmpty { parts.append(address) }
+        if network.online == false { parts.append("不可达") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+// 明细卡里的一行网络读数：左边一枚同色的灯珠 + 标签，右边数值；下面一行小字是说明。
+private struct IslandNetworkRow: View {
+    let label: String
+    let value: String
+    let level: String
+    let detail: String
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Circle().fill(IslandMetrics.beadColor(level)).frame(width: 7, height: 7)
+                    .shadow(color: IslandMetrics.beadColor(level).opacity(level == "idle" ? 0 : 0.7), radius: 1.6)
+                Text(label).font(.system(size: 11)).foregroundStyle(.white.opacity(0.62))
+                Spacer(minLength: 4)
+                Text(value).font(.system(size: 11.5, weight: .semibold)).monospacedDigit().foregroundStyle(.white)
+            }
+            if !detail.isEmpty {
+                Text(detail).font(.system(size: 10.5)).foregroundStyle(.white.opacity(0.45)).lineLimit(2)
+            }
         }
     }
 }

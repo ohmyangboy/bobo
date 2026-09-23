@@ -8,8 +8,8 @@ let theme='system';try{const stored=localStorage.getItem(themeKey)??localStorage
 function applyTheme(){document.documentElement.dataset.theme=theme==='system'?'':theme;for(const b of document.querySelectorAll('[data-theme-value]'))b.setAttribute('aria-pressed',String(b.dataset.themeValue===theme));}
 for(const b of document.querySelectorAll('[data-theme-value]'))b.onclick=()=>{theme=b.dataset.themeValue;try{localStorage.setItem(themeKey,theme);}catch{}applyTheme();};
 applyTheme();
-// 当前一级视图：技能 / 智能体 / 通知岛。顶栏全局操作按它收敛（见 style.css）。
-document.body.dataset.view='skills';
+// 当前一级视图：默认进通知岛（顶栏第一个 tab），另有技能 / 智能体 / 用量 / 设备 / 设置。顶栏全局操作按它收敛（见 style.css）。
+document.body.dataset.view='island';
 let skills=[],selected=null,current=null,original='',version=null,loading=false,selectionRun=0,folder=null,mineRoots=[];
 async function api(url,data){const r=await fetch('/api/'+url,{method:data?'POST':'GET',headers:{'x-bobo-token':token,'Content-Type':'application/json'},body:data?JSON.stringify(data):undefined});const b=await r.json();if(!r.ok)throw Error(b.error);return b;}
 let toastTimer;function toast(s){$('#toast').textContent=s;$('#toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').hidden=true,5000);}
@@ -967,8 +967,8 @@ $('#agentForm').onsubmit=guard(async e=>{
  toast('已创建 '+id+'，可继续完善定义');
 });
 
-// 通知岛：打开视图时订阅状态流，离开时断开；设置项写回 ~/.bobo/opencode.json。
-let islandView='skills',islandStream=null,islandReady=false,islandWatch=null,islandClock=null,islandState={sessions:[],settings:{},connected:false};
+// 通知岛：打开视图时订阅状态流，离开时断开；设置项写回 ~/.bobo/opencode.json。首页默认就在这个视图。
+let islandView='island',islandStream=null,islandReady=false,islandWatch=null,islandClock=null,islandState={sessions:[],settings:{},connected:false};
 const ocLabels={working:'运行中',waiting:'等你回答',idle:'已结束',error:'已终止'};
 // 会话来源的显示名（与 Bobo.swift 的 IslandRow 保持一致）。
 const sourceLabels={opencode:'OpenCode',codex:'Codex',omp:'omp',claude:'Claude Code',dsh:'DeepSeek',agy:'Antigravity'};
@@ -1391,11 +1391,11 @@ $('#usageKeyClear').onclick=guard(async()=>{
 function openUsage(){if(usageTimer)return;loadUsage();usageTimer=setInterval(()=>guard(loadUsage)(),60000);}
 function usageClose(){if(usageTimer){clearInterval(usageTimer);usageTimer=null;}}
 
-// 设备：CPU / 内存 / 磁盘三项本机指标。服务端常驻采样，这里每 2 秒读一次快照，离开视图就停掉定时器。
+// 设备：CPU / 内存 / 磁盘 / 网络四项本机指标。服务端常驻采样，这里每 2 秒读一次快照，离开视图就停掉定时器。
 // 进程列表另走按需接口（服务端缓存 1.5 秒）：只在设备视图可见、当前分栏有进程且页面在前台时每 3 秒拉一次，
 // 切走或切到后台立即停——这块的开销全在这里，不在服务端常驻采样里。
-let deviceData=null,deviceTimer=null,devicePane='cpu',processTimer=null,processRows='',processData=null,processSortSeen='';
-const devicePanes=['cpu','memory','disk'];
+let deviceData=null,networkData=null,deviceTimer=null,devicePane='cpu',processTimer=null,processRows='',processData=null,processSortSeen='';
+const devicePanes=['cpu','memory','disk','network'];
 function showDevicePane(name){
  const next=devicePanes.includes(name)?name:devicePanes[0];
  devicePane=next;
@@ -1481,8 +1481,10 @@ function deviceFacts(selector,rows){
 }
 function renderDevice(){
  const data=deviceData||{},{cpu,memory,disk}=data;
- $('#deviceState').textContent=data.error?(data.available?'部分不可用':'不可用'):data.available?'本机读数':'读取中';
- $('#deviceState').title=data.error||'';
+ // 网络读不到也算「部分不可用」：设备视图现在同时管四项指标。
+ const error=[data.error,networkData?.error].filter(Boolean).join('；');
+ $('#deviceState').textContent=error?(data.available?'部分不可用':'不可用'):data.available?'本机读数':'读取中';
+ $('#deviceState').title=error;
  $('#deviceUpdated').textContent=data.updatedAt?'更新于 '+deviceClock(data.updatedAt):'每 2 秒刷新';
  const value=(selector,text,level)=>{const el=$(selector);el.textContent=text;el.dataset.level=level||'';};
  value('#deviceCpuValue',cpu&&cpu.usage!==null?Math.round(cpu.usage)+'%':'—',cpu?.level);
@@ -1529,14 +1531,75 @@ function renderDevice(){
   ['可用',disk?deviceGB(disk.free):''],
  ]);
 }
+// 网络：与刘海胶囊上那三枚灯珠同一套尺度（上 = 延迟、中 = 下载、下 = 上传），等级由服务端算好，
+// 这里只做格式化与上色，不重复判断阈值。灯珠与图例只在首次渲染时建一次，之后只改文字与 data-level。
+const netRate=bytesPerSec=>{const v=Math.max(0,Number(bytesPerSec)||0);if(v<1024)return Math.round(v)+' B/s';const kb=v/1024;if(kb<1024)return (kb<100?kb.toFixed(1):Math.round(kb))+' KB/s';const mb=kb/1024;if(mb<1024)return (mb<100?mb.toFixed(1):Math.round(mb))+' MB/s';return (mb/1024).toFixed(2)+' GB/s';};
+const netLatencyText=ms=>ms===null||ms===undefined?'—':(Number(ms)<10?Number(ms).toFixed(1):Math.round(ms))+' ms';
+const netBytes=bytes=>{const v=Math.max(0,Number(bytes)||0);if(v<1024)return Math.round(v)+' B';const kb=v/1024;if(kb<1024)return kb.toFixed(1)+' KB';const mb=kb/1024;if(mb<1024)return mb.toFixed(1)+' MB';return (mb/1024).toFixed(2)+' GB';};
+const netTrafficLabel={idle:'空闲',ok:'正常',warn:'繁忙',low:'接近跑满'};
+const netLatencyLabel={ok:'正常',warn:'偏慢',low:'很差'};
+const netSourceLabel={icmp:'ICMP ping',tcp:'TCP 握手'};
+const netKindLabel=iface=>iface.kind==='wifi'?'Wi-Fi':iface.kind==='ethernet'?'以太网':iface.label||'其它';
+let netBeadNodes=null,netLegendNodes=null;
+function renderNetwork(){
+ const data=networkData||{},latency=data.latency,download=data.download||{},upload=data.upload||{},iface=data.interface;
+ const offline=data.online===false;
+ // 三枚灯珠的等级：延迟没有读数时（探索失败 / 还没探过）第一枚暗灰，断网时转红。
+ const levels=[latency?latency.level:(offline?'low':'idle'),download.level||'idle',upload.level||'idle'];
+ const value=$('#deviceNetworkValue');
+ value.textContent=latency?netLatencyText(latency.ms):'—';
+ value.dataset.level=levels[0]==='idle'?'':levels[0];
+ const box=$('#deviceNetworkLive');
+ if(!netBeadNodes||!box.contains(netBeadNodes[0])){
+  box.replaceChildren();
+  const beads=document.createElement('div');beads.className='net-beads';
+  netBeadNodes=[0,1,2].map(()=>{const bead=document.createElement('i');beads.append(bead);return bead;});
+  const legend=document.createElement('div');legend.className='net-legend';
+  netLegendNodes=['延迟','下载','上传'].map(name=>{
+   const row=document.createElement('div');
+   const label=document.createElement('span');label.className='name';label.textContent=name;
+   const strong=document.createElement('b');
+   const hint=document.createElement('span');hint.className='hint';
+   row.append(label,strong,hint);legend.append(row);
+   return {strong,hint};
+  });
+  box.append(beads,legend);
+ }
+ netBeadNodes.forEach((bead,i)=>{bead.dataset.level=levels[i];});
+ const bits=[
+  [latency?netLatencyText(latency.ms):(offline?'探测失败':'等待探测'),latency?netLatencyLabel[latency.level]||'':(offline?'不可达':'')],
+  [netRate(download.bytesPerSec),netTrafficLabel[download.level]||''],
+  [netRate(upload.bytesPerSec),netTrafficLabel[upload.level]||''],
+ ];
+ netLegendNodes.forEach((row,i)=>{row.strong.textContent=bits[i][0];row.hint.textContent=bits[i][1];});
+ deviceFacts('#deviceNetworkFacts',[
+  ['接口',iface?iface.name+'（'+netKindLabel(iface)+'）':''],
+  ['本机地址',iface?.address||''],
+  ['延迟探测',latency?(netSourceLabel[latency.source]||latency.source)+' → '+(latency.host||'1.1.1.1')+'：'+netLatencyText(latency.ms):(offline?'探测失败，等下一轮重试':'等待探测')],
+  ['在线状态',data.online===null||data.online===undefined?'':(data.online?'正常':'不可达')],
+  ['本次运行',data.totals?'下载 '+netBytes(data.totals.download)+' · 上传 '+netBytes(data.totals.upload):''],
+  ['更新时间',data.updatedAt?deviceClock(data.updatedAt):''],
+  ['错误',data.error||''],
+ ]);
+}
 async function loadDevice(force=false){
- try{deviceData=await api('devices'+(force?'?refresh=1':''));renderDevice();}
- catch(e){$('#deviceState').textContent='不可用';$('#deviceState').title=e.message;}
+ const suffix=force?'?refresh=1':'';
+ const [devices,net]=await Promise.allSettled([api('devices'+suffix),api('network'+suffix)]);
+ // 先落数据再渲染：设备状态那一行要把网络的错误一起算进「部分不可用」。
+ if(net.status==='fulfilled')networkData=net.value;
+ else networkData={available:false,error:net.reason.message};
+ // 两项各自渲染：网络读不到（或反过来）时另一项照常显示，只在状态里标「部分不可用」。
+ if(devices.status==='fulfilled'){deviceData=devices.value;renderDevice();}
+ else{const e=devices.reason;$('#deviceState').textContent='不可用';$('#deviceState').title=e.message;}
+ renderNetwork();
 }
 function openDevice(){if(deviceTimer)return;loadDevice();deviceTimer=setInterval(loadDevice,2000);syncProcessPolling();}
 function deviceClose(){if(deviceTimer){clearInterval(deviceTimer);deviceTimer=null;}syncProcessPolling();}
-// 右下角的悬浮「刷新设备」：强制服务端立刻全量采一次（磁盘常驻采样约 60 秒一轮，等不起）。
+// 右下角的悬浮「刷新设备」：强制服务端立刻全量采一次（磁盘常驻采样约 60 秒一轮、网络延迟约 6 秒一轮，等不起）。
 $('#deviceRefresh').onclick=guard(async()=>{$('#deviceRefresh').disabled=true;try{await loadDevice(true);toast('已刷新设备信息');}finally{$('#deviceRefresh').disabled=false;}});
 
 guard(async()=>{await refresh(false,true);const first=$('#skills .skill-group');if(first)openFolder(first.dataset.group);const j=await api('job');if(j?.running){showConsole();await poll();}})();
 guard(startAppPolling)();
+// 首页默认选中第一个 tab（通知岛）：静态 HTML 已经把视图/按钮状态摆好，这里补上订阅与终端归属续期
+// （switchView 只在切换视图时调 openIsland，首屏不走那条路径）。
+if(islandView==='island')openIsland();

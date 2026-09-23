@@ -96,7 +96,8 @@ nav{grid-column:3;justify-self:end}
 /* 侧栏底栏（来源说明）钉在左下角：内容再长也不跟着上下移动。 */
 .library>footer{margin-top:auto;flex:none}
 .filters{padding:14px 12px 6px;display:grid;gap:8px}
-.list-caption{display:flex;justify-content:space-between;align-items:baseline;padding:16px 14px 8px;color:var(--text);font-size:12.5px;font-weight:600}
+/* 侧栏标题（各视图左栏最上面那一行）：与通知岛一致——浅灰小字，右侧的状态值同色、等宽数字。 */
+.list-caption{display:flex;justify-content:space-between;align-items:baseline;padding:16px 14px 8px;color:var(--muted);font-size:12.5px;font-weight:400}
 .list-caption span:last-child{color:var(--muted);font-weight:400;font-variant-numeric:tabular-nums}
 /* 技能列表上方只显示数量（这里列出的本来就都已安装），靠右对齐。 */
 .list-caption.end{justify-content:flex-end}
@@ -373,6 +374,20 @@ body[data-view=usage] #usageRefresh,body[data-view=device] #deviceRefresh{displa
 .device-value{margin-left:auto;flex:none;color:var(--muted);font-size:11.5px;font-variant-numeric:tabular-nums}
 .device-value[data-level=warn]{color:#ff9f0a}
 .device-value[data-level=low]{color:#ff453a}
+/* 设备 → 网络：刘海胶囊上那三枚灯珠的放大版（上 = 延迟、中 = 下载、下 = 上传），右侧是同一份读数的数字。
+   等级由服务端算好（ok / warn / low / idle），这里只按 data-level 上色；空闲是暗灰，亮起的珠子带一点光晕。 */
+.net-live{display:flex;align-items:center;gap:20px;padding:16px 18px}
+.net-beads{display:flex;flex-direction:column;gap:6px;flex:none;padding:9px 7px;border-radius:12px;background:var(--hover)}
+.net-beads i{width:13px;height:13px;border-radius:50%;background:#8e8e93;opacity:.4;transition:background .25s ease,opacity .25s ease,box-shadow .25s ease}
+.net-beads i[data-level=idle]{background:#8e8e93;opacity:.45}
+.net-beads i[data-level=ok]{background:#30d158;opacity:1;box-shadow:0 0 9px #30d15880}
+.net-beads i[data-level=warn]{background:#ff9f0a;opacity:1;box-shadow:0 0 9px #ff9f0a80}
+.net-beads i[data-level=low]{background:#ff453a;opacity:1;box-shadow:0 0 9px #ff453a80}
+.net-legend{display:grid;gap:8px;flex:1;min-width:0}
+.net-legend>div{display:flex;align-items:baseline;gap:10px;font-size:12px;color:var(--muted)}
+.net-legend .name{flex:none;width:32px}
+.net-legend b{color:var(--text);font-size:13px;font-weight:600;font-variant-numeric:tabular-nums}
+.net-legend .hint{margin-left:auto;text-align:right;font-size:11px;color:var(--muted)}
 .core-grid{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:6px;align-items:end;height:124px;padding:16px 16px 0}
 .core-grid .core{display:flex;flex-direction:column;justify-content:flex-end;height:100%;background:var(--hover);border-radius:6px;overflow:hidden}
 .core-grid .core i{display:block;width:100%;border-radius:6px;background:var(--accent);transition:height .3s ease}
@@ -390,19 +405,17 @@ body[data-view=usage] #usageRefresh,body[data-view=device] #deviceRefresh{displa
 .process-foot{padding:7px 16px 10px;color:var(--muted);font-size:10.5px}
 .process-head+.process-row{border-top:0}
 
-/* 设置页：左侧分类导航 + 右侧分区卡片（大标题、分组标题、控件右对齐）。 */
-.settings-nav{padding-top:10px}
+/* 设置页：左侧分类导航 + 右侧分区卡片（大标题、分组标题、控件右对齐）。左栏与其它视图同构，不再单独加顶部内边距。 */
 .settings-menu{display:flex;flex-direction:column;align-items:stretch;gap:2px;flex:1;min-height:0;overflow:auto;padding:0 8px}
 .settings-menu button{position:relative;display:flex;align-items:center;gap:9px;border:0;background:transparent;box-shadow:none;border-radius:8px;padding:8px 10px;min-height:34px;color:var(--text-2);font-size:13px;font-weight:500;text-align:left}
 .settings-menu button:hover{background:var(--hover);color:var(--text)}
 .settings-menu button[aria-pressed=true]{background:var(--sel);color:var(--sel-text);font-weight:600}
 .settings-menu button[aria-pressed=true]::before{content:'';position:absolute;left:0;top:50%;width:3px;height:18px;margin-top:-9px;border-radius:0 2px 2px 0;background:var(--accent)}
 .settings-menu .sf{width:15px;height:15px;opacity:.9}
-/* 侧栏分组标题（通知岛视图的「通知岛设置 / Agent 连接」）。 */
-.menu-group{margin:14px 10px 5px;color:var(--muted);font-size:11px;font-weight:600;letter-spacing:.2px}
-.menu-group:first-child{margin-top:4px}
-/* 通知岛侧栏：设置项与 Agent 连接之间用一条细线分区，分组之间留出呼吸空间 */
-#islandWorkspace .menu-group{border-top:1px solid var(--line-soft);margin-top:16px;padding-top:12px}
+/* 侧栏分组标题（通知岛视图的「通知岛设置 / Agent 连接」）：所有视图共用同一套——分组之间用一条细线
+   分区、留出呼吸空间；第一个分组紧跟左栏标题，不画细线、也不额外留白。 */
+.menu-group{margin:16px 10px 5px;padding-top:12px;border-top:1px solid var(--line-soft);color:var(--muted);font-size:11px;font-weight:600;letter-spacing:.2px}
+.menu-group:first-child{margin-top:4px;padding-top:0;border-top:0}
 /* 用量侧栏：按住拖动调整来源顺序，排在最前的来源显示在刘海胶囊上 */
 #usageWorkspace [data-usage-pane]{cursor:grab}
 #usageWorkspace [data-usage-pane][data-dragging=true]{opacity:.55}

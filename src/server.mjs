@@ -14,6 +14,7 @@ import { createDsh } from './dsh.mjs';
 import { createAgy } from './agy.mjs';
 import { createUsage } from './usage.mjs';
 import { createDevices } from './devices.mjs';
+import { createNetwork } from './network.mjs';
 import { createTerminals } from './terminals.mjs';
 import { createBrowser } from './browser.mjs';
 import { createUpdate } from './update.mjs';
@@ -98,6 +99,9 @@ usage.start();
 // 设备：CPU / 内存 / 磁盘三个指标，常驻采样（刘海胶囊要实时值），随事件流一起推给刘海面板。
 const devices=createDevices();
 devices.start();
+// 网络：延迟 / 下载 / 上传，同样常驻采样：延迟走 ping（封 ICMP 时退回 TCP），流量读网卡计数器。
+const network=createNetwork();
+network.start();
 let catalog=[], catalogTime=0, job=null, busy=false;
 const dataDir=path.join(home,'.bobo');
 // 改名迁移：把旧的 ~/.skills-manager 里的每一项搬到 ~/.bobo；新目录里已有的项不覆盖。
@@ -237,20 +241,22 @@ const server=http.createServer(async(req,res)=>{
    if(req.method==='GET'&&url.pathname==='/api/usage')return json(url.searchParams.has('refresh')?await usage.refresh():usage.snapshot());
    // 设备：CPU / 内存 / 磁盘。服务端常驻采样，这里读缓存；网页每 2 秒拉一次，刘海面板走状态流。
    if(req.method==='GET'&&url.pathname==='/api/devices')return json(url.searchParams.has('refresh')?await devices.refresh():devices.snapshot());
+   // 网络：延迟 / 下载 / 上传。同样常驻采样，网页与刘海面板读同一份（?refresh=1 立刻重采一次）。
+   if(req.method==='GET'&&url.pathname==='/api/network')return json(url.searchParams.has('refresh')?await network.refresh():network.snapshot());
    // 进程列表：按需采样（不进常驻 tick 与状态流），只在网页停在 CPU / 内存分栏时拉取。
    if(req.method==='GET'&&url.pathname==='/api/devices/processes')return json(await devices.processes({limit:url.searchParams.get('limit'),sort:url.searchParams.get('sort')}));
     // 应用信息与更新状态：版本号来自 package.json；canUpdate 只有当服务跑在 .app 里才为 true。
     if(req.method==='GET'&&url.pathname==='/api/app')return json(update.snapshot());
     if(req.method==='GET'&&url.pathname==='/api/update')return json(update.snapshot());
    // 状态流：先推一次当前快照，之后每次变化推一份新快照（体积小，前端直接整份替换）。
-   // 用量与设备也挂在同一份快照里（`usage` / `device` 字段），刘海面板不用另外轮询。
+   // 用量、设备与网络也挂在同一份快照里（`usage` / `device` / `network` 字段），刘海面板不用另外轮询。
    if(req.method==='GET'&&url.pathname==='/api/opencode/stream'){
     res.writeHead(200,{'Content-Type':'application/x-ndjson; charset=utf-8','Cache-Control':'no-store','X-Accel-Buffering':'no'});
     res.flushHeaders();
-    const send=()=>{if(!res.destroyed)res.write(JSON.stringify({...islandSnapshot(),usage:usage.snapshot(),device:devices.snapshot()})+'\n');};
+    const send=()=>{if(!res.destroyed)res.write(JSON.stringify({...islandSnapshot(),usage:usage.snapshot(),device:devices.snapshot(),network:network.snapshot()})+'\n');};
     send();
-    const stop=opencode.subscribe(send),stopUsage=usage.subscribe(send),stopCodex=codex.subscribe(send),stopOmp=omp.subscribe(send),stopClaude=claude.subscribe(send),stopDsh=dsh.subscribe(send),stopAgy=agy.subscribe(send),stopDevices=devices.subscribe(send);
-    const close=()=>{stop();stopUsage();stopCodex();stopOmp();stopClaude();stopDsh();stopAgy();stopDevices();};
+    const stop=opencode.subscribe(send),stopUsage=usage.subscribe(send),stopCodex=codex.subscribe(send),stopOmp=omp.subscribe(send),stopClaude=claude.subscribe(send),stopDsh=dsh.subscribe(send),stopAgy=agy.subscribe(send),stopDevices=devices.subscribe(send),stopNetwork=network.subscribe(send);
+    const close=()=>{stop();stopUsage();stopCodex();stopOmp();stopClaude();stopDsh();stopAgy();stopDevices();stopNetwork();};
     req.on('close',close);res.on('close',close);
     return;
    }

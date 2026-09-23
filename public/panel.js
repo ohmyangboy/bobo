@@ -4,6 +4,7 @@ const token = document.querySelector('meta[name=token]').content;
 const avatars = document.getElementById('avatars');
 const quota = document.getElementById('quota');
 const device = document.getElementById('device');
+const network = document.getElementById('network');
 const hint = document.getElementById('hint');
 
 // 会话状态色：蓝=运行中、橙=等你回答、绿=已结束、红=已终止（与 Swift 版一致）。
@@ -20,6 +21,13 @@ const compact = value => {
   if (n >= 100) return String(Math.round(n));
   if (n >= 10) return (Math.round(n * 10) / 10).toString();
   return (Math.round(n * 100) / 100).toString();
+};
+// 速率文案（与网页「设备 → 网络」同一套口径）：1024 进制，B/s / KB/s / MB/s。
+const rate = value => {
+  const n = Math.max(0, Number(value) || 0);
+  if (n < 1024) return Math.round(n) + 'B/s';
+  if (n < 1024 * 1024) return compact(n / 1024) + 'KB/s';
+  return compact(n / 1024 / 1024) + 'MB/s';
 };
 
 function render(snapshot) {
@@ -44,6 +52,10 @@ function render(snapshot) {
   const disk = snapshot?.device?.disk?.usedPercent;
   device.textContent = memory === undefined || memory === null ? '' : `内存 ${compact(memory)}% · 磁盘 ${compact(disk)}%`;
   device.classList.toggle('hidden', device.textContent === '');
+  // 网络：延迟与上下行速率（macOS 原生面板画的是三枚灯珠，这里是同一份快照的文字版）。
+  const latency = snapshot?.network?.latency?.ms;
+  network.textContent = latency === undefined || latency === null ? '' : `延迟 ${Math.round(latency)}ms · ↓${rate(snapshot?.network?.download?.bytesPerSec)} ↑${rate(snapshot?.network?.upload?.bytesPerSec)}`;
+  network.classList.toggle('hidden', network.textContent === '');
 }
 
 // 面板宽度随内容变化：测出 #island 的实际尺寸后回报 Rust（窗口是无边框透明窗，尺寸必须跟着内容走，
