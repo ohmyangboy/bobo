@@ -6,6 +6,16 @@ published: true
 
 本文件记录 bobo 面向用户的版本变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。发布在 [GitHub Releases](https://github.com/ohmyangboy/bobo/releases)。
 
+## [1.3.0] - 2026-09-24
+
+### 改进
+
+- **降低常驻功耗**：通知岛状态灯改为静态高亮，减少透明窗口与 SwiftUI 的持续动画；设备、网络采样和窗口补间降低频率，后台空闲时 CPU 与 GPU 唤醒明显减少。
+- **隐藏主窗口更省电**：关闭或隐藏 bobo 主窗口时暂停网页状态流、应用轮询与设备进程轮询，重新打开后自动恢复，不再让隐藏的 WebView 持续工作。
+- **状态同步更稳定**：减少 OpenCode、Codex、omp、Claude Code、dsh、Antigravity 会话状态流的重复推送、重复文件扫描和重叠轮询，通知岛列表与「已查看」状态更平滑。
+- **额度与设备数据更轻量**：用量来源关闭时不再自动读取，额度、设备和网络快照按可见变化去重并复用缓存，减少无效 API、数据库和子进程调用。
+- **终端跳转更稳定**：统一优化 Otty、Ghostty、Terminal.app 的前台查询、超时与重复扫描，避免通知岛展开时因终端查询堆积而卡顿。
+
 ## [1.3.0-beta.5] - 2026-09-23
 
 ### 新增
@@ -144,3 +154,5 @@ published: true
 [1.3.0-beta.2]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0-beta.2
 [1.3.0-beta.3]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0-beta.3
 [1.3.0-beta.4]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0-beta.4
+[1.3.0-beta.5]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0-beta.5
+[1.3.0]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0

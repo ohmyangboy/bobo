@@ -94,8 +94,8 @@ export function createOmp({home,agentDir,remind=()=>{},interval=POLL_MS}={}){
   if(changed){if(next.state==='idle')settle(id,'done',next.title);else if(next.state==='error')settle(id,'error',next.title);else cancelDone(id);}
  }
  function remove(id){cancelDone(id);sessions.delete(id);}
- async function scanFile(file){
-  const st=await fs.stat(file).catch(()=>null);if(!st||!st.isFile())return null;
+ async function scanFile(file,knownStat=null){
+  const st=knownStat||await fs.stat(file).catch(()=>null);if(!st||!st.isFile())return null;
   const cached=cache.get(file);
   if(cached&&cached.mtimeMs===st.mtimeMs&&cached.size===st.size)return cached;
   const head=await readChunk(file,0,Math.min(HEAD,st.size)).catch(()=>'');
@@ -123,7 +123,7 @@ export function createOmp({home,agentDir,remind=()=>{},interval=POLL_MS}={}){
     const file=path.join(dir,e.name);
     const st=await fs.stat(file).catch(()=>null);
     if(!st||Date.now()-st.mtimeMs>SCAN_MS)continue;
-    const parsed=await scanFile(file);
+    const parsed=await scanFile(file,st);
     // 文件在但暂时解析不出来（omp 会原子重写文件）：沿用上一轮的会话，不当作它消失了。
     if(!parsed){const prev=cache.get(file);if(prev)seen.add('omp:'+prev.sid);continue;}
     const id='omp:'+parsed.sid;seen.add(id);

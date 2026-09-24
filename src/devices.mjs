@@ -3,14 +3,14 @@
 // 内存解析 /usr/bin/vm_stat 的页统计（已用 = 活跃 + 联动 + 压缩占用 − 可回收，缓存单独列出，
 // 口径接近「活动监视器」），压力等级读 kern.memorystatus_vm_pressure_level（1 正常 / 2 警告 / 4 紧张，
 // 与活动监视器的内存压力图同源）；磁盘用 fs.statfs('/')（APFS 容器级，与 Finder 显示的可用空间一致）。
-// 采样在服务端常驻进行（刘海胶囊要实时值），网页只读这份快照；只有可见数值变化时才推送。
+// 采样在服务端常驻进行（刘海胶囊要实时值），网页只读这份快照；低频采样减少唤醒，只有可见数值变化时才推送。
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import {spawn} from 'node:child_process';
 
 const vmStatBin='/usr/bin/vm_stat',sysctlBin='/usr/sbin/sysctl';
 const psBin='/bin/ps',psColumns='pid=,pcpu=,pmem=,rss=,etime=,comm=';
-const tickMs=2000,memoryEvery=3,diskEvery=30;   // 2 秒一跳；内存每 3 跳（约 6 秒）、磁盘每 30 跳（约 60 秒）
+const tickMs=3000,memoryEvery=2,diskEvery=20;   // 3 秒一跳；内存每 2 跳（约 6 秒）、磁盘每 20 跳（约 60 秒）
 // 进程列表：不进常驻采样，只在网页停在「设备」的 CPU / 内存分栏时按需拉取（见 app.js 的 processTimer）。
 // 结果缓存 1.5 秒，多开页面或重复请求时复用同一份，避免反复 fork ps。
 const processCacheMs=1500,processLimitMax=50,processLimitDefault=15;

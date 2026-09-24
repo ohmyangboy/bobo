@@ -108,11 +108,16 @@ test('createAgy 完整轮询、提醒与 acknowledge', async () => {
   remind: (kind, title, msg) => reminds.push({ kind, title, msg }),
   interval: 100
  });
+ let pushes = 0;
+ agy.subscribe(() => { pushes++; });
 
  agy.start();
  await new Promise(r => setTimeout(r, 250));
 
  const snap = agy.snapshot();
+ const pushesAfterFirstPoll = pushes;
+ await new Promise(r => setTimeout(r, 150));
+ assert.equal(pushes, pushesAfterFirstPoll, '会话没变化时不应重复推送');
  // 子会话 sub-1 应该被过滤掉，只收录 root-1
  assert.equal(snap.sessions.length, 1);
  assert.equal(snap.sessions[0].id, 'agy:root-1');
@@ -126,7 +131,7 @@ test('createAgy 完整轮询、提醒与 acknowledge', async () => {
 
  await new Promise(r => setTimeout(r, 250));
  const unviewed = agy.unviewed();
- assert.ok(unviewed.includes('agy:root-1'));
+ assert.ok(unviewed.some(s => s.id === 'agy:root-1'));
 
  const acked = agy.acknowledge('agy:root-1');
  assert.equal(acked, true);

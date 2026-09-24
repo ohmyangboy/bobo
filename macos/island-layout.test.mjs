@@ -59,7 +59,7 @@ near(floatingBar.width, 460)
 // 让位（防遮挡菜单栏 / 全屏应用）时窗口补间收拢到刘海正中那一小段（随后整体淡出到不可见）：
 // 收拢尺寸要装得下、要整块落在刘海区域里，并且内容按整个窗口铺开——这几条决定了「缩进刘海」是不是真的收进去了。
 test('通知岛让位：收拢尺寸落在刘海区域内，内容铺满整窗', {skip:process.platform!=='darwin'}, async()=>{
- await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable {','struct IslandSnapshot: Decodable {'),`
+ await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {'),`
 func near(_ a: CGFloat, _ b: CGFloat) { precondition(abs(a-b) < 0.00001, "收拢尺寸或分区不对") }
 // 高度按菜单栏 / 刘海高度往下留一点，太矮时兜底 18；宽度固定成一小段。
 near(IslandBarGeometry.yieldSize(barHeight: 32).width, 44)
@@ -89,7 +89,7 @@ for i in 0...60 {
 // 会话计时（对齐 CodeIsland 的 SessionTag）：文案只看「会话开始至今」的秒数——`<1m` / `5m` / `2h` / `1d`，
 // 没记到开始时间（老数据）就不显示；时钟漂移导致的负值按「刚开始」处理，不会倒着走。
 test('通知岛计时：会话时长的文案分档', {skip:process.platform!=='darwin'}, async()=>{
- await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable {','struct IslandSnapshot: Decodable {'),`
+ await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {'),`
  let now: Double = 1_700_000_000_000
  precondition(IslandMetrics.elapsedText(nil, now: now) == nil)
  precondition(IslandMetrics.elapsedText(0, now: now) == nil)
@@ -107,7 +107,7 @@ test('通知岛计时：会话时长的文案分档', {skip:process.platform!=='
 // 的剩余空间算——不管怎么变，排出来的宽度都不越过展开后的中轴线，装不下时至少留一枚。
 // 设备与网络指示各占一格，计算剩余空间时先扣掉。
 test('通知岛额度：并排显示的固定上限与自适应数量', {skip:process.platform!=='darwin'}, async()=>{
- await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable {','struct IslandSnapshot: Decodable {'),`
+ await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {'),`
  let wide: CGFloat = 1512, keepOut: CGFloat = 214
  // 没有可用来源 → 0 枚；只有一家 → 1 枚（不并排，但也不隐藏）。
  precondition(IslandBarGeometry.quotaChips(count: 0, limit: 0, screenWidth: wide, keepOut: keepOut, device: true, network: true, hoverButtons: true) == 0)
@@ -148,7 +148,7 @@ test('通知岛额度：并排显示的固定上限与自适应数量', {skip:pr
 // 网络指示（三枚垂直灯珠：延迟 / 下载 / 上传）：等级归一化、颜色取用与速率 / 延迟文案，
 // 以及快照缺字段时的兜底（认不出的等级按空闲灰、没有读数不误报红色）。
 test('通知岛网络：三枚灯珠的等级、配色与文案', {skip:process.platform!=='darwin'}, async()=>{
- await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable {','struct IslandSnapshot: Decodable {'),`
+ await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {'),`
  func net(_ json: String) throws -> IslandNetwork { try JSONDecoder().decode(IslandNetwork.self, from: Data(json.utf8)) }
  let live = try! net(#"{"available":true,"online":true,"interface":{"name":"en0","kind":"wifi","label":"Wi-Fi","address":"192.168.1.2"},"latency":{"ms":25.4,"level":"ok","source":"icmp"},"download":{"bytesPerSec":123456,"level":"warn"},"upload":{"bytesPerSec":0,"level":"idle"},"totals":{"download":1234567,"upload":2048}}"#)
  precondition(live.interface?.name == "en0" && live.interface?.kind == "wifi")
@@ -180,7 +180,7 @@ test('通知岛网络：三枚灯珠的等级、配色与文案', {skip:process.
 // 每枚圆环各自显示一档窗口：快照里的 range（服务端记住）决定这一家画哪一档，
 // 认不出的范围退回 5 小时、再退回第一档；并排显示的来源只算「可用 + 开启」，顺序稳定。
 test('通知岛额度：圆环显示的范围与并排来源的取舍', {skip:process.platform!=='darwin'}, async()=>{
- await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable {','struct IslandSnapshot: Decodable {'),`
+ await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {'),`
  func provider(_ json: String) throws -> IslandQuotaProvider { try JSONDecoder().decode(IslandQuotaProvider.self, from: Data(json.utf8)) }
  let three = try! provider(#"{"id":"opencode-go","available":true,"enabled":true,"range":"month","windows":[{"key":"session","remainingPercent":97},{"key":"week","remainingPercent":86},{"key":"month","remainingPercent":48}]}"#)
  precondition(three.displayWindow?.key == "month", "记住的范围没有生效")
@@ -207,7 +207,7 @@ test('通知岛额度：圆环显示的范围与并排来源的取舍', {skip:pr
 // 菜单栏让位（防遮挡状态栏图标）的触发阈值：鼠标在「面板可见部分 + 左右各折叠态宽度一半」的安全带里
 // 不算遮挡（面板附近横向移动、擦着边缘路过都不该把面板收走），超出安全带才让位；菜单栏高度之外不触发。
 test('通知岛让位：菜单栏触发的左右安全区', {skip:process.platform!=='darwin'}, async()=>{
- await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable {','struct IslandSnapshot: Decodable {'),`
+ await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {'),`
  let bar = NSRect(x: 0, y: 970, width: 1512, height: 30)
  // 面板可见栏 220pt 居中（646...866），折叠态宽度 220 → 左右各 110pt 的安全区。
  let visible = NSRect(x: 646, y: 970, width: 220, height: 30)
@@ -231,7 +231,7 @@ test('通知岛让位：菜单栏触发的左右安全区', {skip:process.platfo
 // 点刘海上的头像要跳到主窗口的哪个分栏（与 index.html 的 data-island-pane 对齐），以及圆环拖动排序
 // 提交给服务端前的「完整顺序」怎么合并：只动并排显示的那几家，未显示的保持原位。
 test('通知岛跳转：头像分栏与额度排序的合并顺序', {skip:process.platform!=='darwin'}, async()=>{
- await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable {','struct IslandSnapshot: Decodable {'),`
+ await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {'),`
  precondition(IslandMetrics.islandPane(forSource: nil) == "general")
  precondition(IslandMetrics.islandPane(forSource: "opencode") == "opencode")
  precondition(IslandMetrics.islandPane(forSource: "codex") == "codex")

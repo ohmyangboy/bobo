@@ -25,6 +25,7 @@ export function createOpenCode({home}){
  let settings={notify:true,sound:true,notch:true,hideWhenIdle:false,autoExpand:true,rows:3,menubar:false,movable:false,display:'auto',quotaView:'expand',quotaCount:0},connected=false,closed=false,controller=null,retryTimer=null;
  let noticeSeq=0,notice=null;
  const emit=()=>{for(const l of listeners){try{l();}catch{}}};
+ const setConnected=value=>{if(connected!==value){connected=value;emit();}};
  // 清理超过一天的旧会话，避免状态列表无限增长（正在跑或等回答的保留）。
  function prune(){for(const [id,s] of sessions)if(s.state!=='working'&&s.state!=='waiting'&&Date.now()-s.at>86400000)sessions.delete(id);}
  // 列表顺序按「最近一次状态变更」倒序：任何会话状态一变（开始运行 / 等你回答 / 结束 / 终止）就排到最前，
@@ -257,12 +258,12 @@ export function createOpenCode({home}){
  async function connect(){
   if(closed)return;
   const service=await openService();
-  if(!service){connected=false;emit();retryTimer=setTimeout(connect,5000);return;}
+  if(!service){setConnected(false);retryTimer=setTimeout(connect,5000);return;}
   controller=new AbortController();
   try{
    const res=await fetch(new URL('/api/event',service.origin),{headers:{...service.headers,accept:'text/event-stream'},signal:controller.signal});
    if(!res.ok)throw Error('OpenCode 事件流返回 '+res.status);
-   connected=true;emit();void hydrate(service);
+   setConnected(true);void hydrate(service);
    const decoder=new TextDecoder();let buffer='';
    for await(const chunk of res.body){
     buffer+=decoder.decode(chunk,{stream:true});
@@ -273,9 +274,9 @@ export function createOpenCode({home}){
      try{handle(JSON.parse(line.slice(5)));}catch{}
     }
    }
-  }catch(e){if(!closed&&e.name!=='AbortError')connected=false,emit();}
+  }catch(e){if(!closed&&e.name!=='AbortError')setConnected(false);}
   if(closed)return;
-  connected=false;emit();
+  setConnected(false);
   retryTimer=setTimeout(connect,2000);
  }
  return {

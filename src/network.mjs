@@ -1,6 +1,6 @@
 // 网络：延迟 / 下载 / 上传三项。只读本机网卡计数器、只做本机探测（ICMP ping，失败退回 TCP 握手），
-// 不请求任何第三方接口、不写任何文件。网卡字节数按 2 秒窗口的差值算速率（macOS 走 netstat、Linux 读
-// /proc/net/dev），延迟每 3 跳探一次；采样在服务端常驻进行（刘海胶囊要实时值），网页与面板只读这份快照，
+// 不请求任何第三方接口、不写任何文件。网卡字节数按 3 秒窗口的差值算速率（macOS 走 netstat、Linux 读
+// /proc/net/dev），延迟每 2 跳探一次；采样在服务端常驻进行（刘海胶囊要实时值），网页与面板只读这份快照，
 // 只有可见数值变化时才推送。
 import os from 'node:os';
 import fs from 'node:fs/promises';
@@ -9,7 +9,7 @@ import {spawn} from 'node:child_process';
 
 const pingBin='/sbin/ping',routeBin='/sbin/route',netstatBin='/usr/sbin/netstat',networksetupBin='/usr/sbin/networksetup';
 const procNetDev='/proc/net/dev',procRoute='/proc/net/route';
-const tickMs=2000,latencyEvery=3,interfaceEvery=30;   // 2 秒一跳；延迟每 3 跳（约 6 秒）；接口每 30 跳（约 60 秒）
+const tickMs=3000,latencyEvery=2,interfaceEvery=20;   // 3 秒一跳；延迟每 2 跳（约 6 秒）；接口每 20 跳（约 60 秒）
 const pingTimeoutMs=1500,tcpTimeoutMs=1500;
 // 尺度（等级由服务端定，网页与刘海按同一套阈值上色）：
 // 延迟：< 60ms 正常 / < 200ms 偏慢 / ≥ 200ms 很差；探测没响应按「断网」处理（online=false）。

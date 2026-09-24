@@ -24,11 +24,13 @@ const SEP = '\u001f';
 const TITLE_PREFIX = { opencode: ['OC | '], codex: ['CX | ', 'Codex | ', 'CDX | '], omp: ['π '], claude: ['✳ '], agy: ['AGY | ', 'Antigravity | '] };
 
 const run = (bin, args) => new Promise(resolve => {
- let out = '';
+ let out = '', settled = false, timer;
  const child = spawn(bin, args, { shell: false, stdio: ['ignore', 'pipe', 'ignore'] });
+ const finish = result => { if (settled) return; settled = true; clearTimeout(timer); resolve(result); };
+ timer = setTimeout(() => { child.kill('SIGTERM'); finish({ code: 1, out }); }, 5000);
  child.stdout.on('data', b => out += b);
- child.on('error', () => resolve({ code: 1, out: '' }));
- child.on('close', code => resolve({ code: code ?? 1, out }));
+ child.on('error', () => finish({ code: 1, out: '' }));
+ child.on('close', code => finish({ code: code ?? 1, out }));
 });
 const openApp = app => { try { spawn('open', [app], { shell: false, stdio: 'ignore' }).on('error', () => {}); } catch {} };
 
@@ -222,8 +224,8 @@ export function createTerminals() {
    const r = await run(OSASCRIPT, ['-e', ghosttyFocusScript({ id: target.id, directory })]);
    return r.out.includes('true') ? { ok: true, title: target.title } : { ok: false };
   },
-  async viewed(sessions) {
-   if (!sessions?.length || await frontBundle() !== GHOSTTY_BUNDLE) return [];
+  async viewed(sessions, front = '') {
+   if (!sessions?.length || (front || await frontBundle()) !== GHOSTTY_BUNDLE) return [];
    const tab = parseGhosttyTabs((await run(OSASCRIPT, ['-e', ghosttyActiveScript()])).out)[0];
    return tab ? viewedIds(sessions, [tab]) : [];
   },
@@ -240,8 +242,8 @@ export function createTerminals() {
    const r = await run(OSASCRIPT, ['-e', terminalFocusScript(target)]);
    return r.out.includes('true') ? { ok: true, title: target.title } : { ok: false };
   },
-  async viewed(sessions) {
-   if (!sessions?.length || await frontBundle() !== TERMINAL_BUNDLE) return [];
+  async viewed(sessions, front = '') {
+   if (!sessions?.length || (front || await frontBundle()) !== TERMINAL_BUNDLE) return [];
    const tab = parseTerminalActive((await run(OSASCRIPT, ['-e', terminalActiveScript()])).out);
    return tab ? viewedIds(sessions, [tab]) : [];
   },
@@ -252,8 +254,8 @@ export function createTerminals() {
    focus: async (o, m) => { const target = matchTab(await otty.tabs(), o, m); return target?.id ? otty.focusTab(target.id) : { ok: false }; },
    // 「看过了」与别的终端同样只认「Otty 在前台、且用户正停在会话的标签页上」：多窗口时只认聚焦窗口里 active 的那个，
    // 别的窗口选中的标签页不算（用户并没有在看）。
-   async viewed(sessions) {
-    if (!sessions?.length || !otty.available() || await frontBundle() !== OTTS_BUNDLE) return [];
+   async viewed(sessions, front = '') {
+    if (!sessions?.length || !otty.available() || (front || await frontBundle()) !== OTTS_BUNDLE) return [];
     const focus = (await otty.windows()).find(w => w.focused === true)?.id;
     return viewedIds(sessions, activeOttyTabs(await otty.tabs(), focus));
    },
@@ -290,8 +292,8 @@ export function createTerminals() {
  // 只有在前台的那个终端才可能「正停在会话的标签页上」，各适配器自己判断前台，这里合并。
  async function viewed(sessions) {
   if (!sessions?.length) return [];
-  const ids = new Set();
-  for (const a of adapters) { if (a.available()) for (const id of await a.viewed(sessions)) ids.add(id); }
+  const front = await frontBundle(), ids = new Set();
+  for (const a of adapters) { if (a.available()) for (const id of await a.viewed(sessions, front)) ids.add(id); }
   return [...ids];
  }
  // 会话归属：只扫正在运行的终端（不为了看一眼归属就把没开的终端拉起来），返回 `{会话 id: 终端名}`；

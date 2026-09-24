@@ -73,7 +73,7 @@ dsh.start();
 const agy=createAgy({home,remind:(kind,title,message)=>opencode.remind(kind,title,message)});
 agy.start();
 // 六个 Agent 的会话合成一份列表：各自模块给出 order（按最近一次状态变更），这里统一倒序后截断。
-function sessionsMerged(){return [...opencode.snapshot().sessions,...codex.snapshot().sessions,...omp.snapshot().sessions,...claude.snapshot().sessions,...dsh.snapshot().sessions,...agy.snapshot().sessions].sort((a,b)=>(b.order??0)-(a.order??0)).slice(0,40);}
+function sessionsMerged(parts={opencode:opencode.snapshot(),codex:codex.snapshot(),omp:omp.snapshot(),claude:claude.snapshot(),dsh:dsh.snapshot(),agy:agy.snapshot()}){return [...parts.opencode.sessions,...parts.codex.sessions,...parts.omp.sessions,...parts.claude.sessions,...parts.dsh.sessions,...parts.agy.sessions].sort((a,b)=>(b.order??0)-(a.order??0)).slice(0,40);}
 // dsh 通常是 web profile：界面是本地页面 127.0.0.1:3080（dsh 默认端口）。点 dsh 会话时能连上就直接把页面打开
 // ——前端没有会话级深链，只能打开首页让用户在页面里自己选；连不上（例如跑的是 tui profile）再照常找终端标签页。
 const dshWebUrl='http://127.0.0.1:'+(Number(process.env.DSH_WEB_PORT)||3080)+'/';
@@ -83,14 +83,17 @@ async function dshWebAlive(){
 }
 // 终端归属按需扫描：网页打开通知岛 / 刘海面板展开时 POST /api/terminals/watch 续期（10 秒），期间每 3 秒扫一次
 // 「正在运行」的终端标签页，把每个会话归属的终端并进状态流；没人看后自然过期停止，不常驻子进程。
-let terminalWatchUntil=0, sessionTerminals={};
-async function scanTerminals(){const rows=sessionsMerged();sessionTerminals=rows.length?await terminals.locate(rows):{};}
+let terminalWatchUntil=0, sessionTerminals={}, terminalScanBusy=false, ackViewedBusy=false;
+async function scanTerminals(){if(terminalScanBusy)return;terminalScanBusy=true;try{const rows=sessionsMerged();sessionTerminals=rows.length?await terminals.locate(rows):{};}finally{terminalScanBusy=false;}}
 setInterval(()=>{if(Date.now()<terminalWatchUntil)scanTerminals().catch(()=>{});},3000);
-// 状态流与 /api/opencode 共用的快照：OpenCode 的设置 / 连接 / 通知 + 合并后的会话（带终端归属）+ 各来源信息。
-function islandSnapshot(){return {...opencode.snapshot(),sessions:sessionsMerged().map(s=>({...s,terminal:sessionTerminals[s.id]})),codex:codex.snapshot(),omp:omp.snapshot(),claude:claude.snapshot(),dsh:dsh.snapshot(),agy:agy.snapshot()};}
+// 状态流与 /api/opencode 共用的快照：各来源只取一次，避免同一轮重复计算六个 snapshot。
+function islandSnapshot(){
+ const parts={opencode:opencode.snapshot(),codex:codex.snapshot(),omp:omp.snapshot(),claude:claude.snapshot(),dsh:dsh.snapshot(),agy:agy.snapshot()};
+ return {...parts.opencode,sessions:sessionsMerged(parts).map(s=>({...s,terminal:sessionTerminals[s.id]})),codex:parts.codex,omp:parts.omp,claude:parts.claude,dsh:parts.dsh,agy:parts.agy};
+}
 // 结束 / 终止的头像要留到用户看过终端才收起：对应终端在前台且正停在那个标签页时算已查看；
 // 手动切标签页与点会话行跳过去（/api/opencode/focus）命中同一套匹配。
-async function ackViewed(){for(const id of await terminals.viewed([...opencode.unviewed(),...codex.unviewed(),...omp.unviewed(),...claude.unviewed(),...dsh.unviewed(),...agy.unviewed()])){if(!opencode.acknowledge(id)&&!codex.acknowledge(id)&&!omp.acknowledge(id)&&!claude.acknowledge(id)&&!dsh.acknowledge(id))agy.acknowledge(id);}}
+async function ackViewed(){if(ackViewedBusy)return;ackViewedBusy=true;try{const rows=[...opencode.unviewed(),...codex.unviewed(),...omp.unviewed(),...claude.unviewed(),...dsh.unviewed(),...agy.unviewed()];if(!rows.length)return;for(const id of await terminals.viewed(rows)){if(!opencode.acknowledge(id)&&!codex.acknowledge(id)&&!omp.acknowledge(id)&&!claude.acknowledge(id)&&!dsh.acknowledge(id))agy.acknowledge(id);}}finally{ackViewedBusy=false;}}
 setInterval(()=>{ackViewed().catch(()=>{});},3000);
 // 用量：Codex（chatgpt.com）与 OpenCode Go（官方接口 / 本机估算）的额度，随事件流一起推给刘海面板。
 // 额度重置提醒走通知岛的统一通道（remind 受通知岛的系统通知 / 提示音开关控制）。
@@ -253,7 +256,15 @@ const server=http.createServer(async(req,res)=>{
    if(req.method==='GET'&&url.pathname==='/api/opencode/stream'){
     res.writeHead(200,{'Content-Type':'application/x-ndjson; charset=utf-8','Cache-Control':'no-store','X-Accel-Buffering':'no'});
     res.flushHeaders();
-    const send=()=>{if(!res.destroyed)res.write(JSON.stringify({...islandSnapshot(),usage:usage.snapshot(),device:devices.snapshot(),network:network.snapshot()})+'\n');};
+    let pending=false;
+    const send=()=>{
+     if(pending||res.destroyed)return;
+     pending=true;
+     setImmediate(()=>{
+      pending=false;
+      if(!res.destroyed)res.write(JSON.stringify({...islandSnapshot(),usage:usage.snapshot(),device:devices.snapshot(),network:network.snapshot()})+'\n');
+     });
+    };
     send();
     const stop=opencode.subscribe(send),stopUsage=usage.subscribe(send),stopCodex=codex.subscribe(send),stopOmp=omp.subscribe(send),stopClaude=claude.subscribe(send),stopDsh=dsh.subscribe(send),stopAgy=agy.subscribe(send),stopDevices=devices.subscribe(send),stopNetwork=network.subscribe(send);
     const close=()=>{stop();stopUsage();stopCodex();stopOmp();stopClaude();stopDsh();stopAgy();stopDevices();stopNetwork();};

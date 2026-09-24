@@ -87,8 +87,8 @@ export function createClaude({home,remind=()=>{},interval=POLL_MS}={}){
   }
  }
  function remove(id){cancelDone(id);cancelAsk(id);sessions.delete(id);}
- async function scanFile(file){
-  const st=await fs.stat(file).catch(()=>null);if(!st||!st.isFile())return null;
+ async function scanFile(file,knownStat=null){
+  const st=knownStat||await fs.stat(file).catch(()=>null);if(!st||!st.isFile())return null;
   const cached=cache.get(file);
   if(cached&&cached.mtimeMs===st.mtimeMs&&cached.size===st.size)return cached;
   const head=await readChunk(file,0,Math.min(HEAD,st.size)).catch(()=>'');
@@ -123,7 +123,7 @@ export function createClaude({home,remind=()=>{},interval=POLL_MS}={}){
     const file=path.join(dir,e.name);
     const st=await fs.stat(file).catch(()=>null);
     if(!st||Date.now()-st.mtimeMs>SCAN_MS)continue;
-    const parsed=await scanFile(file);
+    const parsed=await scanFile(file,st);
     if(!parsed){const prev=cache.get(file);if(prev)logs.set(prev.sid,{...prev,at:st.mtimeMs});continue;}
     logs.set(parsed.sid,{...parsed,at:st.mtimeMs});
    }

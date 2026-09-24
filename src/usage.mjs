@@ -131,7 +131,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
  const dataDir=path.join(home,'.bobo'),settingsFile=path.join(dataDir,'usage.json');
  const opencodeDir=path.join(home,'.local/share/opencode'),dbFile=path.join(opencodeDir,'opencode.db'),authFile=path.join(opencodeDir,'auth.json');
  const codexDir=env.CODEX_HOME||path.join(home,'.codex');
- let sqlite=null,order=providers.map(p=>p.id),state=empty(),signature='',listeners=new Set(),timer=null,reading=null,closed=false;
+ let sqlite=null,order=providers.map(p=>p.id),state=empty(),signature='',listeners=new Set(),timer=null,reading=null,closed=false,localRowsCache=null,localDbStamp='';
  const cache=new Map(),backoff=new Map();
  // 持久化设置（~/.bobo/usage.json）：各来源的显示顺序（order，折叠胶囊显示顺序里第一个可用且开启的）、
  // 各来源的启停、手动填的 API Key、额度重置提醒、各来源圆环显示哪一档窗口（ranges，见 cycleRange）。
@@ -186,14 +186,22 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   if(sqlite===null)sqlite=import('node:sqlite').then(m=>m).catch(()=>false);
   const mod=await sqlite;
   if(!mod)throw userError('当前 Node 版本不支持读取 SQLite 用量（需要 Node 22.13 及以上）');
+  const stampFile=async file=>{const st=await fs.stat(file).catch(()=>null);return st?`${st.mtimeMs}:${st.size}:${st.ino||''}`:'';};
+  const stamp=(await Promise.all([dbFile,dbFile+'-wal',dbFile+'-shm'].map(stampFile))).join('|');
+  if(localRowsCache&&stamp===localDbStamp)return localRowsCache;
   await fs.access(dbFile);
   const open=file=>new mod.DatabaseSync(file,{readOnly:true,timeout:250});
   const immutable='file:'+encodeURI(dbFile).replace(/[?#]/g,c=>'%'+c.charCodeAt(0).toString(16).toUpperCase())+'?immutable=1';
-  const sidecars=await Promise.all([dbFile+'-wal',dbFile+'-shm'].map(f=>fs.access(f).then(()=>true,()=>false)));
+  const sidecars=stamp.split('|').slice(1).some(Boolean);
   let db;
-  if(sidecars.some(Boolean))try{db=open(dbFile);}catch{db=open(immutable);}
+  if(sidecars)try{db=open(dbFile);}catch{db=open(immutable);}
   else db=open(immutable);
-  try{return db.prepare(usageSQL).all();}finally{db.close();}
+  try{
+   const rows=db.prepare(usageSQL).all();
+   // 大库不长期保留整批行对象，避免为了省 CPU 反而增加常驻内存；小库才复用。
+   localRowsCache=rows.length<=5000?rows:null;localDbStamp=stamp;
+   return rows;
+  }finally{db.close();}
  }
  // API key：手动填写（~/.bobo/usage.json 的 keys.opencode-go）优先，其次是进程环境变量
  // OPENCODE_API_KEY（CodexBar 的顺序），最后才是 OpenCode CLI 自己的 auth.json（和终端登录共用）。
@@ -428,8 +436,8 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
     try{
      const body=await readAgyServer(address,csrfToken);
      try{
-      await fs.mkdir(dataDir,{recursive:true});
-      await fs.writeFile(path.join(dataDir,'agy-auth.json'),JSON.stringify({address,csrfToken},null,1),{mode:0o600});
+      const authFile=path.join(dataDir,'agy-auth.json'),raw=JSON.stringify({address,csrfToken},null,1),old=await fs.readFile(authFile,'utf8').catch(()=>null);
+      if(old!==raw){await fs.mkdir(dataDir,{recursive:true});await fs.writeFile(authFile,raw,{mode:0o600});}
      }catch{}
      const snap=agySnapshot(body,nowMs);
      snap.keySource='local-server';
@@ -478,6 +486,11 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
    const results=await Promise.all(providers.map(async p=>{
     const id=p.id,cached=cache.get(id);
     const stamp=snapshot=>{snapshot.enabled=isEnabled(id);snapshot.range=rangeFor(id,snapshot.windows);return snapshot;};
+    // 关闭的来源不再读数据库 / 发起网络请求；重新打开时由 setEnabled 触发一次强制刷新。
+    if(!isEnabled(id)&&!force){
+     if(cached)return stamp(cached.snapshot);
+     return stamp({...p,available:false,reason:'已在刘海胶囊中关闭',error:null,windows:[],keySource:'',keyHint:'',updatedAt:nowMs});
+    }
     if(cached&&nowMs<cached.hardNextAt)return stamp(cached.snapshot);
     if(cached&&!force&&nowMs<cached.nextAt)return stamp(cached.snapshot);
     let snapshot;
@@ -565,9 +578,10 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
  function setEnabled(id,enabled){
   const row=state.providers.find(p=>p.id===id);
   if(!row)return state;
-  settings.enabled[id]=enabled!==false;void saveSettings();
+  const on=settings.enabled[id]=enabled!==false;
+  void saveSettings().then(()=>{if(on&&isEnabled(id))void refresh(true);});
   // 关掉当前显示的那家时，顺序里下一家「可用且开启」的自动顶上来（selected 是派生值，一起更新）。
-  const next=state.providers.map(p=>p.id===id?{...p,enabled:settings.enabled[id]}:p);
+  const next=state.providers.map(p=>p.id===id?{...p,enabled:on}:p);
   state={...state,providers:next,selected:displayOf(next)};
   signature=signatureOf(state);emit();
   return state;

@@ -75,7 +75,7 @@ function deriveState(lines){
 export function createCodex({home,remind=()=>{},interval=POLL_MS}={}){
  const root=path.join(home,'.codex','sessions'),indexFile=path.join(home,'.codex','session_index.jsonl');
  const sessions=new Map(),listeners=new Set(),cache=new Map(),doneTimers=new Map();
- let closed=true,seq=0,timer=null,names=new Map(),signature='';
+ let closed=true,seq=0,timer=null,names=new Map(),indexStamp='',signature='';
  const emit=()=>{for(const l of listeners){try{l();}catch{}}};
  const signatureOf=()=>JSON.stringify([...sessions.values()].map(s=>[s.id,s.state,s.title,s.acked]));
  function snapshot(){
@@ -105,15 +105,19 @@ export function createCodex({home,remind=()=>{},interval=POLL_MS}={}){
  }
  function remove(id){cancelDone(id);sessions.delete(id);}
  async function readNames(){
+  const st=await fs.stat(indexFile).catch(()=>null);
+  const stamp=st?`${st.mtimeMs}:${st.size}`:'';
+  if(stamp===indexStamp)return names;
   const map=new Map();
-  try{const text=await fs.readFile(indexFile,'utf8');
+  try{
+   const text=await fs.readFile(indexFile,'utf8');
    for(const line of text.split('\n')){if(!line.trim())continue;try{const o=JSON.parse(line);if(o?.id)map.set(o.id,o.thread_name||o.title||'');}catch{}}
   }catch{}
-  names=map;
+  names=map;indexStamp=stamp;
   return map;
  }
- async function scanFile(file){
-  const st=await fs.stat(file).catch(()=>null);if(!st)return null;
+ async function scanFile(file,knownStat=null){
+  const st=knownStat||await fs.stat(file).catch(()=>null);if(!st)return null;
   if(!st.isFile())return null;
   const cached=cache.get(file);
   // 命中缓存时直接返回解析结果：会话文件没变但 session_index 里的标题变了，poll 仍要按名字刷新标题，
@@ -155,7 +159,7 @@ export function createCodex({home,remind=()=>{},interval=POLL_MS}={}){
     const file=path.join(dir,e.name);
     const st=await fs.stat(file).catch(()=>null);
     if(!st||Date.now()-st.mtimeMs>SCAN_MS)continue;
-    const parsed=await scanFile(file);
+    const parsed=await scanFile(file,st);
     if(!parsed)continue;
     const id='codex:'+parsed.sid;seen.add(id);
     const win=newest.get(id);

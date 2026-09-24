@@ -31,6 +31,9 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     private var menuBarWatchTimer: Timer?
     private var menuBarYielding = false
     private var menuBarLeftAt: Date?
+    // 前台应用的全屏状态只随激活 / 空间切换变化；普通快照不要反复向 WindowServer 要完整窗口列表。
+    private var fullScreenCached = false
+    private var fullScreenCheckedAt: Date?
     // 让位（防遮挡菜单栏 / 全屏应用）状态：true 时面板缩成一只 bobo 躲进刘海区域（见 setIslandYielding）。
     private var islandYielding = false
     private var terminalWatchTimer: Timer?
@@ -275,10 +278,10 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         notchWindow.contentView = hosting
         setupIslandDrag()
         // 只采鼠标坐标，不扫描应用或启动子进程。让出菜单栏后一直保持隐藏，直到鼠标离开。
-        menuBarWatchTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
+        menuBarWatchTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.updateMenuBarYield()
         }
-        menuBarWatchTimer?.tolerance = 0.05
+        menuBarWatchTimer?.tolerance = 0.2
         setupDetail()
         positionNotch()
         // 屏幕配置变化（插拔、分辨率、排列）与前台应用切换都要重判面板该在哪块屏。
@@ -286,9 +289,11 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             self?.handleScreenParametersChange()
         }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+            _ = self?.frontmostFullScreenCached(force: true)
             self?.refreshScreen()
         }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            _ = self?.frontmostFullScreenCached(force: true)
             self?.handleSpaceChange()
         }
     }
@@ -338,6 +343,15 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     // 前台应用（排除 bobo 自己）是否正处于全屏：进入全屏会切到一个专属空间，窗口铺满整块屏幕
     // （连菜单栏/刘海那一条也占掉）。这时通知岛要让位——它带着 .fullScreenAuxiliary，会一直顶在全屏内容上。
     // 判定复用取窗口的同一段逻辑：前台应用的 layer 0 窗口与某块屏幕的完整 frame 完全重合即为全屏。
+    private func frontmostFullScreenCached(force: Bool = false) -> Bool {
+        let now = Date()
+        if force || fullScreenCheckedAt == nil || now.timeIntervalSince(fullScreenCheckedAt!) >= 1 {
+            fullScreenCheckedAt = now
+            fullScreenCached = frontmostAppFullScreen()
+        }
+        return fullScreenCached
+    }
+
     private func frontmostAppFullScreen() -> Bool {
         guard let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return false }
         guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return false }
@@ -487,7 +501,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         }
         // 防遮挡：前台应用全屏、或鼠标停在菜单栏上时让位。不再整块收起（那样是生硬的出现 / 消失），
         // 改为缩成一只 bobo 躲进刘海区域，回来时同样淡入 + 尺寸补间（见 setIslandYielding）。
-        let yielding = menuBarYielding || frontmostAppFullScreen()
+        let yielding = menuBarYielding || frontmostFullScreenCached()
         if yielding {
             islandCollapse?.cancel()
             islandAutoCollapse?.cancel()
@@ -579,7 +593,8 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             return
         }
         let started = CACurrentMediaTime()
-        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self, weak window] timer in
+        // 0.24 秒的窗口补间用 30Hz 已足够顺滑；60Hz 会让透明窗口每帧重排并显著抬高峰值功耗。
+        let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self, weak window] timer in
             guard let self, let window else { timer.invalidate(); return }
             let t = min(1, (CACurrentMediaTime() - started) / 0.24)
             let progress = CGFloat(1 - pow(1 - t, 3))
@@ -880,7 +895,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     }
 
     private func updateMenuBarYield() {
-        guard !islandDragging, !isHopping, islandLayoutTimer == nil, let panel = notchWindow, let screen = panel.screen else { return }
+        guard !islandDragging, !isHopping, islandLayoutTimer == nil, let panel = notchWindow, panel.isVisible, let screen = panel.screen else { return }
         let mouse = NSEvent.mouseLocation
         let bar = NSRect(x: screen.frame.minX, y: screen.frame.maxY - islandBarHeight(screen),
                          width: screen.frame.width, height: islandBarHeight(screen))
@@ -999,8 +1014,9 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
                     request.timeoutInterval = 3600
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+                    let decoder = JSONDecoder()
                     for try await line in bytes.lines {
-                        guard let data = line.data(using: .utf8), let snapshot = try? JSONDecoder().decode(IslandSnapshot.self, from: data) else { continue }
+                        guard let data = line.data(using: .utf8), let snapshot = try? decoder.decode(IslandSnapshot.self, from: data) else { continue }
                         await MainActor.run { self.applyIsland(snapshot) }
                     }
                 } catch {}
@@ -1012,15 +1028,26 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     private func applyIsland(_ snapshot: IslandSnapshot) {
         let before = islandModel.sessions
         let waitingBefore = islandModel.waiting?.id
-        islandModel.connected = snapshot.connected
-        islandModel.sessions = snapshot.sessions
-        islandModel.usage = snapshot.usage
-        islandModel.device = snapshot.device
-        islandModel.network = snapshot.network
-        let displayChanged = islandModel.settings.display != snapshot.settings.display
-        islandModel.settings = snapshot.settings
+        let connectedChanged = islandModel.connected != snapshot.connected
+        let sessionsChanged = before != snapshot.sessions
+        let settingsChanged = islandModel.settings != snapshot.settings
+        let usageChanged = islandModel.usage != snapshot.usage
+        let deviceChanged = islandModel.device != snapshot.device
+        let networkChanged = islandModel.network != snapshot.network
+        let deviceVisibleChanged = (islandModel.device == nil) != (snapshot.device == nil)
+        let networkVisibleChanged = (islandModel.network == nil) != (snapshot.network == nil)
+        let displayChanged = settingsChanged && islandModel.settings.display != snapshot.settings.display
+
+        // 状态流会带着设备 / 网络读数一起到达；只在值真的变了时写 @Published，避免每 2 秒把整棵 SwiftUI 树唤醒。
+        if connectedChanged { islandModel.connected = snapshot.connected }
+        if sessionsChanged { islandModel.sessions = snapshot.sessions }
+        if settingsChanged { islandModel.settings = snapshot.settings }
+        if usageChanged { islandModel.usage = snapshot.usage }
+        if deviceChanged { islandModel.device = snapshot.device }
+        if networkChanged { islandModel.network = snapshot.network }
+
         // 描边高亮：这次提醒涉及的会话，直到用户去终端看过（acked）才撤掉。
-        updateHighlights(from: before)
+        if sessionsChanged { updateHighlights(from: before) }
         // 回答完：「等你回答」亮起的展开立刻收回。被自动展开的窗口可能把鼠标圈在里面，hover 会一直为真，
         // 所以这里主动清掉，避免回答完面板还挂着。
         if waitingBefore != nil, islandModel.waiting == nil {
@@ -1030,8 +1057,8 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         }
         // 状态变化自动亮起：新的「等你回答」3 秒（同一会话再次提问时由通知里的 question 重新点亮）；
         // 会话进入结束 / 终止 2 秒，完成和终止也要能直接看到结果。
-        if let waiting = islandModel.waiting, waiting.id != waitingBefore { revealIslandTemporarily(seconds: 3) }
-        else if justFinished(from: before) { revealIslandTemporarily(seconds: 2) }
+        if sessionsChanged, let waiting = islandModel.waiting, waiting.id != waitingBefore { revealIslandTemporarily(seconds: 3) }
+        else if sessionsChanged && justFinished(from: before) { revealIslandTemporarily(seconds: 2) }
         // 系统通知由 app 自己发（归属 bobo、图标也是 bobo）。
         // 用时间戳而不是 seq 判断新旧：服务重启后 seq 会从 1 重新开始，只靠 seq 会把新通知当成旧的丢掉。
         if let notice = snapshot.notice, Double(notice.at) > launchTime {
@@ -1047,11 +1074,18 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
                 }
             }
         }
-        syncStatusItem(snapshot.settings.menubar)
+        if settingsChanged { syncStatusItem(snapshot.settings.menubar) }
         let state = islandModel.connected ? (islandModel.top?.state ?? "idle") : ""
-        updateNotchStatus(state, label: state.isEmpty ? "" : islandModel.label(state), count: islandModel.busy.count)
-        // 选屏设置变了要立刻换屏（含重排），否则只按当前内容重排。
-        if displayChanged { refreshScreen(force: true) } else { scheduleIslandLayout() }
+        let label = state.isEmpty ? "" : islandModel.label(state)
+        let count = islandModel.busy.count
+        if connectedChanged || settingsChanged || state != notchState || label != notchLabel || count != notchCount {
+            updateNotchStatus(state, label: label, count: count)
+        }
+        // 选屏设置变了要立刻换屏（含重排）；普通读数变化不需要重新计算窗口几何。
+        if displayChanged { refreshScreen(force: true) }
+        else if sessionsChanged || settingsChanged || usageChanged || deviceVisibleChanged || networkVisibleChanged || connectedChanged {
+            scheduleIslandLayout()
+        }
     }
 
     // 描边高亮：收到提醒（新的「等你回答」、刚结束 / 终止）的会话在展开列表里描一圈提醒类型的
@@ -1184,9 +1218,11 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         NSApp.activate(ignoringOtherApps: true)
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
+        webView.evaluateJavaScript("window.__boboSetWindowActive?.(true)")
     }
 
     private func hideWindow() {
+        webView.evaluateJavaScript("window.__boboSetWindowActive?.(false)")
         window.orderOut(nil)
         NSApp.setActivationPolicy(.accessory)
     }
@@ -1386,7 +1422,7 @@ private final class TitlebarDragView: NSView {
 // MARK: - 通知岛（SwiftUI）
 
 // 会话快照里 bobo 需要的字段；其余字段忽略。
-struct IslandSession: Identifiable, Decodable {
+struct IslandSession: Identifiable, Decodable, Equatable {
     var id: String
     var name: String?
     var title: String?
@@ -1403,7 +1439,7 @@ struct IslandSession: Identifiable, Decodable {
     var acked: Bool?
 }
 
-struct IslandSettings: Decodable {
+struct IslandSettings: Decodable, Equatable {
     var notify = true, sound = true, notch = true, hideWhenIdle = false, autoExpand = true, menubar = false, movable = false
     // 面板显示在哪块屏：auto（跟随当前使用的应用）/ builtin（内置刘海屏）/ main（主屏）。
     var display = "auto"
@@ -1433,7 +1469,7 @@ struct IslandSettings: Decodable {
     }
 }
 
-struct IslandNotice: Decodable {
+struct IslandNotice: Decodable, Equatable {
     var seq: Int
     var kind: String
     var title: String
@@ -1443,7 +1479,7 @@ struct IslandNotice: Decodable {
 
 // 额度窗口：服务端归好类的窗口（key = session / week / month，Codex 可能只有 week）。
 // 本机估算的窗口带金额（usedUSD / limitUSD），Codex 只有百分比。
-struct IslandQuotaWindow: Decodable {
+struct IslandQuotaWindow: Decodable, Equatable {
     var key = "", label = "", status = "", usedPercent = 0.0, remainingPercent = 100.0, resetInSec = 0.0
     var usedUSD: Double?, limitUSD: Double?
     private enum Keys: String, CodingKey { case key, label, status, usedUSD, limitUSD, usedPercent, remainingPercent, resetInSec }
@@ -1461,7 +1497,7 @@ struct IslandQuotaWindow: Decodable {
 }
 
 // 一家额度的快照（Codex 走 chatgpt.com，OpenCode Go 读本机数据库估算）。
-struct IslandQuotaProvider: Decodable {
+struct IslandQuotaProvider: Decodable, Equatable {
     var id = "", name = "", symbol = "", available = false, enabled = true, estimated = false, plan = ""
     // 圆环显示这一家的哪一档窗口（session / week / month …）：服务端记住，点圆环循环（见 Bobo.onQuotaRange）。
     var range = ""
@@ -1492,7 +1528,7 @@ struct IslandQuotaProvider: Decodable {
 }
 
 // 额度总快照：刘海胶囊显示 selected 那家；「展开并排」方式在面板展开时并排显示所有可用的来源。
-struct IslandQuota: Decodable {
+struct IslandQuota: Decodable, Equatable {
     var available = false
     var selected = ""
     var providers: [IslandQuotaProvider] = []
@@ -1519,8 +1555,8 @@ struct IslandQuota: Decodable {
 
 // 设备快照（服务端 devices.mjs 挂在状态流里）：折叠胶囊的额度右边那枚设备指示读它。
 // 三块都可选，缺哪块就不画哪块（例如内存读不到时只剩 CPU 与磁盘），数字都在悬停提示里。
-struct IslandDevice: Decodable {
-    struct CPU: Decodable {
+struct IslandDevice: Decodable, Equatable {
+    struct CPU: Decodable, Equatable {
         var usage: Double?
         var perCore: [Double]?
         var cores: Int?
@@ -1528,7 +1564,7 @@ struct IslandDevice: Decodable {
         var model: String?
         var level: String?
     }
-    struct Memory: Decodable {
+    struct Memory: Decodable, Equatable {
         var used: Double?
         var total: Double?
         var cached: Double?
@@ -1539,7 +1575,7 @@ struct IslandDevice: Decodable {
         var pressureLabel: String?
         var level: String?
     }
-    struct Disk: Decodable {
+    struct Disk: Decodable, Equatable {
         var used: Double?
         var total: Double?
         var free: Double?
@@ -1559,14 +1595,14 @@ struct IslandDevice: Decodable {
 
 // 网络快照（服务端 network.mjs 挂在状态流里）：设备指示右边那枚三灯珠指示读它。
 // 延迟 / 下载 / 上传三个等级（ok / warn / low / idle）都由服务端按同一套尺度算好，这里只格式化与上色。
-struct IslandNetwork: Decodable {
-    struct Interface: Decodable {
+struct IslandNetwork: Decodable, Equatable {
+    struct Interface: Decodable, Equatable {
         var name: String?
         var kind: String?
         var label: String?
         var address: String?
     }
-    struct Latency: Decodable {
+    struct Latency: Decodable, Equatable {
         var ms: Double?
         var level: String?
         // icmp（ping）或 tcp（封 ICMP 时的兜底握手）。
@@ -1574,11 +1610,11 @@ struct IslandNetwork: Decodable {
         // 探测目标（默认 1.1.1.1）。
         var host: String?
     }
-    struct Rate: Decodable {
+    struct Rate: Decodable, Equatable {
         var bytesPerSec: Double?
         var level: String?
     }
-    struct Totals: Decodable {
+    struct Totals: Decodable, Equatable {
         var download: Double?
         var upload: Double?
         var since: Double?
@@ -1860,7 +1896,7 @@ enum IslandBarGeometry {
     }
 }
 
-struct IslandSnapshot: Decodable {
+struct IslandSnapshot: Decodable, Equatable {
     var connected: Bool
     var sessions: [IslandSession]
     var settings: IslandSettings
@@ -2107,7 +2143,7 @@ struct IslandView: View {
             HStack(spacing: IslandMetrics.itemSpacing) {
                 // 默认图标（没有活跃会话时的置灰 bobo）固定靠左，占住会话头像的位置。
                 if model.avatars.isEmpty {
-                    IslandAvatar(image: model.idleAvatarImage(), color: Color(white: 0.30), state: "idle", stateColor: Color(white: 0.42))
+                    IslandAvatar(image: model.idleAvatarImage(), color: Color(white: 0.30), state: "idle", stateColor: Color(white: 0.42), highlightActive: model.expanded)
                         .contentShape(Rectangle())
                         .onTapGesture { onAvatar(nil) }
                 } else {
@@ -2118,7 +2154,8 @@ struct IslandView: View {
                             badgeColor: IslandMetrics.providerBadgeColor(forSource: session.source),
                             color: model.avatarColor(session.id),
                             state: session.state,
-                            stateColor: model.color(session.state)
+                            stateColor: model.color(session.state),
+                            highlightActive: model.expanded
                         )
                         // 点头像不看终端，而是回到主窗口的通知岛视图，定位到这一家的分栏。
                         .contentShape(Rectangle())
@@ -2227,7 +2264,7 @@ struct IslandRow: View {
     var body: some View {
         Button { onSelect(session) } label: {
             HStack(spacing: 8) {
-                IslandDot(color: model.color(session.state), pulsing: session.state == "working" || session.state == "waiting")
+                IslandDot(color: model.color(session.state), pulsing: model.expanded && (session.state == "working" || session.state == "waiting"))
                 VStack(alignment: .leading, spacing: 1) {
                     Text(session.title?.isEmpty == false ? (session.title ?? "") : (session.name ?? session.id))
                         .font(.system(size: 12)).foregroundStyle(.white).lineLimit(1)
@@ -2238,9 +2275,9 @@ struct IslandRow: View {
                 Spacer(minLength: 6)
                 HStack(spacing: 4) {
                     // 会话计时（CodeIsland 的 SessionTag 做法）：从会话开始至今，过一分钟自己走一格。
-                    // TimelineView 只重画这一格文字，展开着面板时每秒一次，收起后列表不在视图里、不占开销。
+                    // TimelineView 每 15 秒重画这一格文字，足够跟上分钟档位，同时避免多行每秒唤醒。
                     if session.startedAt != nil {
-                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                        TimelineView(.periodic(from: .now, by: 15)) { context in
                             if let text = IslandMetrics.elapsedText(session.startedAt, now: context.date.timeIntervalSince1970 * 1000) {
                                 IslandSessionTag(text: text)
                             }
@@ -2456,10 +2493,15 @@ struct IslandDetailView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            switch shown {
-            case .quota: IslandQuotaDetail(quota: model.usage, focus: model.quotaFocus, quotaView: model.settings.quotaView)
-            case .device: IslandDeviceDetail(device: model.device)
-            case .network: IslandNetworkDetail(network: model.network)
+            // 卡片隐藏时卸载内容，避免它继续观察设备 / 网络 / 额度并参与 SwiftUI 更新。
+            if model.detail != nil {
+                switch shown {
+                case .quota: IslandQuotaDetail(quota: model.usage, focus: model.quotaFocus, quotaView: model.settings.quotaView)
+                case .device: IslandDeviceDetail(device: model.device)
+                case .network: IslandNetworkDetail(network: model.network)
+                }
+            } else {
+                Color.clear.frame(width: 1, height: 1)
             }
         }
         .padding(13)
@@ -2820,7 +2862,7 @@ struct NotchIconButton: View {
 }
 
 // 折叠态的头像：优先显示按会话 ID 稳定哈希选出的 bobo 图；缺少资源时回退为圆角方块脸。
-// 运行中 / 等你回答时指示灯缓慢呼吸（与展开列表里的状态点一致），收起后也能一眼看出哪个会话在跑。
+// 运行中 / 等你回答用高亮状态灯表达；不创建常驻呼吸动画，避免透明刘海窗口长期驱动 Core Animation。
 struct IslandAvatar: View {
     let image: NSImage?
     let logo: NSImage?
@@ -2828,18 +2870,19 @@ struct IslandAvatar: View {
     let color: Color
     let state: String
     let stateColor: Color
-    @State private var animating = false
+    let highlightActive: Bool
 
-    init(image: NSImage? = nil, logo: NSImage? = nil, badgeColor: Color = Color(white: 0.94), color: Color, state: String, stateColor: Color) {
+    init(image: NSImage? = nil, logo: NSImage? = nil, badgeColor: Color = Color(white: 0.94), color: Color, state: String, stateColor: Color, highlightActive: Bool = true) {
         self.image = image
         self.logo = logo
         self.badgeColor = badgeColor
         self.color = color
         self.state = state
         self.stateColor = stateColor
+        self.highlightActive = highlightActive
     }
 
-    private var pulsing: Bool { state == "working" || state == "waiting" }
+    private var pulsing: Bool { highlightActive && (state == "working" || state == "waiting") }
 
     @ViewBuilder
     private var face: some View {
@@ -2886,17 +2929,11 @@ struct IslandAvatar: View {
                 .frame(width: IslandMetrics.glyphSize, height: IslandMetrics.glyphSize)
                 .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             Circle().fill(stateColor).frame(width: 4, height: 4)
-                .opacity(pulsing ? (animating ? 0.35 : 1) : 0.6)
-                .onAppear { start() }
-                .onChange(of: pulsing) { _, _ in start() }
+                // 常驻面板不创建每个头像独立的永久动画；颜色已经表达状态，静态灯更省电。
+                .opacity(pulsing ? 0.8 : 0.6)
         }
         // 宽度就是脸宽（19）而不是外框 22：这样头像之间的视觉间距和圆环（外沿正好 22）之间的一致。
         .frame(width: IslandMetrics.glyphSize)
-    }
-
-    private func start() {
-        guard pulsing, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { animating = false; return }
-        withAnimation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true)) { animating = true }
     }
 }
 
@@ -2913,20 +2950,13 @@ struct IslandOverflowBadge: View {
     }
 }
 
-// 状态点：运行中/等你回答时缓慢呼吸，其它状态常亮。
+// 状态点：运行中 / 等你回答用较亮的静态灯表达，避免每一行都持有永久动画。
 struct IslandDot: View {
     let color: Color
     let pulsing: Bool
-    @State private var animating = false
     var body: some View {
         Circle().fill(color).frame(width: 7, height: 7)
-            .opacity(pulsing && animating ? 0.35 : 1)
-            .onAppear { start() }
-            .onChange(of: pulsing) { _, _ in start() }
-    }
-    private func start() {
-        guard pulsing, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { animating = false; return }
-        withAnimation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true)) { animating = true }
+            .opacity(pulsing ? 1 : 0.6)
     }
 }
 

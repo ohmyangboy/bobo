@@ -320,7 +320,7 @@ function startAppPolling(){
  appTimer=setInterval(tick,2000);
 }
 function stopAppPolling(){if(appTimer){clearInterval(appTimer);appTimer=null;}}
-document.addEventListener('visibilitychange',()=>{document.hidden?stopAppPolling():startAppPolling();});
+document.addEventListener('visibilitychange',()=>setWindowActive(!document.hidden));
 const openRepo=()=>api('open',{url:appInfo?.repoUrl||fallbackRepo});
 $('#repoLink').onclick=guard(()=>openRepo());
 $('#aboutRepo').onclick=guard(()=>openRepo());
@@ -968,7 +968,7 @@ $('#agentForm').onsubmit=guard(async e=>{
 });
 
 // 通知岛：打开视图时订阅状态流，离开时断开；设置项写回 ~/.bobo/opencode.json。首页默认就在这个视图。
-let islandView='island',islandStream=null,islandReady=false,islandWatch=null,islandClock=null,islandState={sessions:[],settings:{},connected:false};
+let islandView='island',islandStream=null,islandReady=false,islandWatch=null,islandClock=null,islandController=null,islandReader=null,islandRun=0,islandRenderKey='',islandState={sessions:[],settings:{},connected:false};
 const ocLabels={working:'运行中',waiting:'等你回答',idle:'已结束',error:'已终止'};
 // 会话来源的显示名（与 Bobo.swift 的 IslandRow 保持一致）。
 const sourceLabels={opencode:'OpenCode',codex:'Codex',omp:'omp',claude:'Claude Code',dsh:'DeepSeek',agy:'Antigravity'};
@@ -1020,29 +1020,35 @@ function refreshSessionTimes(){
 // 状态流每推一次快照都会重渲染，但设备 / 用量也在同一条流上（约每 2 秒一次）：
 // 若无脑重建 DOM，鼠标底下的行会被换成新节点，:hover 高亮就断了。这里按 id 复用行、只改文字，
 // 顺序变化用 append 移动已有节点（不会重建），悬停高亮因此能一直保持。
-const sessionRowMap=new WeakMap();
+const sessionRowMap=new WeakMap(),sessionOrderMap=new WeakMap();
 function renderSessionList(listEl,countEl,rows,emptyText){
  countEl.textContent=rows.length?(rows.filter(islandOn).length+' 个进行中 · 共 '+rows.length+' 个'):'';
  let map=sessionRowMap.get(listEl);
  if(!map){map=new Map();sessionRowMap.set(listEl,map);}
  if(!rows.length){
+  sessionOrderMap.set(listEl,'');
   if(!map.has('')){listEl.replaceChildren();const p=document.createElement('p');p.className='muted';p.textContent=emptyText;listEl.append(p);map.set('',{row:p});}
   for(const [id,e] of [...map])if(id!==''){e.row.remove();map.delete(id);}
   return;
  }
  if(map.has('')){map.get('').row.remove();map.delete('');}
- const seen=new Set();
+ const seen=new Set(),order=rows.map(s=>s.id).join('\u001f'),reorder=sessionOrderMap.get(listEl)!==order;
+ sessionOrderMap.set(listEl,order);
  for(const s of rows){
   seen.add(s.id);
   let e=map.get(s.id);
   if(!e){e=sessionRow();map.set(s.id,e);}
   fillSessionRow(e,s);
-  listEl.append(e.row);
+  if(reorder)listEl.append(e.row);
  }
  for(const [id,e] of [...map])if(!seen.has(id)){e.row.remove();map.delete(id);}
 }
 function renderIsland(){
  const {sessions=[],settings={},connected=false}=islandState;
+ // 设备 / 网络的读数也挂在同一份流里，但通知岛网页只使用会话、设置与额度形状；无可见变化时不重排 DOM。
+ const key=JSON.stringify([connected,sessions.map(s=>[s.id,s.state,s.title,s.terminal,s.name,s.detail,s.directory,s.source,s.order,s.acked]),settings,islandState.usage?.providers?.map(p=>[p.id,p.available,p.enabled,p.range])]);
+ if(key===islandRenderKey)return;
+ islandRenderKey=key;
  // 服务端把六个 Agent 的会话合并进 sessions，并按 source 区分；这里分栏展示。
  const oc=sessions.filter(s=>!['codex','omp','claude','dsh','agy'].includes(s.source)),cx=sessions.filter(s=>s.source==='codex'),op=sessions.filter(s=>s.source==='omp'),cl=sessions.filter(s=>s.source==='claude'),ds=sessions.filter(s=>s.source==='dsh'),ag=sessions.filter(s=>s.source==='agy');
  $('#islandNavDot').dataset.state=connected?(oc[0]?.state||'idle'):'';
@@ -1174,28 +1180,42 @@ function renderIslandSettings(){
  quotaCount.disabled=quotaView.value!=='expand';
  quotaCount.onchange=guard(async()=>{islandState.settings=await api('opencode/settings',{...islandState.settings,quotaCount:Number(quotaCount.value)});});
 }
-async function islandLoop(){
- while(islandStream){
+async function islandLoop(run){
+ while(islandStream&&run===islandRun){
+  const controller=new AbortController();islandController=controller;let reader=null;
   try{
-   const r=await fetch('/api/opencode/stream',{headers:{'x-bobo-token':token}});
+   const r=await fetch('/api/opencode/stream',{headers:{'x-bobo-token':token},signal:controller.signal});
    if(!r.ok)throw Error('状态流不可用');
-   const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='';
+   reader=r.body.getReader();islandReader=reader;const decoder=new TextDecoder();let buffer='';
    for(;;){
     const {value,done}=await reader.read();
     buffer+=done?decoder.decode():decoder.decode(value,{stream:true});
     let end;
     while((end=buffer.indexOf('\n'))>=0){
      const line=buffer.slice(0,end);buffer=buffer.slice(end+1);
-     if(line.trim())try{islandState=JSON.parse(line);renderIsland();}catch{}
+     if(line.trim()&&run===islandRun&&islandStream)try{islandState=JSON.parse(line);renderIsland();}catch{}
     }
-    if(done)break;
+    if(done||run!==islandRun||!islandStream)break;
    }
   }catch{}
-  if(islandStream)await new Promise(r=>setTimeout(r,1500));
+  finally{if(islandController===controller)islandController=null;if(islandReader===reader)islandReader=null;}
+  if(islandStream&&run===islandRun)await new Promise(r=>setTimeout(r,1500));
  }
 }
-function openIsland(){if(islandStream)return;islandStream=true;islandLoop();watchTerminals();islandWatch=setInterval(watchTerminals,4000);islandClock=setInterval(refreshSessionTimes,1000);}
-function islandClose(){islandStream=null;if(islandWatch){clearInterval(islandWatch);islandWatch=null;}if(islandClock){clearInterval(islandClock);islandClock=null;}}
+function openIsland(){if(islandStream)return;islandStream=true;const run=++islandRun;islandLoop(run);watchTerminals();islandWatch=setInterval(watchTerminals,4000);islandClock=setInterval(refreshSessionTimes,1000);}
+function islandClose(){islandStream=null;islandRun++;islandController?.abort();islandController=null;islandReader?.cancel().catch(()=>{});islandReader=null;if(islandWatch){clearInterval(islandWatch);islandWatch=null;}if(islandClock){clearInterval(islandClock);islandClock=null;}}
+// 原生把主窗口 orderOut 时不一定触发 WKWebView 的 visibilitychange；显式同步页面生命周期，避免隐藏后仍保留流和定时器。
+let windowActive=true;
+function setWindowActive(active){
+ if(windowActive===active)return;
+ windowActive=active;
+ if(!active){islandClose();usageClose();deviceClose();stopAppPolling();syncProcessPolling();return;}
+ startAppPolling();
+ if(islandView==='island')openIsland();
+ if(islandView==='usage')openUsage();
+ if(islandView==='device')openDevice();
+}
+window.__boboSetWindowActive=setWindowActive;
 // 终端归属只在通知岛打开时扫描：定期让服务端续期（10 秒），关掉视图后不再续期，服务端就停扫。
 function watchTerminals(){api('terminals/watch',{}).catch(()=>{});}
 // 点击会话跳到对应终端（Otty / Ghostty / Terminal.app）的标签页：由 bobo 服务完成匹配与切换。
@@ -1391,7 +1411,7 @@ $('#usageKeyClear').onclick=guard(async()=>{
 function openUsage(){if(usageTimer)return;loadUsage();usageTimer=setInterval(()=>guard(loadUsage)(),60000);}
 function usageClose(){if(usageTimer){clearInterval(usageTimer);usageTimer=null;}}
 
-// 设备：CPU / 内存 / 磁盘 / 网络四项本机指标。服务端常驻采样，这里每 2 秒读一次快照，离开视图就停掉定时器。
+// 设备：CPU / 内存 / 磁盘 / 网络四项本机指标。服务端常驻采样，这里每 3 秒读一次快照，离开视图就停掉定时器。
 // 进程列表另走按需接口（服务端缓存 1.5 秒）：只在设备视图可见、当前分栏有进程且页面在前台时每 3 秒拉一次，
 // 切走或切到后台立即停——这块的开销全在这里，不在服务端常驻采样里。
 let deviceData=null,networkData=null,deviceTimer=null,devicePane='cpu',processTimer=null,processRows='',processData=null,processSortSeen='';
@@ -1593,7 +1613,7 @@ async function loadDevice(force=false){
  else{const e=devices.reason;$('#deviceState').textContent='不可用';$('#deviceState').title=e.message;}
  renderNetwork();
 }
-function openDevice(){if(deviceTimer)return;loadDevice();deviceTimer=setInterval(loadDevice,2000);syncProcessPolling();}
+function openDevice(){if(deviceTimer)return;loadDevice();deviceTimer=setInterval(loadDevice,3000);syncProcessPolling();}
 function deviceClose(){if(deviceTimer){clearInterval(deviceTimer);deviceTimer=null;}syncProcessPolling();}
 // 右下角的悬浮「刷新设备」：强制服务端立刻全量采一次（磁盘常驻采样约 60 秒一轮、网络延迟约 6 秒一轮，等不起）。
 $('#deviceRefresh').onclick=guard(async()=>{$('#deviceRefresh').disabled=true;try{await loadDevice(true);toast('已刷新设备信息');}finally{$('#deviceRefresh').disabled=false;}});

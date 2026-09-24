@@ -89,9 +89,15 @@ export function createAgy({ home, appDataDir, remind = () => {}, interval = POLL
  const brainDir = path.join(baseDir, 'brain');
 
  const sessions = new Map(), listeners = new Set(), doneTimers = new Map(), askTimers = new Map();
- let closed = true, seq = 0, timer = null, sqlite = null, sqliteMissing = false;
+ let closed = true, seq = 0, timer = null, sqlite = null, sqliteMissing = false, signature = '', rowsCache = null, dbStamp = '', transcriptCache = new Map();
 
  const emit = () => { for (const l of listeners) { try { l(); } catch {} } };
+ // 只在会话集合 / 状态 / 提示真的变化时推送。数据库每 2 秒会被读到，但空闲时不应因此反复推整份快照。
+ const signatureOf = () => JSON.stringify([
+  !sqliteMissing,
+  sqliteMissing ? SQLITE_REASON : '',
+  ...[...sessions.values()].map(s => [s.id, s.state, s.title, s.directory, s.detail, s.acked]),
+ ]);
 
  function snapshot() {
   return {
@@ -148,42 +154,50 @@ export function createAgy({ home, appDataDir, remind = () => {}, interval = POLL
 
  // 检查会话日志尾部是否在等待用户回答（例如 ask_question 或等待交互）
  async function checkTranscriptWaiting(convId) {
+  const logPath = path.join(brainDir, convId, '.system_generated', 'logs', 'transcript.jsonl');
+  const st = await fs.stat(logPath).catch(() => null);
+  if (!st || st.size === 0) return false;
+  const stamp = `${st.mtimeMs}:${st.size}`;
+  const cached = transcriptCache.get(convId);
+  if (cached?.stamp === stamp) return cached.waiting;
+  // 读取尾部最多 4KB；文件没变时复用上一轮结果，避免活动会话每 2 秒重复打开 transcript。
+  const len = Math.min(st.size, 4096), fh = await fs.open(logPath, 'r');
   try {
-   const logPath = path.join(brainDir, convId, '.system_generated', 'logs', 'transcript.jsonl');
-   const st = await fs.stat(logPath).catch(() => null);
-   if (!st || st.size === 0) return false;
-   // 读取尾部最多 4KB
-   const len = Math.min(st.size, 4096);
-   const fh = await fs.open(logPath, 'r');
    const buf = Buffer.alloc(len);
    await fh.read(buf, 0, len, st.size - len);
-   await fh.close();
    const text = buf.toString('utf8');
    const lines = text.trim().split('\n').filter(Boolean);
-   if (!lines.length) return false;
-   const lastLine = lines[lines.length - 1];
-   const item = JSON.parse(lastLine);
-   // 如果最新一步包含 ask_question 且还没有完成交互
-   if (item.type === 'PLANNER_RESPONSE') {
-    const calls = Array.isArray(item.tool_calls) ? item.tool_calls : [];
-    if (calls.some(c => c.name === 'ask_question')) return true;
-   }
-  } catch {}
-  return false;
+   if (!lines.length) { transcriptCache.set(convId, { stamp, waiting: false }); return false; }
+   const lastLine = lines[lines.length - 1], item = JSON.parse(lastLine);
+   const calls = item.type === 'PLANNER_RESPONSE' && Array.isArray(item.tool_calls) ? item.tool_calls : [];
+   const waiting = calls.some(c => c.name === 'ask_question');
+   transcriptCache.set(convId, { stamp, waiting });
+   return waiting;
+  } catch {
+   transcriptCache.set(convId, { stamp, waiting: false });
+   return false;
+  } finally { await fh.close().catch(() => {}); }
  }
 
  async function readRows() {
   if (sqlite === null) sqlite = import('node:sqlite').then(m => m).catch(() => false);
   const mod = await sqlite;
   sqliteMissing = !mod;
-  if (!mod) return [];
-  const exists = await fs.access(dbFile).then(() => true, () => false);
-  if (!exists) return [];
+  if (!mod) { rowsCache = []; dbStamp = 'no-sqlite'; return rowsCache; }
+  // 会话库没有变化时复用上一轮行数据：只读 stat 比每 2 秒打开 SQLite、跑同步查询轻得多。
+  const stampFile = async file => {
+   const st = await fs.stat(file).catch(() => null);
+   return st ? `${st.mtimeMs}:${st.size}:${st.ino || ''}` : '';
+  };
+  const nextStamp = (await Promise.all([dbFile, dbFile + '-wal', dbFile + '-shm'].map(stampFile))).join('|');
+  if (rowsCache !== null && nextStamp === dbStamp) return rowsCache;
+  const exists = nextStamp.split('|')[0] !== '';
+  if (!exists) { rowsCache = []; dbStamp = nextStamp; return rowsCache; }
 
   const open = file => new mod.DatabaseSync(file, { readOnly: true, timeout: 250 });
   const immutable = 'file:' + encodeURI(dbFile).replace(/[?#]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase()) + '?immutable=1';
   let db;
-  try { db = open(immutable); } catch { try { db = open(dbFile); } catch { return []; } }
+  try { db = open(immutable); } catch { try { db = open(dbFile); } catch { rowsCache = []; dbStamp = nextStamp; return rowsCache; } }
 
   try {
    const sql = `SELECT conversation_id, title, preview, status, not_fully_idle, killed, last_modified_time, last_user_input_time, workspace_uris, parent_conversation_id, nesting_depth
@@ -192,9 +206,12 @@ export function createAgy({ home, appDataDir, remind = () => {}, interval = POLL
                   AND (nesting_depth IS NULL OR nesting_depth = 0)
                 ORDER BY last_modified_time DESC
                 LIMIT 40;`;
-   return db.prepare(sql).all();
+   const rows = db.prepare(sql).all();
+   rowsCache = rows; dbStamp = nextStamp;
+   return rows;
   } catch {
-   return [];
+   rowsCache = []; dbStamp = nextStamp;
+   return rowsCache;
   } finally {
    try { db.close(); } catch {}
   }
@@ -232,19 +249,31 @@ export function createAgy({ home, appDataDir, remind = () => {}, interval = POLL
     if (s.miss >= MISS_LIMIT) remove(id);
    }
   }
-  emit();
+  const nextSignature = signatureOf();
+  if (nextSignature !== signature) {
+   signature = nextSignature;
+   emit();
+  }
+ }
+
+ async function tick() {
+  if (closed) return;
+  try { await poll(); } catch {}
+  if (!closed) {
+   timer = setTimeout(tick, interval);
+   timer.unref?.();
+  }
  }
 
  return {
   start() {
    if (!closed) return;
    closed = false;
-   poll().catch(() => {});
-   timer = setInterval(() => { poll().catch(() => {}); }, interval);
+   void tick();
   },
   stop() {
    closed = true;
-   if (timer) { clearInterval(timer); timer = null; }
+   if (timer) { clearTimeout(timer); timer = null; }
    for (const id of sessions.keys()) { cancelDone(id); cancelAsk(id); }
   },
   snapshot,
@@ -252,13 +281,14 @@ export function createAgy({ home, appDataDir, remind = () => {}, interval = POLL
   unviewed() {
    return [...sessions.values()]
     .filter(s => s.acked === false && (s.state === 'idle' || s.state === 'error'))
-    .map(s => s.id);
+    .map(s => ({ id: s.id, title: s.title || '', directory: s.directory || '', source: 'agy' }));
   },
   acknowledge(id) {
    const s = sessions.get(id);
    if (!s || s.acked === true) return false;
    s.acked = true;
    cancelDone(id); cancelAsk(id);
+   signature = signatureOf();
    emit();
    return true;
   },

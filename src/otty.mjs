@@ -5,11 +5,13 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 const APP = '/Applications/Otty.app', CLI = APP + '/Contents/MacOS/otty-cli';
 const run = (bin, args) => new Promise(resolve => {
- let out = '';
+ let out = '', settled = false, timer;
  const child = spawn(bin, args, { shell: false, stdio: ['ignore', 'pipe', 'ignore'] });
+ const finish = result => { if (settled) return; settled = true; clearTimeout(timer); resolve(result); };
+ timer = setTimeout(() => { child.kill('SIGTERM'); finish({ code: 1, out }); }, 5000);
  child.stdout.on('data', b => out += b);
- child.on('error', () => resolve({ code: 1, out: '' }));
- child.on('close', code => resolve({ code: code ?? 1, out }));
+ child.on('error', () => finish({ code: 1, out: '' }));
+ child.on('close', code => finish({ code: code ?? 1, out }));
 });
 export function createOtty() {
  const openApp = () => { try { spawn('open', [APP], { shell: false, stdio: 'ignore' }).on('error', () => {}); } catch {} };
