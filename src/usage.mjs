@@ -5,7 +5,7 @@
 // Antigravity（agy）优先读本地 Language Server 的 RetrieveUserQuotaSummary，拿不到就退回 agy CLI 的 /usage 报告
 // （见下面的 readAgy）。
 // Codex 走的是官方账号自己的接口、不改任何凭据；本地库只读（没有 sidecar 时用 immutable 直读，不创建文件）。
-import {execFile} from 'node:child_process';
+import {execFile,spawn} from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -45,6 +45,40 @@ SELECT createdMs,cost,model FROM (
 const pad=n=>String(n).padStart(2,'0');
 const userError=message=>Object.assign(Error(message),{userFacing:true});
 const describe=(e,prefix)=>e?.userFacing?e.message:prefix+(e?.message||e);
+// Node 22 的 fetch 不读取 macOS 系统代理；桌面应用从 Finder 启动时通常也没有 HTTPS_PROXY。
+export function macHTTPSProxy(output){
+ if(!/\bHTTPSEnable\s*:\s*1\b/.test(output))return '';
+ const host=output.match(/\bHTTPSProxy\s*:\s*([^\s]+)/)?.[1];
+ const port=Number(output.match(/\bHTTPSPort\s*:\s*(\d+)/)?.[1]);
+ if(!host||!/^[a-zA-Z0-9.:-]+$/.test(host)||!Number.isInteger(port)||port<1||port>65535)return '';
+ return `http://${host.includes(':')?`[${host}]`:host}:${port}`;
+}
+function systemHTTPSProxy(){
+ return new Promise(resolve=>execFile('/usr/sbin/scutil',['--proxy'],{timeout:2000,maxBuffer:65536},(error,stdout)=>resolve(error?'':macHTTPSProxy(stdout))));
+}
+// curl 遵循系统 HTTPS 代理。凭据只从 stdin 送入 curl 配置，不出现在进程参数或错误信息中。
+export function curlCodexUsage(proxy,headers,url=codexUsageURL){
+ return new Promise((resolve,reject)=>{
+  const child=spawn('/usr/bin/curl',['--config','-'],{shell:false,stdio:['pipe','pipe','pipe']});
+  let out='',err='';
+  child.stdout.setEncoding('utf8');child.stderr.setEncoding('utf8');
+  child.stdout.on('data',chunk=>{out+=chunk;if(out.length>2_000_000)child.kill();});
+  child.stderr.on('data',chunk=>{err+=chunk;if(err.length>4096)err=err.slice(-4096);});
+  child.on('error',reject);
+  child.on('close',code=>{
+   if(code!==0){reject(Error(err.trim()||`curl 退出码 ${code}`));return;}
+   const mark=out.lastIndexOf('\n');
+   const status=Number(out.slice(mark+1));
+   if(mark<0||!Number.isInteger(status)||status<100||status>599){reject(Error('额度接口响应无效'));return;}
+   const body=out.slice(0,mark);
+   resolve({status,ok:status>=200&&status<300,json:()=>JSON.parse(body)});
+  });
+  const quote=value=>'"'+String(value).replaceAll('\\','\\\\').replaceAll('"','\\"').replaceAll('\r','').replaceAll('\n','')+'"';
+  const config=[`url = ${quote(url)}`,`proxy = ${quote(proxy)}`,'noproxy = ""','silent','show-error','max-time = 10','max-redirs = 0','write-out = "\\n%{http_code}"',
+   ...Object.entries(headers).map(([key,value])=>`header = ${quote(`${key}: ${value}`)}`)].join('\n')+'\n';
+  child.stdin.end(config);
+ });
+}
 // 周窗口固定用 UTC 周（周一开头），与 CodexBar 一致：本地日历周会在周一凌晨产生歧义。
 function utcWeek(nowMs){const d=new Date(nowMs),start=Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate()-((d.getUTCDay()+6)%7));return {startMs:start,endMs:start+7*dayMs};}
 // 账单月：把「最早一条用量记录」的日/时/分/秒当作锚点，取锚点在当前月（或上月）的时刻到下一次同锚点时刻。
@@ -302,7 +336,9 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),codexTimeoutMs);
   let response;
   try{
-   response=await fetchImpl(codexUsageURL,{headers:{authorization:'Bearer '+accessToken,accept:'application/json','user-agent':'bobo',...(accountId?{'chatgpt-account-id':accountId}:{})},redirect:'error',signal:controller.signal});
+   const headers={authorization:'Bearer '+accessToken,accept:'application/json','user-agent':'bobo',...(accountId?{'chatgpt-account-id':accountId}:{})};
+   const proxy=fetchImpl===fetch&&process.platform==='darwin'?await systemHTTPSProxy():'';
+   response=proxy?await curlCodexUsage(proxy,headers):await fetchImpl(codexUsageURL,{headers,redirect:'error',signal:controller.signal});
   }catch(e){throw userError('连接 chatgpt.com 失败：'+(e?.cause?.message||e?.message||e));}
   finally{clearTimeout(timeout);}
   if(response.status===401||response.status===403)throw userError('Codex 登录已失效，请重新运行 codex login');

@@ -12,7 +12,7 @@ export const repo='ohmyangboy/bobo',bundleId='local.bobo.app';
 // 发布包的签名团队（Developer ID Application: Yonghao Yang）；应用内更新只接受这个团队的签名。
 export const teamId='LGKLTGNTY2';
 export const repoUrl='https://github.com/'+repo,releasesUrl=repoUrl+'/releases',releaseApi='https://api.github.com/repos/'+repo+'/releases/latest';
-const assetName='bobo.app.zip',minAssetSize=1024*1024,checkDelayMs=15000,checkIntervalMs=3600*1000,retryMs=600000;
+const assetName='bobo.app.zip',minAssetSize=1024*1024,checkDelayMs=3000,checkIntervalMs=10*60*1000,autoCheckMinMs=5*60*1000,retryMs=5*60*1000;
 const here=path.dirname(fileURLToPath(import.meta.url));
 // codesign 的诊断信息走 stderr，这里合并输出，调用方拿到的就是完整文本。
 const run=(file,args)=>new Promise((resolve,reject)=>{execFile(file,args,{maxBuffer:1024*1024},(error,stdout,stderr)=>error?reject(Object.assign(error,{stderr})):resolve(String(stdout||'')+String(stderr||'')));});
@@ -156,7 +156,7 @@ export function createUpdate({home,now=Date.now,fetchImpl=fetch,exec=run,spawnIm
  const updatesDir=path.join(home,'.bobo','updates'),stagedDir=path.join(updatesDir,'staged'),stagedApp=path.join(stagedDir,'bobo.app');
  const zipFile=path.join(updatesDir,assetName),manifestFile=path.join(updatesDir,'staged.json'),logFile=path.join(updatesDir,'relaunch.log');
  const appPath=appBundlePath(argv1);
- let version='0.0.0',build='0',canUpdate=false,lastCheck=0,retryNotBefore=0,closing=false;
+ let version='0.0.0',build='0',canUpdate=false,lastCheck=null,retryNotBefore=0,closing=false;
  let state={kind:'idle'},timer=null,listeners=new Set();
  const emit=()=>{for(const listener of listeners){try{listener();}catch{}}};
  const publicState=()=>({...state});
@@ -187,10 +187,10 @@ export function createUpdate({home,now=Date.now,fetchImpl=fetch,exec=run,spawnIm
 
  // 启动后的静默检查；已暂存好更新就不打扰（等用户重启安装）。
  // 只在从 .app 运行时启用：源码 / 测试环境不自动联网，手动「检查更新」也不受影响（它是独立接口）。
- // 启动 15 秒后查一次，之后每小时一次（GitHub 无 token 的 60 次/小时限流足够）。
+ // 启动 3 秒后查一次，之后每 10 分钟一次；窗口重新打开也会请求检查，但共用 5 分钟间隔。
  function start(){
   if(timer||!canUpdate)return;
-  timer=setTimeout(()=>{check().catch(()=>{});timer=setInterval(()=>{check({auto:true}).catch(()=>{});},checkIntervalMs);if(timer.unref)timer.unref();},checkDelayMs);
+  timer=setTimeout(()=>{check({auto:true}).catch(()=>{});timer=setInterval(()=>{check({auto:true}).catch(()=>{});},checkIntervalMs);if(timer.unref)timer.unref();},checkDelayMs);
   if(timer.unref)timer.unref();
  }
  function stop(){if(timer){clearTimeout(timer);clearInterval(timer);timer=null;}}
@@ -198,18 +198,19 @@ export function createUpdate({home,now=Date.now,fetchImpl=fetch,exec=run,spawnIm
  // 检查更新。auto（静默轮询）会尊重 1 小时 TTL 与失败退避；手动检查总是真的请求。
  async function check({auto=false}={}){
   if(closing)return snapshot();
-  if(state.kind==='downloading'||state.kind==='installing')return snapshot();
+  if(state.kind==='checking'||state.kind==='downloading'||state.kind==='installing')return snapshot();
   if(state.kind==='ready')return snapshot();
   const at=now();
-  if(auto&&(at-lastCheck<60000||at<retryNotBefore))return snapshot();
+  if(auto&&((lastCheck!==null&&at-lastCheck<autoCheckMinMs)||at<retryNotBefore))return snapshot();
   lastCheck=at;
   state={kind:'checking'};emit();
   try{
    const response=await fetchImpl(releaseApi,{headers:{accept:'application/vnd.github+json','user-agent':'bobo-updater'},redirect:'error',signal:AbortSignal.timeout(10000)});
-   if(response.status===404){state={kind:'upToDate',checkedAt:at};emit();return snapshot();}
+   if(response.status===404){retryNotBefore=0;state={kind:'upToDate',checkedAt:at};emit();return snapshot();}
    if(!response.ok)throw Error('GitHub 返回 '+response.status+(response.status===403?'（接口限流，稍后再试）':''));
    const release=releaseCandidate(await response.json(),version);
-   if(!release){state={kind:'upToDate',checkedAt:at};emit();return snapshot();}
+   if(!release){retryNotBefore=0;state={kind:'upToDate',checkedAt:at};emit();return snapshot();}
+   retryNotBefore=0;
    state={kind:'available',release};emit();
    download(release).catch(()=>{});
   }catch(e){

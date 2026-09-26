@@ -1,6 +1,6 @@
-import {test} from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs/promises';import os from 'node:os';import path from 'node:path';
+import {test} from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs/promises';import os from 'node:os';import path from 'node:path';import http from 'node:http';
 import {DatabaseSync} from 'node:sqlite';
-import {createUsage, agySnapshot} from '../src/usage.mjs';
+import {createUsage, agySnapshot, macHTTPSProxy, curlCodexUsage} from '../src/usage.mjs';
 // 每日历史按本地日历分桶，测试固定 UTC，让「天」的断言在任何时区都稳定。
 process.env.TZ='UTC';
 // 与 CodexBar 的 OpenCodeGoLocalUsageReader 测试同一基准：2026-03-06T12:00:00Z。
@@ -10,6 +10,28 @@ const makeHome=()=>fs.mkdtemp(path.join(os.tmpdir(),'bobo-usage-'));
 const cleanup=home=>fs.rm(home,{recursive:true,force:true});
 const at=(base,deltaMs)=>base+deltaMs;
 const provider=(snapshot,id)=>snapshot.providers.find(p=>p.id===id);
+test('Codex：只采用有效的 macOS HTTPS 系统代理',()=>{
+ assert.equal(macHTTPSProxy('HTTPSEnable : 1\nHTTPSProxy : 127.0.0.1\nHTTPSPort : 7890'),'http://127.0.0.1:7890');
+ assert.equal(macHTTPSProxy('HTTPSEnable : 0\nHTTPSProxy : 127.0.0.1\nHTTPSPort : 7890'),'');
+ assert.equal(macHTTPSProxy('HTTPSEnable : 1\nHTTPSProxy : bad/host\nHTTPSPort : 7890'),'');
+ assert.equal(macHTTPSProxy('HTTPSEnable : 1\nHTTPSProxy : 127.0.0.1\nHTTPSPort : 0'),'');
+});
+test('Codex：代理请求能带账号头读取额度响应',async()=>{
+ let request=null;
+ const proxy=http.createServer((req,res)=>{
+  request={url:req.url,authorization:req.headers.authorization,account:req.headers['chatgpt-account-id']};
+  res.writeHead(200,{'content-type':'application/json'});
+  res.end(JSON.stringify({rate_limit:{primary_window:{used_percent:42,limit_window_seconds:18000}}}));
+ });
+ await new Promise(resolve=>proxy.listen(0,'127.0.0.1',resolve));
+ try{
+  const {port}=proxy.address();
+  const response=await curlCodexUsage(`http://127.0.0.1:${port}`,{'authorization':'Bearer fake-token','chatgpt-account-id':'acct-test'},'http://codex-usage.test/backend-api/wham/usage');
+  assert.equal(response.status,200);
+  assert.equal((await response.json()).rate_limit.primary_window.used_percent,42);
+  assert.deepEqual(request,{url:'http://codex-usage.test/backend-api/wham/usage',authorization:'Bearer fake-token',account:'acct-test'});
+ }finally{await new Promise(resolve=>proxy.close(resolve));}
+});
 // 设置是异步写盘的（原子写 + 串行化），轮询等到它落盘，避免和并发负载抢时间。
 async function waitFor(fn,ms=1000){const end=Date.now()+ms;for(;;){try{return await fn();}catch(e){if(Date.now()>end)throw e;await new Promise(r=>setTimeout(r,20));}}}
 // 建一个最小可用的 OpenCode 数据库（message + part）；authKey 为 null 时连 auth.json 都不写（纯本机、不联网）。

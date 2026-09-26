@@ -51,6 +51,24 @@ test('发布候选：只接受正式版、更高版本、带 sha256 的 bobo.app
  assert.equal(releaseCandidate({...base,tag_name:'最新'},'1.2.0'),null);
 });
 
+test('自动检查：窗口恢复遵守五分钟间隔，手动检查仍立即请求',async()=>{
+ const home=await fs.mkdtemp(path.join(os.tmpdir(),'bobo-update-'));
+ let clock=Date.parse('2026-09-26T00:00:00Z'),calls=0;
+ const update=createUpdate({home,now:()=>clock,argv1:path.join(home,'Applications/bobo.app/Contents/Resources/src/server.mjs'),fetchImpl:async()=>{
+  calls++;
+  return {status:200,ok:true,json:async()=>({tag_name:'v'+currentVersion,draft:false,prerelease:false,assets:[]})};
+ }});
+ try{
+  await update.load();
+  await update.check({auto:true});assert.equal(calls,1,'首次自动检查立即执行');
+  clock+=4*60*1000;
+  await update.check({auto:true});assert.equal(calls,1,'短时间内重复打开窗口不重复请求');
+  clock+=60*1000;
+  await update.check({auto:true});assert.equal(calls,2,'五分钟后重新检查');
+  await update.check();assert.equal(calls,3,'用户点击按钮不受自动间隔限制');
+ }finally{update.stop();await fs.rm(home,{recursive:true,force:true});}
+});
+
 test('定位 App 与读 plist：只认 .app 路径段',()=>{
  assert.equal(appBundlePath('/Applications/bobo.app/Contents/Resources/src/server.mjs'),'/Applications/bobo.app');
  assert.equal(appBundlePath('/Users/x/bobo/src/server.mjs'),null);

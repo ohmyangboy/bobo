@@ -6,6 +6,16 @@ published: true
 
 本文件记录 bobo 面向用户的版本变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。发布在 [GitHub Releases](https://github.com/ohmyangboy/bobo/releases)。
 
+## [1.3.2] - 2026-09-26
+
+### 修复
+
+- **Codex 额度**：读取 macOS 系统 HTTPS 代理，修复从应用程序启动时可能无法连接额度接口的问题。
+
+### 改进
+
+- **更新检测更及时**：启动后约 3 秒检查，常驻期间每 10 分钟检查；重新打开主窗口时也会检查，自动请求至少间隔 5 分钟。手动点击版本按钮仍可立即检查。
+
 ## [1.3.1] - 2026-09-26
 
 ### 修复

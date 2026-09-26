@@ -293,8 +293,8 @@ const server=http.createServer(async(req,res)=>{
    if(url.pathname==='/api/usage/reset-notify')return json(usage.setNotifyReset(b.enabled));
    // 手动填写 / 清除 OpenCode Go 的 API Key（保存前先调一次接口验证）。
    if(url.pathname==='/api/usage/key')return json(b.clear?{ok:true,message:'已清除手动 Key，改回读取本机登录',snapshot:await usage.clearKey()}:await usage.setKey(b.key));
-    // 应用内更新：手动检查（总是真的请求）与一键重启安装（脚本等应用退出后替换并重开）。
-    if(url.pathname==='/api/update/check')return json(await update.check());
+    // 应用内更新：窗口恢复用 {auto:true} 遵守自动检查间隔；按钮手动检查仍立即请求。
+    if(url.pathname==='/api/update/check')return json(await update.check({auto:b.auto===true}));
     if(url.pathname==='/api/update/install')return json(await update.install());
    // 点会话跳到对应终端（Otty / Ghostty / Terminal.app）或 Codex 桌面版：真的切到了那个标签页 / 线程才算「已查看」，
    // 结束/终止的头像才会消失。Codex app 里跑的会话（rollout 里 originator 是 Desktop）直接跳 `codex://threads/<id>` 深链。

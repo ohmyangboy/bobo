@@ -318,6 +318,8 @@ function startAppPolling(){
  const tick=()=>loadApp().catch(()=>{});
  tick();
  appTimer=setInterval(tick,2000);
+ // 主窗口恢复时顺带检查新版；服务端会限制自动请求的频率。
+ api('update/check',{auto:true}).then(info=>{appInfo=info;renderVersion();renderAbout();}).catch(()=>{});
 }
 function stopAppPolling(){if(appTimer){clearInterval(appTimer);appTimer=null;}}
 document.addEventListener('visibilitychange',()=>setWindowActive(!document.hidden));
