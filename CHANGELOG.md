@@ -6,6 +6,12 @@ published: true
 
 本文件记录 bobo 面向用户的版本变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。发布在 [GitHub Releases](https://github.com/ohmyangboy/bobo/releases)。
 
+## [1.3.1] - 2026-09-26
+
+### 修复
+
+- **通知岛反复伸缩**：忽略 OpenCode 不稳定的瞬时忙闲信号，只在执行事件确认后更新运行状态，避免同一会话被误判结束又立即恢复。
+
 ## [1.3.0] - 2026-09-24
 
 ### 改进
@@ -156,3 +162,4 @@ published: true
 [1.3.0-beta.4]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0-beta.4
 [1.3.0-beta.5]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0-beta.5
 [1.3.0]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0
+[1.3.1]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.1

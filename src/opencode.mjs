@@ -222,15 +222,9 @@ export function createOpenCode({home}){
    return;
   }
 
-  // 若公开流将来提供状态信号，按 busy/idle 处理（CodeIsland 用 session.status 作主信号）。
-  if(type==='session.status'&&id){
-   const st=data.status?.type||data.status||'';
-   const cur=sessions.get(id);
-   if(st==='busy'||st==='retry'){cancelIdle(id);cancelAsk(id);update(id,{state:'working',directory:dir||cur?.directory||'',name:cur?.name||name});}
-   else if(st==='idle'){cancelAsk(id);settle(id,{state:'idle',directory:dir||cur?.directory||'',name:cur?.name||name},'done',1200);}
-   return;
-  }
-  if(type==='session.idle'&&id){settle(id,{state:'idle'},'done',1200);return;}
+  // session.status / session.idle 只是瞬时快照，会在同一轮执行中回摆；
+  // 结束与终止只认 session.execution.*，否则通知岛会被假结束反复展开。
+  if(type==='session.status'||type==='session.idle')return;
 
   if(type==='form.created'&&data.form){
    const f=data.form,question=f.fields?.[0];

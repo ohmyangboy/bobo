@@ -27,6 +27,12 @@ test('会话列表按最近状态变更排序，活动事件不重排',async()=>
   // 按顺序发 1、2、3：最新开始的最上面。
   push(inbox('s1','任务一'));push(inbox('s2','任务二'));push(inbox('s3','任务三'));
   assert.ok(await until(()=>ids()==='s3,s2,s1'),'最新开始的没有排最上面：'+ids());
+  // OpenCode 的状态快照信号可能短暂报 idle；只有 session.execution.* 能判定结束。
+  push({type:'session.status',data:{sessionID:'s3',status:{type:'idle'}}});
+  push({type:'session.idle',data:{sessionID:'s3'}});
+  await new Promise(r=>setTimeout(r,1350));
+  assert.equal(state('s3'),'working','不可靠的 idle 信号不该让通知岛反复展开');
+  assert.equal(ids(),'s3,s2,s1','不可靠的状态信号不该重排会话');
   // 工具调用、改名等活动事件不改变顺序。
   push({type:'session.step.started',data:{sessionID:'s1'}});
   push({type:'session.tool.called',data:{sessionID:'s1'}});
@@ -41,6 +47,9 @@ test('会话列表按最近状态变更排序，活动事件不重排',async()=>
   push({type:'session.execution.succeeded',data:{sessionID:'s2'}});
   assert.ok(await until(()=>ids()==='s2,s1,s3',3000),'结束的会话没有顶到最前：'+ids());
   assert.equal(state('s2'),'idle');
+  push({type:'session.status',data:{sessionID:'s2',status:{type:'busy'}}});
+  await new Promise(r=>setTimeout(r,30));
+  assert.equal(state('s2'),'idle','不可靠的 busy 信号不该撤销正式结束状态');
   assert.equal(sessions().find(s=>s.id==='s2').acked,false);
   // 还没看过的结束会话列给 server.mjs 轮询 Otty（unviewed 只含结束 / 终止且未查看的）。
   assert.deepEqual(client.unviewed(),[{id:'s2',title:'任务二',directory:'/tmp/s2'}]);
