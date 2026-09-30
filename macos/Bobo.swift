@@ -415,8 +415,8 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
 
     // 屏幕配置变化时 macOS 发通知，但此刻 NSScreen.screens 可能还没更新：立刻 + 0.5 秒各处理一次。
     private func handleScreenParametersChange() {
-        refreshScreen(force: true)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.refreshScreen(force: true) }
+        refreshScreen()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.refreshScreen() }
     }
 
     // 切换空间（包含进入 / 退出全屏）后系统发通知，但此刻窗口列表与前台应用可能还没更新：立刻 + 0.4 秒各查一次。
@@ -425,12 +425,12 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in self?.refreshScreen() }
     }
 
-    // 重判面板该在哪块屏幕：屏幕签名变了（或强制）才触发换屏动画。
-    // 屏幕没变也要重排一次——全屏显隐属于「屏幕没变但不该再显示」的变化，靠这一步生效。
-    private func refreshScreen(force: Bool = false) {
+    // 重判面板该在哪块屏幕：只有屏幕签名变了才触发换屏动画。
+    // 同屏通知只重排几何（安全区 / 菜单栏可能变化），不能重播缩放与淡出。
+    private func refreshScreen() {
         guard !islandDragging, let screen = chosenScreen() else { return }
         let signature = Self.signature(screen)
-        guard force || signature != currentScreenSignature else { updateIslandLayout(); return }
+        guard signature != currentScreenSignature else { updateIslandLayout(); return }
         hopToScreen(screen)
     }
 
@@ -1106,12 +1106,10 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
 
         // 描边高亮：这次提醒涉及的会话，直到用户去终端看过（acked）才撤掉。
         if sessionsChanged { updateHighlights(from: before) }
-        // 回答完：「等你回答」亮起的展开立刻收回。被自动展开的窗口可能把鼠标圈在里面，hover 会一直为真，
-        // 所以这里主动清掉，避免回答完面板还挂着。
+        // 回答完只收回自动亮起；hovering 已由 islandPointerMoved 区分主动悬停，不能把用户正在看的面板收走。
         if waitingBefore != nil, islandModel.waiting == nil {
             islandAutoCollapse?.cancel()
             islandModel.autoRevealed = false
-            islandModel.hovering = false
         }
         // 状态变化自动亮起：新的「等你回答」3 秒（同一会话再次提问时由通知里的 question 重新点亮）；
         // 会话进入结束 / 终止 2 秒，完成和终止也要能直接看到结果。
@@ -1140,7 +1138,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             updateNotchStatus(state, label: label, count: count)
         }
         // 选屏设置变了要立刻换屏（含重排）；普通读数变化不需要重新计算窗口几何。
-        if displayChanged { refreshScreen(force: true) }
+        if displayChanged { refreshScreen() }
         else if sessionsChanged || settingsChanged || usageChanged || deviceVisibleChanged || networkVisibleChanged || connectedChanged {
             scheduleIslandLayout()
         }
@@ -1818,6 +1816,8 @@ enum IslandMetrics {
     // 折叠胶囊里每个图标共用一套规格：22 的外框（热区与悬停圆底）、5 的间距、同一套悬停底色；
     // bobo 头像的脸是 19，设置 / 退出这类 SF Symbol 图形对齐额度圆环里那枚来源图标（13），比例才一致。
     static let itemSize: CGFloat = 22
+    // 网络只有一列竖条，使用更窄的热区，收紧两侧留白。
+    static let networkItemWidth: CGFloat = 12
     static let itemSpacing: CGFloat = 5
     // 头像区与右边状态图标之间的一条细竖线：宽度算进内容宽度里（见 Bobo.islandSize），
     // 两边的间距与图标之间一样是 itemSpacing，不额外占位。
@@ -2004,7 +2004,8 @@ enum IslandBarGeometry {
         var left = CGFloat(faces) * IslandMetrics.glyphSize + IslandMetrics.itemSpacing * CGFloat(faces) + IslandMetrics.dividerWidth
         if hidden > 0 { left += IslandMetrics.itemSpacing + IslandMetrics.glyphSize }
         let chips = max(0, quota) + (device ? 1 : 0) + (network ? 1 : 0) + (actionButtons ? 2 : 0)
-        return (left, CGFloat(chips) * IslandMetrics.itemSize + IslandMetrics.itemSpacing * CGFloat(max(0, chips - 1)))
+        let networkInset = network ? IslandMetrics.itemSize - IslandMetrics.networkItemWidth : 0
+        return (left, CGFloat(chips) * IslandMetrics.itemSize - networkInset + IslandMetrics.itemSpacing * CGFloat(max(0, chips - 1)))
     }
 
     // 并排显示几枚额度圆环（纯函数）：count 是可用的来源数，limit 是用户设的上限（3 / 5 / 7），0 = 自适应。
@@ -2013,11 +2014,9 @@ enum IslandBarGeometry {
     static func quotaChips(count: Int, limit: Int, screenWidth: CGFloat, keepOut: CGFloat, device: Bool, network: Bool, actionButtons: Bool) -> Int {
         guard count > 0 else { return 0 }
         guard count > 1 else { return 1 }
-        let reserved = (device ? 1 : 0) + (network ? 1 : 0) + (actionButtons ? 2 : 0)
         let space = (screenWidth - IslandMetrics.screenEdgeMargin * 2) / 2 - keepOut / 2 - IslandMetrics.barEdge
         func fits(_ shown: Int) -> Bool {
-            let chips = shown + reserved
-            return CGFloat(chips) * IslandMetrics.itemSize + IslandMetrics.itemSpacing * CGFloat(max(0, chips - 1)) <= space
+            contentWidths(faces: 0, hidden: 0, quota: shown, device: device, network: network, actionButtons: actionButtons).right <= space
         }
         var shown = limit > 0 ? min(limit, count) : count
         while shown > 1, !fits(shown) { shown -= 1 }
@@ -2707,7 +2706,7 @@ struct IslandNetworkChip: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
-    // 单列竖条分为三段，段间留 2pt；保持原来的 22pt 点击区域。
+    // 单列竖条分为三段，段间留 2pt；横向热区按窄条单独计算。
     private static let segmentWidth: CGFloat = 3.5
     private static let segmentHeight: CGFloat = 5
     private static let segmentSpacing: CGFloat = 2
@@ -2732,7 +2731,7 @@ struct IslandNetworkChip: View {
                         .shadow(color: color.opacity(level == "idle" ? 0 : 0.75), radius: 0.8)
                 }
             }
-            .frame(width: IslandMetrics.itemSize, height: IslandMetrics.itemSize)
+            .frame(width: IslandMetrics.networkItemWidth, height: IslandMetrics.itemSize)
             .background(RoundedRectangle(cornerRadius: 4).fill(.white.opacity(hovering ? IslandMetrics.fillHover : 0)))
             .contentShape(Rectangle())
         }

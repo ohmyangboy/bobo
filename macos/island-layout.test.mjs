@@ -134,7 +134,7 @@ test('通知岛计时：会话时长的文案分档', {skip:process.platform!=='
 
 // 额度并排显示的取舍（展开并排 + 自适应）：固定上限（3 / 5 / 7）只封顶，自适应按「中轴线到屏幕边缘」
 // 的剩余空间算——不管怎么变，排出来的宽度都不越过展开后的中轴线，装不下时至少留一枚。
-// 设备与网络指示各占一格，计算剩余空间时先扣掉。
+// 设备占标准一格，网络按窄条宽度计算。
 test('通知岛额度：并排显示的固定上限与自适应数量', {skip:process.platform!=='darwin'}, async()=>{
  await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {'),`
  let wide: CGFloat = 1512, keepOut: CGFloat = 214
@@ -147,7 +147,7 @@ test('通知岛额度：并排显示的固定上限与自适应数量', {skip:pr
  // 自适应：内置刘海屏（1512 宽）上 5 家都排得下。
  precondition(IslandBarGeometry.quotaChips(count: 5, limit: 0, screenWidth: wide, keepOut: keepOut, device: true, network: true, actionButtons: true) == 5)
  // 窄屏 / 有刘海时按空间收缩：600 宽、设备 + 网络占两格、中轴线到右缘剩 159pt，
- // 4 枚额度 + 设备 + 网络共 6 格 = 157pt（再来一枚 184pt 就放不下）。
+ // 4 枚额度 + 设备 + 网络 = 147pt（再来一枚 174pt 就放不下）。
  precondition(IslandBarGeometry.quotaChips(count: 8, limit: 0, screenWidth: 600, keepOut: keepOut, device: true, network: true, actionButtons: false) == 4)
  precondition(IslandBarGeometry.quotaChips(count: 8, limit: 0, screenWidth: 600, keepOut: keepOut, device: true, network: false, actionButtons: false) == 5)
  // 遍历各种屏幕宽度与悬停状态：数量在 1...count 之间，且排出来的宽度不越过中轴线。
@@ -158,9 +158,7 @@ test('通知岛额度：并排显示的固定上限与自适应数量', {skip:pr
      let shown = IslandBarGeometry.quotaChips(count: 8, limit: 0, screenWidth: width, keepOut: keepOut, device: device, network: network, actionButtons: hover)
      precondition(shown >= 1 && shown <= 8, "自适应数量越界")
      if shown > 1 {
-      let reserved = (device ? 1 : 0) + (network ? 1 : 0) + (hover ? 2 : 0)
-      let chips = shown + reserved
-      let used = CGFloat(chips) * IslandMetrics.itemSize + IslandMetrics.itemSpacing * CGFloat(max(0, chips - 1))
+      let used = IslandBarGeometry.contentWidths(faces: 0, hidden: 0, quota: shown, device: device, network: network, actionButtons: hover).right
       let space = (width - IslandMetrics.screenEdgeMargin * 2) / 2 - keepOut / 2 - IslandMetrics.barEdge
       precondition(used <= space + 0.0001, "并排显示越过了展开后的中轴线")
      }
@@ -337,5 +335,83 @@ let fallbackJSON = #"{"rows":[{"id":"x","ok":true,"bars":4,"level":"ok","ms":88,
 let fallback = try JSONDecoder().decode(IslandLinks.self, from: Data(fallbackJSON.utf8))
 precondition(IslandMetrics.linkType(fallback.link(id: "x")?.info) == "住宅 / 家宽")
 precondition(IslandMetrics.linkRisk(fallback.link(id: "x")?.info?.risk) == "13")
+`);
+});
+
+// 屏幕通知可能连续到达；同屏刷新与状态重排都只更新几何，不能重播换屏的缩放 / 淡出。
+test('通知岛刷新：同屏反复刷新不换屏，目标屏幕改变才跳转', {skip:process.platform!=='darwin'}, async()=>{
+ const refresh=await swiftSlice('    private func refreshScreen(', '    private func positionNotch()');
+ await checkSwift(`
+struct ProbeScreen { var signature: String }
+final class Probe {
+ var islandDragging = false
+ var currentScreenSignature = "main"
+ var selected: ProbeScreen? = ProbeScreen(signature: "main")
+ var layouts = 0, hops = 0
+ func chosenScreen() -> ProbeScreen? { selected }
+ static func signature(_ screen: ProbeScreen) -> String { screen.signature }
+ func updateIslandLayout() { layouts += 1 }
+ func hopToScreen(_ screen: ProbeScreen) { hops += 1; currentScreenSignature = screen.signature }
+ func refresh() { refreshScreen() }
+`+refresh+`
+}`,`
+let probe = Probe()
+for _ in 0..<8 { probe.refresh() }
+precondition(probe.hops == 0, "同屏刷新错误地重播了缩放与淡出")
+precondition(probe.layouts == 8, "同屏刷新仍需更新状态变化后的布局")
+probe.selected = ProbeScreen(signature: "external")
+probe.refresh()
+precondition(probe.hops == 1 && probe.currentScreenSignature == "external")
+probe.refresh()
+precondition(probe.hops == 1 && probe.layouts == 9)
+probe.islandDragging = true
+probe.selected = ProbeScreen(signature: "main")
+probe.refresh()
+precondition(probe.hops == 1 && probe.layouts == 9)
+probe.islandDragging = false
+probe.selected = nil
+probe.refresh()
+precondition(probe.hops == 1 && probe.layouts == 9)
+`);
+});
+
+// 回答完成只结束自动亮起；鼠标主动停在面板上时继续展开。测试直接运行快照处理入口。
+test('通知岛状态：回答完成保留主动悬停，自动亮起则正常收回', {skip:process.platform!=='darwin'}, async()=>{
+ const declarations=await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {');
+ const snapshots=await swiftSlice('struct IslandSnapshot: Decodable, Equatable {','// 悬停明细卡的内容类型');
+ const model=await swiftSlice('enum IslandDetailKind:', '// 通知岛面板：黑色卡片贴住刘海');
+ const apply=await swiftSlice('    private func applyIsland(', '    // 描边高亮：收到提醒');
+ await checkSwift(declarations+'\n'+snapshots+'\n'+model+`
+final class Probe {
+ let islandModel = IslandModel()
+ var islandAutoCollapse: DispatchWorkItem?
+ var launchTime = Double.greatestFiniteMagnitude
+ var lastNoticeKey = "", notchState = "", notchLabel = "", notchCount = 0
+ var layouts = 0
+ func updateHighlights(from before: [IslandSession]) {}
+ func revealIslandTemporarily(seconds: Double) { islandModel.autoRevealed = true }
+ func justFinished(from before: [IslandSession]) -> Bool { false }
+ func postNotice(_ notice: IslandNotice) {}
+ func syncStatusItem(_ enabled: Bool) {}
+ func updateNotchStatus(_ state: String, label: String, count: Int) {}
+ func refreshScreen() {}
+ func scheduleIslandLayout() { layouts += 1 }
+ func apply(_ snapshot: IslandSnapshot) { applyIsland(snapshot) }
+`+apply+'\n}',`
+func snapshot(_ state: String) throws -> IslandSnapshot {
+ try JSONDecoder().decode(IslandSnapshot.self, from: Data((#"{"connected":true,"settings":{},"sessions":[{"id":"s1","state":""# + state + #""}]}"#).utf8))
+}
+let waiting = try snapshot("waiting"), working = try snapshot("working")
+let active = Probe()
+active.apply(waiting)
+active.islandModel.hovering = true
+active.apply(working)
+precondition(active.islandModel.hovering && active.islandModel.expanded, "回答完成不该清掉主动悬停")
+precondition(!active.islandModel.autoRevealed)
+let passive = Probe()
+passive.apply(waiting)
+precondition(passive.islandModel.autoRevealed && passive.islandModel.expanded)
+passive.apply(working)
+precondition(!passive.islandModel.hovering && !passive.islandModel.autoRevealed && !passive.islandModel.expanded)
 `);
 });

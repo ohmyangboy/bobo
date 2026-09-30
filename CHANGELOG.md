@@ -6,6 +6,17 @@ published: true
 
 本文件记录 bobo 面向用户的版本变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。发布在 [GitHub Releases](https://github.com/ohmyangboy/bobo/releases)。
 
+## [1.3.4] - 2026-09-30
+
+### 修复
+
+- **刘海面板反复抽搐**：插拔显示器、切换分辨率或进出全屏时系统会连发屏幕参数通知，面板不再在屏幕没变的情况下重播换屏的缩放与淡出，只按新的安全区与菜单栏重排。
+- **回答完成后误收起**：「等你回答」被回答时只收回自动亮起，鼠标真正停在面板上时不会再被一起收走（以前把「窗口自己长到鼠标底下」也算作悬停）。
+
+### 改进
+
+- **网络指示更紧凑**：三枚灯珠的横向热区从 22pt 收窄到 12pt，同一块屏上为额度圆环腾出 10pt，窄屏能多排下一枚。
+
 ## [1.3.3] - 2026-09-30
 
 ### 改进
@@ -192,3 +203,6 @@ published: true
 [1.3.0-beta.5]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0-beta.5
 [1.3.0]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.0
 [1.3.1]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.1
+[1.3.2]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.2
+[1.3.3]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.3
+[1.3.4]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.4
