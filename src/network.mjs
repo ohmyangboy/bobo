@@ -1,15 +1,16 @@
 // 网络：延迟 / 下载 / 上传三项。只读本机网卡计数器、只做本机探测（ICMP ping，失败退回 TCP 握手），
-// 不请求任何第三方接口、不写任何文件。网卡字节数按 3 秒窗口的差值算速率（macOS 走 netstat、Linux 读
+// 不请求任何第三方接口、不写任何文件。网卡字节数按两次采样的实际时间差算速率（macOS 走 netstat、Linux 读
 // /proc/net/dev），延迟每 2 跳探一次；采样在服务端常驻进行（刘海胶囊要实时值），网页与面板只读这份快照，
 // 只有可见数值变化时才推送。
 import os from 'node:os';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import {spawn} from 'node:child_process';
+import {createActivitySampler} from './activity-sampler.mjs';
 
 const pingBin='/sbin/ping',routeBin='/sbin/route',netstatBin='/usr/sbin/netstat',networksetupBin='/usr/sbin/networksetup';
 const procNetDev='/proc/net/dev',procRoute='/proc/net/route';
-const tickMs=3000,latencyEvery=2,interfaceEvery=20;   // 3 秒一跳；延迟每 2 跳（约 6 秒）；接口每 20 跳（约 60 秒）
+const latencyEvery=2,interfaceEvery=20;   // 使用时 3 秒一跳，常驻时 15 秒；延迟每 2 跳、接口每 20 跳
 const pingTimeoutMs=1500,tcpTimeoutMs=1500;
 // 尺度（等级由服务端定，网页与刘海按同一套阈值上色）：
 // 延迟：< 60ms 正常 / < 200ms 偏慢 / ≥ 200ms 很差；探测没响应按「断网」处理（online=false）。
@@ -124,7 +125,7 @@ export function tcpProbe(host,port,timeout=tcpTimeoutMs){
 
 export function createNetwork({now=Date.now,exec=run,readFile=fs.readFile,interfaces=os.networkInterfaces,platform=process.platform,host='1.1.1.1',port=443,probe=null,tcp=tcpProbe}={}){
  const isMac=platform==='darwin',isLinux=platform==='linux',supported=isMac||isLinux;
- let iface=null,latency=null,online=null,rate={download:0,upload:0},totals={download:0,upload:0,since:now()},prev=null,updatedAt=0,errors={},signature='',state=null,listeners=new Set(),timer=null,ticks=0,busy=null,closed=false,resolveNext=false;
+ let iface=null,latency=null,online=null,rate={download:0,upload:0},totals={download:0,upload:0,since:now()},prev=null,updatedAt=0,errors={},signature='',state=null,listeners=new Set(),ticks=0,busy=null,closed=false,resolveNext=false;
  // 延迟探测：先 ICMP ping（默认主机与 Stats 一致是 1.1.1.1），没有响应再退回 TCP 握手。
  const probeFn=probe||(async()=>{
   const args=isMac?['-c','1','-W',String(pingTimeoutMs),'-t',String(Math.ceil(pingTimeoutMs/1000)),host]:['-c','1','-W',String(Math.ceil(pingTimeoutMs/1000)),host];
@@ -225,11 +226,13 @@ export function createNetwork({now=Date.now,exec=run,readFile=fs.readFile,interf
   busy=(async()=>{try{await tick(all);}catch(e){errors.sample=describe(e,'读取网络信息失败：');}finally{busy=null;}return snapshot();})();
   return busy;
  }
+ const sampler=createActivitySampler({sample:refresh,now});
  return {
   snapshot:()=>state||snapshot(),
   refresh,
   subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener);},
-  start(){closed=false;void refresh(true);timer=setInterval(()=>{void refresh(false);},tickMs);timer.unref?.();},
-  stop(){closed=true;if(timer)clearInterval(timer);timer=null;listeners.clear();},
+  watch:()=>sampler.watch(),
+  start(){closed=false;sampler.start();},
+  stop(){closed=true;sampler.stop();listeners.clear();},
  };
 }

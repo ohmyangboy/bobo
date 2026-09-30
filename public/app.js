@@ -40,6 +40,51 @@ function linkLabel(s){
  if(s.mine.mineStatus==='missing')return '未启用：尚未链接到 ~/.agents/skills';
  return '已链接到 ~/.agents/skills';
 }
+// 技能详情「安装位置与 Agent」：列出本机已安装且支持的 Agent，标记这个技能在每个 Agent 里的状态，
+// 并支持逐个安装 / 移除（通用 Agent 直接读 ~/.agents/skills，没有可管理的链接，只显示状态）。
+let agentInfo=null;
+async function loadAgentInfo(){try{agentInfo=await api('skill/agents');}catch{}}
+const agentStateRank={linked:0,universal:1,other:2,missing:3};
+async function toggleAgentLink(s,a,on){
+ await api('skill/agent',{id:s.id,agent:a.id,enabled:!on});
+ await refresh(true);
+ const fresh=skills.find(x=>x.id===s.id);if(fresh){selected=fresh;renderAgentLinks(fresh);}
+ toast(on?'已从 '+a.name+' 移除 '+s.name:'已安装到 '+a.name);
+}
+function renderAgentLinks(s){
+ const box=$('#agents');box.replaceChildren();
+ const note=text=>{const p=document.createElement('p');p.className='agent-links-note';p.textContent=text;box.append(p);return p;};
+ if(!agentInfo){note('正在读取本机 Agent…');loadAgentInfo().then(()=>{if(agentInfo&&selected?.id===s.id)renderAgentLinks(selected);});return;}
+ // 未启用的「我的技能」不在 ~/.agents/skills 里，先启用再谈单个 Agent。
+ if(s.mine&&s.mine.mineStatus!=='linked'){note(s.mine.mineStatus==='disabled'?'这个技能已停用：先在文件夹视图里打开开关，之后才能安装到各个 Agent。':'这个技能还没有链接到 ~/.agents/skills：先在文件夹视图里「重新链接」或打开开关。');return;}
+ // 只装在某个 Agent 目录里、不在 ~/.agents/skills 的技能没有可安装的源，不做逐个安装。
+ if(s.inCanonical===false){note('这个技能由其它工具直接装在 Agent 的技能目录里，不在 ~/.agents/skills，无法安装到别处。');return;}
+ const live=(agentInfo.agents||[]).filter(a=>a.installed);
+ if(!live.length){note('本机还没有检测到已安装的 Agent。');return;}
+ const states=new Map((s.agentLinks||[]).map(x=>[x.id,x.state]));
+ const summary=document.createElement('p');summary.className='agent-links-summary';
+ summary.textContent='本机已安装 '+live.length+' 个受支持的 Agent，这个技能在 '+live.filter(a=>states.has(a.id)).length+' 个里可见。';
+ box.append(summary);
+ const list=document.createElement('div');list.className='agent-rows';
+ const rows=live.map(a=>({a,state:states.get(a.id)||'missing'})).sort((x,y)=>(agentStateRank[x.state]??9)-(agentStateRank[y.state]??9)||x.a.name.localeCompare(y.a.name));
+ for(const {a,state} of rows){
+  const row=document.createElement('div');row.className='agent-row';row.dataset.state=state;
+  const name=document.createElement('span');name.className='agent-name';name.textContent=a.name;name.title=a.dir;
+  const mark=document.createElement('span');mark.className='agent-mark';
+  mark.textContent=state==='linked'?'已安装':state==='universal'?'通用 · 自动可用':state==='other'?'已有同名内容':'未安装';
+  row.append(name,mark);
+  if(state==='linked'||state==='missing'){
+   const on=state==='linked';
+   const b=button(on?'移除':'安装','agent-action'+(on?'':' primary'),async()=>{b.disabled=true;try{await toggleAgentLink(s,a,on);}finally{b.disabled=false;}});
+   b.title=(on?'删除 '+a.name+' 技能目录里的这条链接：':'在 '+a.name+' 的技能目录里建立链接：')+a.dir;
+   row.append(b);
+  }else if(state==='other'){
+   row.title='目录里已有同名内容，不是 bobo 建的链接，请手动处理：'+a.dir;
+  }
+  list.append(row);
+ }
+ box.append(list);
+}
 function render() {
  const q=$('#search').value.toLowerCase();
  const rows=skills.filter(s=>[s.name,s.description,s.source,skillGroup(s).label].join(' ').toLowerCase().includes(q));
@@ -146,8 +191,8 @@ function renderFolder(){
  }
  if(!rows.length){const p=document.createElement('p');p.textContent='此文件夹下没有技能';p.className='muted';$('#folderSkills').append(p);}
 }
-async function refresh(force=false,initial=false){try{const snapshot=initial?await api('startup'):null;skills=snapshot?snapshot.skills:await api('skills'+(force?'?refresh=1':''));try{mineRoots=await api('sources/roots');}catch{}if(snapshot?.cached)setTimeout(()=>guard(()=>refresh(true))(),0);render();if(selected&&!skills.some(s=>s.id===selected.id)){selected=null;current=null;if(!(folder&&!$('#folder').hidden)){$('#detail').hidden=true;$('#empty').hidden=false;}}else if(selected){selected=skills.find(s=>s.id===selected.id);}if(folder&&!$('#folder').hidden)renderFolder();}catch(e){$('#count').textContent='加载失败';throw e;}}
-async function choose(s){if(!leave())return;const run=++selectionRun;selected=s;folder=skillGroup(s).key;showDetailView();markFolder(folder);$('#backToFolder').hidden=false;$('#backToFolder').textContent='← 返回 '+folderInfo().label;$('#reader').scrollTop=0;groupState.set(folder,true);current=null;$('#name').textContent=s.name;$('#originText').textContent=s.mine?('我的技能 · '+(s.mine.repo||'未同步 GitHub')):(s.source||'本地技能');$('#description').textContent=s.description||'此技能暂未提供描述。';$('#location').textContent=s.mine?s.mine.root+'（'+linkLabel(s)+'）':s.path;$('#agents').textContent=s.mine?linkLabel(s):'Agent：'+s.agents.join('、');$('#updateOne').disabled=!s.source||!!s.mine;const address=addressOf(s);$('#sourceLink').hidden=!address;$('#sourceLink').textContent=address.includes('github.com')?'在 GitHub 打开 ↗':'打开来源 ↗';readerData=null;readerSkill=s.id;readerFile=null;bilingual=false;summaryExpanded=false;$('#summaryStatus').hidden=true;setView('read');render();try{const files=await api('tree?id='+s.id);if(run!==selectionRun)return;renderTree(files,true);}catch(e){if(run!==selectionRun)return;renderTree([],true,e.message);}await openFile('SKILL.md',true);}
+async function refresh(force=false,initial=false){try{const snapshot=initial?await api('startup'):null;skills=snapshot?snapshot.skills:await api('skills'+(force?'?refresh=1':''));try{mineRoots=await api('sources/roots');}catch{}if(!agentInfo)await loadAgentInfo();if(snapshot?.cached)setTimeout(()=>guard(()=>refresh(true))(),0);render();if(selected&&!skills.some(s=>s.id===selected.id)){selected=null;current=null;if(!(folder&&!$('#folder').hidden)){$('#detail').hidden=true;$('#empty').hidden=false;}}else if(selected){selected=skills.find(s=>s.id===selected.id);}if(folder&&!$('#folder').hidden)renderFolder();}catch(e){$('#count').textContent='加载失败';throw e;}}
+async function choose(s){if(!leave())return;const run=++selectionRun;selected=s;folder=skillGroup(s).key;showDetailView();markFolder(folder);$('#backToFolder').hidden=false;$('#backToFolder').textContent='← 返回 '+folderInfo().label;$('#reader').scrollTop=0;groupState.set(folder,true);current=null;$('#name').textContent=s.name;$('#originText').textContent=s.mine?('我的技能 · '+(s.mine.repo||'未同步 GitHub')):(s.source||'本地技能');$('#description').textContent=s.description||'此技能暂未提供描述。';$('#location').textContent=s.mine?s.mine.root+'（'+linkLabel(s)+'）':s.path;renderAgentLinks(s);$('#updateOne').disabled=!s.source||!!s.mine;const address=addressOf(s);$('#sourceLink').hidden=!address;$('#sourceLink').textContent=address.includes('github.com')?'在 GitHub 打开 ↗':'打开来源 ↗';readerData=null;readerSkill=s.id;readerFile=null;bilingual=false;summaryExpanded=false;$('#summaryStatus').hidden=true;setView('read');render();try{const files=await api('tree?id='+s.id);if(run!==selectionRun)return;renderTree(files,true);}catch(e){if(run!==selectionRun)return;renderTree([],true,e.message);}await openFile('SKILL.md',true);}
 // 文件树：把平铺路径还原成目录层级，文件夹行可点击展开/折叠。默认全部收起，只自动展开当前文件所在的目录。
 const openDirs=new Set();
 function buildTree(files){
@@ -322,7 +367,7 @@ function startAppPolling(){
  api('update/check',{auto:true}).then(info=>{appInfo=info;renderVersion();renderAbout();}).catch(()=>{});
 }
 function stopAppPolling(){if(appTimer){clearInterval(appTimer);appTimer=null;}}
-document.addEventListener('visibilitychange',()=>setWindowActive(!document.hidden));
+document.addEventListener('visibilitychange',()=>setWindowActive(nativeWindowActive&&!document.hidden));
 const openRepo=()=>api('open',{url:appInfo?.repoUrl||fallbackRepo});
 $('#repoLink').onclick=guard(()=>openRepo());
 $('#aboutRepo').onclick=guard(()=>openRepo());
@@ -1204,11 +1249,12 @@ async function islandLoop(run){
   if(islandStream&&run===islandRun)await new Promise(r=>setTimeout(r,1500));
  }
 }
-function openIsland(){if(islandStream)return;islandStream=true;const run=++islandRun;islandLoop(run);watchTerminals();islandWatch=setInterval(watchTerminals,4000);islandClock=setInterval(refreshSessionTimes,1000);}
+function openIsland(){if(!windowActive||islandStream)return;islandStream=true;const run=++islandRun;islandLoop(run);watchTerminals();islandWatch=setInterval(watchTerminals,4000);islandClock=setInterval(refreshSessionTimes,1000);}
 function islandClose(){islandStream=null;islandRun++;islandController?.abort();islandController=null;islandReader?.cancel().catch(()=>{});islandReader=null;if(islandWatch){clearInterval(islandWatch);islandWatch=null;}if(islandClock){clearInterval(islandClock);islandClock=null;}}
 // 原生把主窗口 orderOut 时不一定触发 WKWebView 的 visibilitychange；显式同步页面生命周期，避免隐藏后仍保留流和定时器。
-let windowActive=true;
+let windowActive=true,nativeWindowActive=true;
 function setWindowActive(active){
+ document.body.classList.toggle('window-inactive',!active);
  if(windowActive===active)return;
  windowActive=active;
  if(!active){islandClose();usageClose();deviceClose();stopAppPolling();syncProcessPolling();return;}
@@ -1217,7 +1263,7 @@ function setWindowActive(active){
  if(islandView==='usage')openUsage();
  if(islandView==='device')openDevice();
 }
-window.__boboSetWindowActive=setWindowActive;
+window.__boboSetWindowActive=active=>{nativeWindowActive=active;setWindowActive(active&&!document.hidden);};
 // 终端归属只在通知岛打开时扫描：定期让服务端续期（10 秒），关掉视图后不再续期，服务端就停扫。
 function watchTerminals(){api('terminals/watch',{}).catch(()=>{});}
 // 点击会话跳到对应终端（Otty / Ghostty / Terminal.app）的标签页：由 bobo 服务完成匹配与切换。
@@ -1230,9 +1276,9 @@ $('#islandRows').onchange=guard(async()=>{islandState.settings=await api('openco
 // 打开视图时拉一次最新值，之后每分钟刷新一次；关闭视图就停掉定时器。点击左侧来源会同时切到该分栏，
 // 并把刘海胶囊的额度指示也切到这家（POST /api/usage/provider）。
 let usageData=null,usageTimer=null;
-const usagePanes=['codex','opencode','agy'];
-const usageProviderId=pane=>pane==='opencode'?'opencode-go':pane==='agy'?'agy':'codex';
-const usagePaneFor=id=>id==='opencode-go'?'opencode':id==='agy'?'agy':'codex';
+const usagePanes=['codex','claude','opencode','agy'];
+const usageProviderId=pane=>pane==='opencode'?'opencode-go':pane;
+const usagePaneFor=id=>id==='opencode-go'?'opencode':id;
 // 侧栏来源顺序（拖动排序用）：记录上一次应用过的顺序，避免状态流每次推送都重排 DOM。
 let usageSidebarOrder='';
 const fmtPercent=v=>Number.isInteger(v)?String(v):v.toFixed(1);
@@ -1292,7 +1338,8 @@ function usageCard(w){
  const foot=document.createElement('div');foot.className='usage-card-foot';
  const limitTxt=w.limitUSD?'已用 '+money(w.usedUSD)+' / $'+w.limitUSD:'已用 '+fmtPercent(w.usedPercent)+'%';
  const used=document.createElement('span');used.textContent=limitTxt+(w.status&&w.status!=='ok'?' · 已限额':'');
- const reset=document.createElement('span');reset.textContent=resetText(w.resetInSec);
+ // 没有重置时间的金额窗口（Claude 的额外用量按账单月结算）不显示倒计时。
+ const reset=document.createElement('span');reset.textContent=w.resetInSec?resetText(w.resetInSec):(w.limitUSD?'按账单月结算':'可重新计算');
  foot.append(used,reset);
  card.append(head,meter,foot);
  return card;
@@ -1322,7 +1369,7 @@ function usageSwitch(row,label,on,id){
 function renderUsage(){
  const data=usageData;
  const byId=id=>data?.providers?.find(p=>p.id===id)||null;
- const codex=byId('codex'),local=byId('opencode-go'),agy=byId('agy');
+ const codex=byId('codex'),claude=byId('claude'),local=byId('opencode-go'),agy=byId('agy');
  // 侧栏按服务端返回的顺序排列（拖动排序后立刻反映出来）：只在顺序变化时 append 移动已有节点，不重建。
  const sidebarIds=(data?.providers||[]).map(p=>usagePaneFor(p.id));
  const sidebarOrder=sidebarIds.join(',');
@@ -1334,9 +1381,11 @@ function renderUsage(){
  $('#usageState').textContent=!data?'读取中':data.available?'已连接':'暂不可用';
  $('#usageUpdated').textContent=data?.updatedAt?'更新于 '+new Date(data.updatedAt).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'每分钟刷新';
  $('#usageDotCodex').dataset.state=codex?.available?'idle':'';
+ $('#usageDotClaude').dataset.state=claude?.available?'idle':'';
  $('#usageDotOpencode').dataset.state=local?.available?'idle':'';
  $('#usageDotAgy').dataset.state=agy?.available?'idle':'';
  usageSwitch('#rowUsageCodex','刘海胶囊可切换到此来源',codex?.enabled!==false,'codex');
+ usageSwitch('#rowUsageClaude','刘海胶囊可切换到此来源',claude?.enabled!==false,'claude');
  usageSwitch('#rowUsageOpencode','刘海胶囊可切换到此来源',local?.enabled!==false,'opencode-go');
  usageSwitch('#rowUsageAgy','刘海胶囊可切换到此来源',agy?.enabled!==false,'agy');
  // 额度重置提醒：Codex 的窗口回到 100% 时提醒（服务端检测并走通知岛的提醒通道）。
@@ -1345,7 +1394,15 @@ function renderUsage(){
  resetRow.append(toggleSwitch(data?.notifyReset!==false,'额度重置时提醒',async value=>{usageData=await api('usage/reset-notify',{enabled:value});renderUsage();}));
  $('#usageKeyStatus').textContent=data?(local?.keySource==='manual'?'手动配置'+(local?.keyHint?'（尾号 '+local.keyHint+'）':''):local?.keySource==='env'?'环境变量 OPENCODE_API_KEY':local?.keySource==='auth'?'opencode 本机登录':'未配置（可退回本机估算）'):'读取中…';
  $('#usageKeyClear').disabled=local?.keySource!=='manual';
+ // Claude Code：登录来源（~/.claude/.credentials.json / 钥匙串 / 手动 Token / 环境变量）与额度窗口；
+ // 直连（没有 VPN / 代理）时默认整个跳过请求，这里给一个显式开关。
+ const claudeDirectRow=$('#rowUsageClaudeDirect');
+ claudeDirectRow.querySelector('.switch')?.remove();
+ claudeDirectRow.append(toggleSwitch(data?.claudeDirect===true,'直连时也请求',async value=>{usageData=await api('usage/claude-direct',{enabled:value});renderUsage();toast(value?'直连时也会请求 Claude 额度':'直连时不再请求 Claude 额度');}));
+ $('#usageClaudeKeyStatus').textContent=data?(claude?.keySource==='manual'?'手动 Token'+(claude?.keyHint?'（尾号 '+claude.keyHint+'）':''):claude?.keySource==='env'?'环境变量 CLAUDE_CODE_OAUTH_TOKEN':claude?.keySource==='file'?'~/.claude/.credentials.json':claude?.keySource==='keychain'?'macOS 钥匙串（Claude Code-credentials）':'未检测到登录'):'读取中…';
+ $('#usageClaudeKeyClear').disabled=claude?.keySource!=='manual';
  renderUsageWindows('#usageCodexWindows',codex);
+ renderUsageWindows('#usageClaudeWindows',claude);
  renderUsageWindows('#usageOpencodeWindows',local);
  renderUsageWindows('#usageAgyWindows',agy);
  const codexBits=[];
@@ -1355,6 +1412,13 @@ function renderUsage(){
  if(codex?.available&&!codex.windows.length)codexBits.push('这个套餐目前没有返回窗口额度');
  if(codex?.error)codexBits.push('⚠ '+codex.error);
  $('#usageCodexNote').textContent=codexBits.join('；')||'额度窗口由 ChatGPT 返回，重置时间以服务端为准。';
+ // Claude Code：窗口直接来自 Anthropic 的用量接口，说明里带上套餐与登录来源。
+ const claudeBits=[];
+ if(claude?.needsDirectConfirm)claudeBits.unshift('检测到直连（没有 VPN / 代理）：已跳过请求，点「刷新额度」可确认后请求一次');
+ if(claude?.plan)claudeBits.push('套餐：'+claude.plan);
+ if(claude?.available&&!claude.windows.length)claudeBits.push('这个账号目前没有返回额度窗口');
+ if(claude?.error)claudeBits.push('⚠ '+claude.error);
+ $('#usageClaudeNote').textContent=claudeBits.join('；')||'额度窗口来自 Anthropic 的用量接口（/api/oauth/usage），只读本机登录、不刷新也不改写凭据。';
  const agyBits=[];
  if(agy?.plan)agyBits.push('方案：'+agy.plan);
  if(agy?.available&&!agy.windows.length)agyBits.push('当前没有返回窗口额度');
@@ -1391,7 +1455,19 @@ async function loadUsage(){
   renderUsage();
  }catch(e){toast(e.message);}
 }
-$('#usageRefresh').onclick=guard(async()=>{$('#usageRefresh').disabled=true;try{await loadUsage();toast('已刷新额度');}finally{$('#usageRefresh').disabled=false;}});
+const usageClaudeDirect=()=>usageData?.providers.find(p=>p.id==='claude');
+// Claude 的直连确认：服务端发现没走 VPN / 代理时会先跳过请求（避免从直连 IP 携带登录被风控），
+// 用户在这里明确确认后再带 ?direct=1 / {direct:true} 请求一次；不想每次确认可以在分栏里打开开关。
+const claudeDirectAsk=()=>confirm('当前到 Claude 的路径是直连（没有 VPN / 代理），携带登录请求可能被 Anthropic 风控。\n\n仍然请求一次吗？（不想每次确认，可在「用量 → Claude Code」里打开「直连时也请求」）');
+$('#usageRefresh').onclick=guard(async()=>{
+ const button=$('#usageRefresh');button.disabled=true;
+ try{
+  let data=await api('usage?refresh=1');
+  if(data?.providers.find(p=>p.id==='claude')?.needsDirectConfirm&&claudeDirectAsk())data=await api('usage?refresh=1&direct=1');
+  usageData=data;showUsagePane(usagePaneFor(data.selected));renderUsage();
+  toast('已刷新额度');
+ }finally{button.disabled=false;}
+});
 // 手动 Key：保存前先让服务端调一次接口验证；清除后回退到环境变量 / opencode 本机登录。
 $('#usageKeyForm').onsubmit=guard(async e=>{
  e.preventDefault();
@@ -1410,13 +1486,45 @@ $('#usageKeyClear').onclick=guard(async()=>{
  usageData=r.snapshot||await api('usage');renderUsage();
  toast(r.message);
 });
-function openUsage(){if(usageTimer)return;loadUsage();usageTimer=setInterval(()=>guard(loadUsage)(),60000);}
+// Claude Code：手动 Token 的保存 / 清除，以及显式读取 macOS 钥匙串（读一次并验证，之后 bobo 自动读、不再弹授权）。
+// 保存 Token 与读取钥匙串都会真的带一次登录请求：被直连闸门拦下时先确认，再带 direct 重试。
+async function claudeKeyAction(payload){
+ let r=await api('usage/key',{id:'claude',...payload});
+ if(r?.needsDirectConfirm&&claudeDirectAsk())r=await api('usage/key',{id:'claude',...payload,direct:true});
+ return r;
+}
+$('#usageClaudeKeyForm').onsubmit=guard(async e=>{
+ e.preventDefault();
+ const key=$('#usageClaudeKey').value.trim();
+ if(!key)return toast('请输入 OAuth Token');
+ $('#usageClaudeKeySave').disabled=true;
+ try{
+  const r=await claudeKeyAction({key});
+  usageData=r.snapshot||await api('usage');renderUsage();
+  if(r.ok)$('#usageClaudeKey').value='';
+  toast(r.message);
+ }finally{$('#usageClaudeKeySave').disabled=false;}
+});
+$('#usageClaudeKeyClear').onclick=guard(async()=>{
+ const r=await api('usage/key',{id:'claude',clear:true});
+ usageData=r.snapshot||await api('usage');renderUsage();
+ toast(r.message);
+});
+$('#usageClaudeKeychain').onclick=guard(async()=>{
+ const button=$('#usageClaudeKeychain');button.disabled=true;
+ try{
+  const r=await claudeKeyAction({keychain:true});
+  usageData=r.snapshot||await api('usage');renderUsage();
+  toast(r.message);
+ }finally{button.disabled=false;}
+});
+function openUsage(){if(!windowActive||usageTimer)return;loadUsage();usageTimer=setInterval(()=>guard(loadUsage)(),60000);}
 function usageClose(){if(usageTimer){clearInterval(usageTimer);usageTimer=null;}}
 
 // 设备：CPU / 内存 / 磁盘 / 网络四项本机指标。服务端常驻采样，这里每 3 秒读一次快照，离开视图就停掉定时器。
 // 进程列表另走按需接口（服务端缓存 1.5 秒）：只在设备视图可见、当前分栏有进程且页面在前台时每 3 秒拉一次，
 // 切走或切到后台立即停——这块的开销全在这里，不在服务端常驻采样里。
-let deviceData=null,networkData=null,deviceTimer=null,devicePane='cpu',processTimer=null,processRows='',processData=null,processSortSeen='';
+let deviceData=null,networkData=null,deviceTimer=null,devicePane='cpu',processTimer=null,processRows='',processData=null,processSortSeen='',linksData=null,linksTimer=null,linksFollowup=null,linksLoading=false;
 const devicePanes=['cpu','memory','disk','network'];
 function showDevicePane(name){
  const next=devicePanes.includes(name)?name:devicePanes[0];
@@ -1424,13 +1532,14 @@ function showDevicePane(name){
  for(const p of document.querySelectorAll('#deviceWorkspace [data-device-pane-content]'))p.hidden=p.dataset.devicePaneContent!==next;
  for(const b of document.querySelectorAll('#deviceWorkspace [data-device-pane]'))b.setAttribute('aria-pressed',String(b.dataset.devicePane===next));
  syncProcessPolling();
+ syncLinksPolling();
 }
 for(const b of document.querySelectorAll('#deviceWorkspace [data-device-pane]'))b.onclick=()=>showDevicePane(b.dataset.devicePane);
 // 进程列表：CPU 分栏按占用率、内存分栏按常驻内存（RSS）排序，服务端只回前 15 条。
 function processSort(){return devicePane==='memory'?'memory':'cpu';}
 function processBox(){return devicePane==='memory'?$('#deviceMemoryProcesses'):$('#deviceProcesses');}
 function syncProcessPolling(){
- const active=!$('#deviceWorkspace').hidden&&(devicePane==='cpu'||devicePane==='memory')&&!document.hidden;
+ const active=windowActive&&!$('#deviceWorkspace').hidden&&(devicePane==='cpu'||devicePane==='memory')&&!document.hidden;
  if(!active){if(processTimer){clearInterval(processTimer);processTimer=null;}return;}
  const sort=processSort(),start=!processTimer;
  if(start)processTimer=setInterval(loadProcesses,3000);
@@ -1438,6 +1547,7 @@ function syncProcessPolling(){
  processSortSeen=sort;
 }
 document.addEventListener('visibilitychange',syncProcessPolling);
+document.addEventListener('visibilitychange',syncLinksPolling);
 async function loadProcesses(){
  const sort=processSort();
  try{
@@ -1476,6 +1586,95 @@ function renderProcesses(sort){
  foot.textContent=[data.error||'','bobo 固定在最前',(sort==='memory'?'按内存占用排序':'按 CPU 占用排序'),'共 '+(data.count??rows.length)+' 个进程',data.updatedAt?'更新于 '+deviceClock(data.updatedAt):''].filter(Boolean).join(' · ');
  box.append(foot);
 }
+// 服务线路：延迟信号 + 出口 IP 与纯净度。只在「设备 → 网络」分栏打开、页面在前台时拉取：
+// 打开时自动检测一次，之后每分钟一次，右下角「检测线路」可强制。探测在服务端后台跑
+// （checking 为真时 1.2 秒后再拉一次），数据都来自服务端缓存，页面不做任何网络判断。
+const linkIcons={direct:'sf-network',proxy:'sf-network',codex:'provider-codex',claude:'provider-claude',opencode:'provider-opencode',deepseek:'provider-dsh',agy:'provider-agy'};
+function syncLinksPolling(){
+ const active=windowActive&&!$('#deviceWorkspace').hidden&&devicePane==='network'&&!document.hidden;
+ if(!active){
+  if(linksTimer){clearInterval(linksTimer);linksTimer=null;}
+  if(linksFollowup){clearTimeout(linksFollowup);linksFollowup=null;}
+  return;
+ }
+ if(!linksTimer){linksTimer=setInterval(()=>loadLinks(),60000);loadLinks();}
+}
+async function loadLinks(force=false){
+ if(linksLoading)return;
+ linksLoading=true;
+ try{linksData=await api('links'+(force?'?refresh=1':''));}
+ catch(e){linksData={...(linksData||{}),error:e.message,checking:false};}
+ finally{linksLoading=false;}
+ renderLinks();
+ if(linksFollowup){clearTimeout(linksFollowup);linksFollowup=null;}
+ if(linksData.checking&&windowActive&&!document.hidden&&!$('#deviceWorkspace').hidden&&devicePane==='network')linksFollowup=setTimeout(()=>{linksFollowup=null;loadLinks();},1200);
+}
+// IPv6 太长，只留头两组与最后一组；完整地址在悬停提示里。
+const shortIp=ip=>{const s=String(ip||'');if(!s.includes(':'))return s;const p=s.split(':');return p.length>3?p[0]+':'+p[1]+':…:'+p[p.length-1]:s;};
+const shortProxy=p=>String(p||'').replace(/^[a-z0-9]+:\/\//i,'');
+// 副标题里只放「这条线路本身」的信息：服务域名、出口 IP 与位置；路线（经代理 / 直连）、
+// 出口归属（ASN 名称）与详情都在悬停提示里，避免把类型 / 风控挤出这一行。
+// 位置用中点分隔而不是括号：放不下时从尾巴截断，不会留下半个括号。
+const linkBits=r=>{
+ const bits=[];
+ if(r.kind==='exit')bits.push(r.id==='direct'?'系统路由（可能含 VPN）':'系统代理 '+shortProxy(r.proxy));
+ else bits.push(r.show||r.host||'');
+ if(r.ip){
+  const place=r.kind==='exit'?[r.city,r.country].filter((v,i,a)=>v&&a.indexOf(v)===i).join(' · ')
+   :r.ipSource==='route'?'参考出口':r.loc;
+  bits.push('出口 '+shortIp(r.ip)+(place?' · '+place:''));
+ }else if(!r.ok)bits.push(r.error||'探测失败');
+ return bits.filter(Boolean);
+};
+function linkTitle(r){
+ const bits=[r.ok?'首字节 '+r.ms+' ms'+(r.tlsMs?' · TLS '+r.tlsMs+' ms':'')+' · HTTP '+r.status:'探测失败：'+(r.error||'未知原因')];
+ bits.push(r.via==='proxy'?'经系统代理 '+(r.proxy||''):'系统路由（未使用显式代理，可能含 VPN）');
+ if(r.ip)bits.push('出口 '+r.ip+(r.kind==='service'&&r.ipSource==='route'?'（参考出口，服务未回显）':''));
+ if(r.colo)bits.push('Cloudflare '+r.colo+' 节点');
+ if(r.loc)bits.push('位置 '+r.loc);
+ if(r.info?.typeText)bits.push('类型 '+r.info.typeText+(r.info.source?'（'+r.info.source+'）':''));
+ if(r.info?.risk!==null&&r.info?.risk!==undefined)bits.push('风控 '+r.info.risk);
+ if(r.checkedAt)bits.push('检测于 '+deviceClock(r.checkedAt));
+ return bits.join(' · ');
+}
+function renderLinks(){
+ const box=$('#deviceLinks');if(!box)return;
+ const data=linksData||{},rows=data.rows||[];
+ box.replaceChildren();
+ if(!rows.length){
+  const p=document.createElement('div');p.className='link-empty';p.textContent=data.error||'正在检测…';box.append(p);
+ }else{
+  for(const r of rows){
+   const row=document.createElement('div');row.className='link-row';row.title=linkTitle(r);
+   row.append(providerGlyph({icon:linkIcons[r.id]||'sf-network'}));
+   const main=document.createElement('div');main.className='link-main';
+   const name=document.createElement('div');name.className='link-name';name.textContent=r.name||'';main.append(name);
+   const sub=document.createElement('div');sub.className='link-sub';
+   const text=document.createElement('span');text.className='link-sub-text';text.textContent=linkBits(r).join(' · ');
+   sub.append(text);
+   // 出口类型 / 风控值单独成段、不参与截断（这是这条线路最该看的信息），按纯净度上色。
+   if(r.info?.typeText&&r.info.source){
+    const chip=document.createElement('span');chip.className='link-purity';chip.dataset.level=r.info.level||'';
+    chip.textContent=r.info.typeText+(r.info.risk===null||r.info.risk===undefined?'':' · 风控 '+r.info.risk);
+    sub.append(chip);
+   }
+   main.append(sub);row.append(main);
+   const lat=document.createElement('div');lat.className='link-latency';
+   const sig=document.createElement('span');sig.className='link-signal';sig.dataset.level=r.level||'low';sig.setAttribute('aria-label','线路信号 '+(r.bars||0)+' 格，共 4 格');
+   for(let i=0;i<4;i++){const bar=document.createElement('i');if(i<r.bars)bar.className='on';sig.append(bar);}
+   const ms=document.createElement('b');ms.textContent=r.ok?r.ms+' ms':'—';
+   lat.append(sig,ms);row.append(lat);
+   const health=document.createElement('span');health.className='link-health';health.dataset.level=r.health||'low';health.textContent=r.healthText||'';
+   row.append(health);
+   box.append(row);
+  }
+ }
+ const foot=document.createElement('div');foot.className='link-foot';
+ foot.textContent=[data.checking?'正在检测…':data.updatedAt?'更新于 '+deviceClock(data.updatedAt):'等待检测',data.error||''].filter(Boolean).join(' · ');
+ box.append(foot);
+ $('#linksRefresh').disabled=Boolean(data.checking||linksLoading);
+}
+$('#linksRefresh').onclick=guard(async()=>{$('#linksRefresh').disabled=true;await loadLinks(true);});
 // 容量单位照 macOS 的习惯：内存用 About This Mac 的口径（GiB 记作 GB，24 GiB 的机器就是 24 GB），
 // 磁盘用 Finder 的十进制（494 GB 的容器就是 494 GB）。两边都写「GB」，只是各自的进位方式。
 const deviceGB=(bytes,binary=false)=>{const v=(Number(bytes)||0)/(binary?2**30:1e9);return (v>=100?Math.round(v):Math.round(v*10)/10)+' GB';};
@@ -1615,8 +1814,8 @@ async function loadDevice(force=false){
  else{const e=devices.reason;$('#deviceState').textContent='不可用';$('#deviceState').title=e.message;}
  renderNetwork();
 }
-function openDevice(){if(deviceTimer)return;loadDevice();deviceTimer=setInterval(loadDevice,3000);syncProcessPolling();}
-function deviceClose(){if(deviceTimer){clearInterval(deviceTimer);deviceTimer=null;}syncProcessPolling();}
+function openDevice(){if(!windowActive||deviceTimer)return;loadDevice();deviceTimer=setInterval(loadDevice,3000);syncProcessPolling();syncLinksPolling();}
+function deviceClose(){if(deviceTimer){clearInterval(deviceTimer);deviceTimer=null;}syncProcessPolling();syncLinksPolling();}
 // 右下角的悬浮「刷新设备」：强制服务端立刻全量采一次（磁盘常驻采样约 60 秒一轮、网络延迟约 6 秒一轮，等不起）。
 $('#deviceRefresh').onclick=guard(async()=>{$('#deviceRefresh').disabled=true;try{await loadDevice(true);toast('已刷新设备信息');}finally{$('#deviceRefresh').disabled=false;}});
 

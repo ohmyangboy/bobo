@@ -59,7 +59,7 @@ bobo 可以说是个融合怪：
 | --- | --- | --- | --- | --- |
 | OpenCode | ✅ 事件流实时 | — | 全局技能（读写） | ✅ 智能体定义 + 全局配置 |
 | Codex CLI | ✅ 轮询 rollout | ✅ ChatGPT 订阅额度 | 全局技能（链接） | ✅ TOML 智能体 + 全局配置 |
-| Claude Code | ✅ 活跃注册表 + 会话日志 | — | 全局技能（链接） | ✅ 全局配置 |
+| Claude Code | ✅ 活跃注册表 + 会话日志 | ✅ Claude 订阅额度 | 全局技能（链接） | ✅ 全局配置 |
 | omp（Oh My Pi） | ✅ 轮询会话文件 | — | 全局技能（链接） | ✅ 全局配置 |
 | DeepSeek Harness（dsh） | ✅ 投影缓存 | — | 全局技能（链接） | ✅ 全局配置 |
 | Google Antigravity（agy） | ✅ SQLite 会话库 | ✅ 各模型组配额 | 全局技能（链接） | ✅ 全局配置 |
@@ -85,10 +85,10 @@ npm start                  # 或只跑本地服务 → http://127.0.0.1:4318
 
 ## 功能
 
-- **通知岛**：贴住刘海的常驻胶囊，把 OpenCode、Codex、omp、Claude Code、dsh、agy 的会话状态变成看得见、听得到的提醒；悬停展开会话卡片，点击回到对应终端。
-- **额度**：Codex、OpenCode Go 与 Antigravity 的剩余额度（5 小时 / 本周 / 账单月），只读取本机登录与用量，不改写任何凭据。
-- **系统状态**：CPU（整机与每核占用、负载）、内存（压力与页统计）、磁盘占用，以及 Top 进程；网络延迟与下载 / 上传速率（刘海胶囊上是三枚垂直排列的灯珠）。
-- **技能**：阅读、编辑、安装、更新、删除 `~/.agents/skills` 里的全局技能，浏览 SKILL.md 与子文件；「我的 Skill」管理任意本地技能目录并一键同步到 GitHub。
+- **通知岛**：贴住刘海的常驻胶囊，把 OpenCode、Codex、omp、Claude Code、dsh、agy 的会话状态变成看得见、听得到的提醒；悬停展开会话卡片，点击回到对应终端；会话行右侧还有线路指示（四格信号 + 出口 IP 类型与风控值，悬停看完整读数）。
+- **额度**：Codex、Claude Code、OpenCode Go 与 Antigravity 的剩余额度（5 小时 / 本周 / 账单月），只读取本机登录与用量，不改写任何凭据。
+- **系统状态**：CPU（整机与每核占用、负载）、内存（压力与页统计）、磁盘占用，以及 Top 进程；网络延迟与下载 / 上传速率（刘海胶囊上是三枚垂直排列的灯珠），以及每条服务线路的延迟信号与出口 IP 纯净度（Codex / Claude Code / OpenCode Go / DeepSeek / Antigravity，类似 ping0.cc 的部分能力）。
+- **技能**：阅读、编辑、安装、更新、删除 `~/.agents/skills` 里的全局技能，浏览 SKILL.md 与子文件；「我的 Skill」管理任意本地技能目录并一键同步到 GitHub。详情里能看到每个技能装到了哪些本机 Agent，并逐个安装 / 移除。
 - **智能体**：管理 OpenCode 与 Codex CLI 的自定义智能体定义，阅读并调节六家 harness 的全局配置。
 - **AI**：按段落翻译全文、生成能力总结（OpenAI 兼容接口，可用 DeepSeek）。
 

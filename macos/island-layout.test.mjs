@@ -23,6 +23,35 @@ async function swiftSlice(start, end) {
  return source.slice(from,to);
 }
 
+test('通知岛省电：折叠常驻静态，只有可见展开态允许呼吸', {skip:process.platform!=='darwin'}, async()=>{
+ const declarations=await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {');
+ const model=await swiftSlice('enum IslandDetailKind:','// 通知岛面板：黑色卡片贴住刘海');
+ await checkSwift(declarations+'\n'+model,`
+let model = IslandModel()
+precondition(model.onScreen && !model.motionActive)
+model.hovering = true
+precondition(model.motionActive)
+model.screenAwake = false
+precondition(!model.motionActive)
+model.screenAwake = true
+precondition(model.motionActive)
+model.yielding = true
+precondition(!model.motionActive)
+model.yielding = false
+model.settings.notch = false
+precondition(!model.motionActive)
+model.settings.notch = true
+model.hovering = false
+model.autoRevealed = true
+precondition(model.motionActive)
+model.settings.autoExpand = false
+precondition(!model.motionActive)
+model.settings.hideWhenIdle = true
+model.hovering = true
+precondition(!model.motionActive)
+`);
+});
+
 test('通知岛动画：非对称两翼变化时让位中心与顶边保持稳定，中途反向连续', {skip:process.platform!=='darwin'}, async()=>{
  await checkSwift(await swiftSlice('struct IslandBarLayout:','// 顶部栏的排布计算（纯函数'),`
 func near(_ a: CGFloat, _ b: CGFloat) { precondition(abs(a-b) < 0.00001, "坐标不连续或锚点漂移") }
@@ -110,23 +139,23 @@ test('通知岛额度：并排显示的固定上限与自适应数量', {skip:pr
  await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {'),`
  let wide: CGFloat = 1512, keepOut: CGFloat = 214
  // 没有可用来源 → 0 枚；只有一家 → 1 枚（不并排，但也不隐藏）。
- precondition(IslandBarGeometry.quotaChips(count: 0, limit: 0, screenWidth: wide, keepOut: keepOut, device: true, network: true, hoverButtons: true) == 0)
- precondition(IslandBarGeometry.quotaChips(count: 1, limit: 0, screenWidth: wide, keepOut: keepOut, device: true, network: true, hoverButtons: true) == 1)
+ precondition(IslandBarGeometry.quotaChips(count: 0, limit: 0, screenWidth: wide, keepOut: keepOut, device: true, network: true, actionButtons: true) == 0)
+ precondition(IslandBarGeometry.quotaChips(count: 1, limit: 0, screenWidth: wide, keepOut: keepOut, device: true, network: true, actionButtons: true) == 1)
  // 固定上限：3 家封顶时 5 家只排 3 枚；上限大于来源数时按来源数。
- precondition(IslandBarGeometry.quotaChips(count: 5, limit: 3, screenWidth: wide, keepOut: keepOut, device: true, network: true, hoverButtons: true) == 3)
- precondition(IslandBarGeometry.quotaChips(count: 3, limit: 7, screenWidth: wide, keepOut: keepOut, device: true, network: true, hoverButtons: true) == 3)
+ precondition(IslandBarGeometry.quotaChips(count: 5, limit: 3, screenWidth: wide, keepOut: keepOut, device: true, network: true, actionButtons: true) == 3)
+ precondition(IslandBarGeometry.quotaChips(count: 3, limit: 7, screenWidth: wide, keepOut: keepOut, device: true, network: true, actionButtons: true) == 3)
  // 自适应：内置刘海屏（1512 宽）上 5 家都排得下。
- precondition(IslandBarGeometry.quotaChips(count: 5, limit: 0, screenWidth: wide, keepOut: keepOut, device: true, network: true, hoverButtons: true) == 5)
+ precondition(IslandBarGeometry.quotaChips(count: 5, limit: 0, screenWidth: wide, keepOut: keepOut, device: true, network: true, actionButtons: true) == 5)
  // 窄屏 / 有刘海时按空间收缩：600 宽、设备 + 网络占两格、中轴线到右缘剩 159pt，
  // 4 枚额度 + 设备 + 网络共 6 格 = 157pt（再来一枚 184pt 就放不下）。
- precondition(IslandBarGeometry.quotaChips(count: 8, limit: 0, screenWidth: 600, keepOut: keepOut, device: true, network: true, hoverButtons: false) == 4)
- precondition(IslandBarGeometry.quotaChips(count: 8, limit: 0, screenWidth: 600, keepOut: keepOut, device: true, network: false, hoverButtons: false) == 5)
+ precondition(IslandBarGeometry.quotaChips(count: 8, limit: 0, screenWidth: 600, keepOut: keepOut, device: true, network: true, actionButtons: false) == 4)
+ precondition(IslandBarGeometry.quotaChips(count: 8, limit: 0, screenWidth: 600, keepOut: keepOut, device: true, network: false, actionButtons: false) == 5)
  // 遍历各种屏幕宽度与悬停状态：数量在 1...count 之间，且排出来的宽度不越过中轴线。
  for width in stride(from: 320.0, through: 1800.0, by: 40.0) {
   for device in [false, true] {
    for network in [false, true] {
     for hover in [false, true] {
-     let shown = IslandBarGeometry.quotaChips(count: 8, limit: 0, screenWidth: width, keepOut: keepOut, device: device, network: network, hoverButtons: hover)
+     let shown = IslandBarGeometry.quotaChips(count: 8, limit: 0, screenWidth: width, keepOut: keepOut, device: device, network: network, actionButtons: hover)
      precondition(shown >= 1 && shown <= 8, "自适应数量越界")
      if shown > 1 {
       let reserved = (device ? 1 : 0) + (network ? 1 : 0) + (hover ? 2 : 0)
@@ -140,7 +169,7 @@ test('通知岛额度：并排显示的固定上限与自适应数量', {skip:pr
   }
  }
  // 固定上限同样受空间约束：窄屏上即使选了 7 家也不会越过中轴线。
- let capped = IslandBarGeometry.quotaChips(count: 8, limit: 7, screenWidth: 400, keepOut: keepOut, device: true, network: true, hoverButtons: true)
+ let capped = IslandBarGeometry.quotaChips(count: 8, limit: 7, screenWidth: 400, keepOut: keepOut, device: true, network: true, actionButtons: true)
  precondition(capped < 7 && capped >= 1)
 `);
 });
@@ -204,6 +233,37 @@ test('通知岛额度：圆环显示的范围与并排来源的取舍', {skip:pr
 `);
 });
 
+// 刘海两翼共同扩展；头像随空间增长，溢出徽标占最后一格。
+test('通知岛几何：两翼对称展开，头像按屏幕空间自适应', {skip:process.platform!=='darwin'}, async()=>{
+ await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {'),`
+ let collapsed = IslandBarGeometry.layout(left: 50, right: 76, notch: 179)
+ let expanded = IslandBarGeometry.layout(left: 50, right: 184, notch: 179, minWidth: 560)
+ precondition(collapsed.left == collapsed.right && expanded.left == expanded.right)
+ precondition(expanded.left > collapsed.left && expanded.keepOut == collapsed.keepOut)
+ precondition(IslandBarGeometry.envelope(expanded) >= 560)
+ let a = NSRect(x: 735-IslandBarGeometry.envelope(collapsed)/2, y: 968, width: IslandBarGeometry.envelope(collapsed), height: 32)
+ let b = NSRect(x: 735-IslandBarGeometry.envelope(expanded)/2, y: 800, width: IslandBarGeometry.envelope(expanded), height: 200)
+ for i in 0...60 {
+  let step = IslandLayoutTween.sample(from: a, to: b, fromLayout: collapsed, toLayout: expanded, progress: IslandLayoutTween.progress(Double(i)/60))
+  precondition(abs(step.frame.midX-735) < 0.00001 && abs(step.frame.maxY-1000) < 0.00001)
+  precondition(step.layout.left == step.layout.right)
+ }
+ precondition(IslandLayoutTween.progress(0) == 0 && IslandLayoutTween.progress(1) == 1)
+ for width in stride(from: 400.0, through: 1800.0, by: 40.0) {
+  let cap = IslandBarGeometry.avatarCapacity(screenWidth: width, keepOut: 193)
+  let plan = IslandBarGeometry.avatars(100, cap: cap)
+  precondition(plan.shown + plan.hidden == 100 && plan.shown + 1 == cap)
+  let content = IslandBarGeometry.contentWidths(faces: plan.shown, hidden: plan.hidden, quota: 0, device: false, network: false, actionButtons: false)
+  precondition(content.left + IslandMetrics.barEdge <= (width-40-193)/2)
+ }
+ precondition(IslandBarGeometry.avatarCapacity(screenWidth: 1470, keepOut: 193) > 4)
+ let tight = IslandBarGeometry.avatars(10, cap: 1)
+ precondition(tight.shown == 0 && tight.hidden == 10)
+ let all = IslandBarGeometry.avatars(6, cap: 8)
+ precondition(all.shown == 6 && all.hidden == 0)
+`);
+});
+
 // 菜单栏让位（防遮挡状态栏图标）的触发阈值：鼠标在「面板可见部分 + 左右各折叠态宽度一半」的安全带里
 // 不算遮挡（面板附近横向移动、擦着边缘路过都不该把面板收走），超出安全带才让位；菜单栏高度之外不触发。
 test('通知岛让位：菜单栏触发的左右安全区', {skip:process.platform!=='darwin'}, async()=>{
@@ -247,5 +307,35 @@ test('通知岛跳转：头像分栏与额度排序的合并顺序', {skip:proce
  // 草稿里多出来的 id 不会冒出来；空顺序也稳。
  precondition(IslandMetrics.mergedQuotaOrder(full: ["a","b"], shown: ["a","b","c"]) == ["a","b"])
  precondition(IslandMetrics.mergedQuotaOrder(full: [], shown: ["a"]) == [])
+`);
+});
+
+// 会话行右侧的线路指示：会话的 link id 与 links 快照的解码、短文案 / 风控值的格式化、悬停提示的内容。
+test('通知岛：会话线路指示的解码与文案', {skip:process.platform!=='darwin'}, async()=>{
+ await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {'),`
+let sessionJSON = #"{"id":"s1","state":"working","source":"codex","link":"codex"}"#
+let session = try JSONDecoder().decode(IslandSession.self, from: Data(sessionJSON.utf8))
+precondition(session.link == "codex" && session.source == "codex")
+let linksJSON = #"{"updatedAt":1790000000000,"rows":[{"id":"codex","kind":"service","name":"Codex","ok":true,"bars":2,"level":"warn","ms":379,"ip":"2407:cdc0:d002::1","ipSource":"trace","healthText":"偏慢","info":{"typeText":"VPN","typeShort":"VPN","level":"low","grade":"dirty","risk":66}},{"id":"proxy","kind":"exit","name":"代理出口","ok":false,"bars":0,"level":"low","error":"超时"}]}"#
+let links = try JSONDecoder().decode(IslandLinks.self, from: Data(linksJSON.utf8))
+precondition(links.rows.count == 2 && links.link(id: "codex")?.ok == true)
+let codex = links.link(id: "codex")
+precondition(codex?.bars == 2 && codex?.ms == 379)
+precondition(codex?.info?.risk == 66 && codex?.info?.grade == "dirty")
+precondition(IslandMetrics.linkType(codex?.info) == "VPN")
+precondition(IslandMetrics.linkRisk(codex?.info?.risk) == "66")
+precondition(IslandMetrics.linkRisk(nil) == nil)
+// 悬停提示带齐读数；失败的行说明原因；没映射 / 还没探到的不画指示。
+precondition(codex?.help.contains("首字节 379 ms") == true)
+precondition(codex?.help.contains("出口 2407:cdc0:d002::1") == true)
+precondition(codex?.help.contains("VPN · 风控 66") == true)
+precondition(codex?.help.contains("偏慢") == true)
+precondition(links.link(id: "proxy")?.help.contains("探测失败：超时") == true)
+precondition(links.link(id: "") == nil && links.link(id: nil) == nil && links.link(id: "nope") == nil)
+// 类型短文案缺了退回长文案；风控值为小数也能读。
+let fallbackJSON = #"{"rows":[{"id":"x","ok":true,"bars":4,"level":"ok","ms":88,"info":{"typeText":"住宅 / 家宽","level":"ok","grade":"clean","risk":12.5}}]}"#
+let fallback = try JSONDecoder().decode(IslandLinks.self, from: Data(fallbackJSON.utf8))
+precondition(IslandMetrics.linkType(fallback.link(id: "x")?.info) == "住宅 / 家宽")
+precondition(IslandMetrics.linkRisk(fallback.link(id: "x")?.info?.risk) == "13")
 `);
 });

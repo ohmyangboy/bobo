@@ -39,6 +39,14 @@ test('claude 会话：实时状态、等你回答、退出落定与已查看',as
   assert.equal(s.acked,false);
   assert.equal(s.startedAt,registryStartedAt,'开始时间应取注册表的 startedAt');
   assert.ok(s.order>0,'会话应带排序键');
+  // 内置命令面板（/model 这类）只给 `dialog open`：不是提问——保持运行中、不提醒。
+  const dialogAt=Date.now();
+  await reg('waiting',{waitingFor:'dialog open'});
+  assert.ok(await until(()=>sessions()[0].at>=dialogAt),'没读到 dialog open 的更新时间');
+  await new Promise(r=>setTimeout(r,160));
+  assert.equal(sessions()[0].state,'working','dialog open 不该算等你回答：'+sessions()[0].state);
+  assert.equal(sessions()[0].detail,'');
+  assert.ok(!reminders.some(r=>r[0]==='question'),'dialog open 不该触发「需要你回答」提醒');
   // 等你回答：status=waiting + waitingFor，挂起 0.8 秒后提醒一次。
   await reg('waiting',{waitingFor:'permission prompt'});
   assert.ok(await until(()=>sessions()[0].state==='waiting'),'没有进入等你回答：'+sessions()[0].state);

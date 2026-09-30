@@ -73,7 +73,6 @@ export function createSkills({home,env=process.env,fail,exec}){
  const stateHome=typeof env.XDG_STATE_HOME==='string'&&env.XDG_STATE_HOME.trim()?env.XDG_STATE_HOME.trim():null;
  const lockFile=stateHome?path.join(stateHome,'skills','.skill-lock.json'):path.join(home,'.agents','.skill-lock.json');
  const run=exec||defaultRun;
- const exists=p=>fs.access(p).then(()=>true,()=>false);
  const isDir=p=>fs.stat(p).then(s=>s.isDirectory(),()=>false);
  const hasSkill=p=>fs.access(path.join(p,'SKILL.md')).then(()=>true,()=>false);
  const linkTarget=link=>fs.readlink(link).then(t=>path.resolve(path.dirname(link),t)).catch(()=>null);
@@ -108,11 +107,23 @@ export function createSkills({home,env=process.env,fail,exec}){
   const key=Object.keys(lock.skills).find(k=>sanitizeName(k)===sanitizeName(name));
   return key?{key,entry:lock.skills[key]}:null;
  }
- // 本机装了哪些 Agent：看它自己的目录在不在（通用 Agent 直接读 canonical，不参与链接）。
+ // 本机装了哪些 Agent：检测路径存在，且目录里除 skills/ 之外还有内容。
+ // 只按目录存在判断会把「链接技能时顺手 mkdir 出的空目录」（~/.junie 之类只含 skills/）
+ // 也算成已安装，列表里全是噪声，新增技能也会往这些空目录里建链接。
+ const AGENT_IGNORE=new Set(['skills','.DS_Store']);
+ async function agentInstalled(a){
+  for(const p of a.detect){
+   const st=await fs.stat(p).catch(()=>null);
+   if(!st)continue;
+   if(!st.isDirectory())return true;
+   const names=await fs.readdir(p).catch(()=>[]);
+   if(names.some(n=>!AGENT_IGNORE.has(n)))return true;
+  }
+  return false;
+ }
  async function liveAgents(){
-  const all=skillAgents({home,env});
   const out=[];
-  for(const a of all)if(a.detect.length&&(await Promise.all(a.detect.map(exists))).some(Boolean))out.push(a);
+  for(const a of skillAgents({home,env}))if(a.detect.length&&await agentInstalled(a))out.push(a);
   return out;
  }
  async function readSkillsIn(dir){
@@ -129,22 +140,34 @@ export function createSkills({home,env=process.env,fail,exec}){
  }
  // 列表：canonical 里的技能 + 各家 Agent 目录里单独存在的技能，并补上 lock 里的来源。
  // 同一份技能可能同时出现在 canonical 与它链接到的 Agent 目录里，按名称合并成一行。
+ // 每行再带 agentLinks：本机每个已安装 Agent 对它的状态——universal 通用自动可见 / linked 已链接 /
+ // other 目录里已有同名内容（不是 bobo 建的链接）/ missing 未安装；agents 只收看得到它的名字。
  async function scan(){
   const live=await liveAgents(),rows=[],byName=new Map();
-  const addRow=(s,agentNames,pathOverride)=>{
+  const addRow=(s)=>{
    const key=sanitizeName(s.name),existing=byName.get(key);
-   if(existing){for(const n of agentNames)if(!existing.agents.includes(n))existing.agents.push(n);if(!existing.description)existing.description=s.description;return existing;}
-   const row={name:s.name,path:pathOverride||s.path,agents:[...new Set(agentNames)],description:s.description,source:null,sourceUrl:null,sourceType:null};
+   if(existing){if(!existing.description)existing.description=s.description;return existing;}
+   const row={name:s.name,entry:s.entry,path:s.path,agents:[],agentLinks:[],inCanonical:false,description:s.description,source:null,sourceUrl:null,sourceType:null};
    rows.push(row);byName.set(key,row);return row;
   };
-  for(const s of await readSkillsIn(canonicalDir)){
-   const names=[];
-   for(const a of live)if(a.universal||await exists(path.join(a.dir,s.entry)))names.push(a.name);
-   addRow(s,names);
-  }
+  for(const s of await readSkillsIn(canonicalDir))addRow(s);
   for(const a of live){
    if(a.universal)continue;
-   for(const s of await readSkillsIn(a.dir))addRow(s,[a.name]);
+   for(const s of await readSkillsIn(a.dir))addRow(s);
+  }
+  for(const row of rows){
+   const canonical=path.join(canonicalDir,row.entry),inCanonical=!!await fs.lstat(canonical).catch(()=>null);
+   row.inCanonical=inCanonical;
+   for(const a of live){
+    const target=path.join(a.dir,row.entry),st=await fs.lstat(target).catch(()=>null);
+    let state=null;
+    if(st&&inCanonical&&st.isSymbolicLink()&&await sameTarget(target,canonical))state='linked';
+    else if(st)state='other';
+    else if(a.universal&&inCanonical)state='universal';
+    if(!state)continue;
+    row.agentLinks.push({id:a.id,name:a.name,universal:a.universal,state});
+    row.agents.push(a.name);
+   }
   }
   const lock=await readLock();
   for(const row of rows){const found=lockEntry(lock,row.name);if(found){row.source=found.entry.source??null;row.sourceUrl=found.entry.sourceUrl??null;row.sourceType=found.entry.sourceType??null;}}
@@ -177,6 +200,34 @@ export function createSkills({home,env=process.env,fail,exec}){
    if(t&&((await sameTarget(target,src))||inside(t,canonicalDir))){await removeLink(target).catch(()=>{});removed.push(a.name);}
   }
   return removed;
+ }
+ // 本机 Agent 清单：注册表里所有能解析出目录的 Agent，带 installed 标记（判定见 agentInstalled）。
+ // 网页用它列出「本机已经安装且支持」的 Agent，并为每个技能显示逐 Agent 的安装状态。
+ async function agents(){
+  const out=[];
+  for(const a of skillAgents({home,env}))out.push({id:a.id,name:a.name,dir:a.dir,universal:a.universal,installed:a.detect.length?await agentInstalled(a):false});
+  return {canonical:canonicalDir,agents:out};
+ }
+ // 单个技能的逐 Agent 安装 / 移除：在某个 Agent 的技能目录里建（删）指向 canonical 的相对符号链接。
+ // 通用 Agent 直接读 ~/.agents/skills，没有可管理的链接，返回 universal 让界面只展示状态。
+ async function setAgentLink(name,agentId,enabled){
+  const key=String(name||'').trim();
+  if(!key||key.includes('/')||key.includes('\\')||key.startsWith('.'))fail('无效的技能名称');
+  const a=skillAgents({home,env}).find(x=>x.id===agentId);
+  if(!a)fail('未知的 Agent：'+agentId,404);
+  const canonical=path.join(canonicalDir,key);
+  if(!await fs.lstat(canonical).catch(()=>null))fail('技能不在 ~/.agents/skills 里，请先在文件夹视图里启用或重新安装');
+  if(a.universal)return {ok:true,name:key,agent:a.id,state:'universal'};
+  if(!await agentInstalled(a))fail(a.name+' 本机还没有安装');
+  const target=path.join(a.dir,key),st=await fs.lstat(target).catch(()=>null);
+  if(enabled){
+   if(st){if(st.isSymbolicLink()&&await sameTarget(target,canonical))return {ok:true,name:key,agent:a.id,state:'linked'};fail(a.name+' 的技能目录里已有同名内容，请先在 Finder 里处理：'+target);}
+   await linkDir(canonical,target);
+   return {ok:true,name:key,agent:a.id,state:'linked',linked:true};
+  }
+  if(!st)return {ok:true,name:key,agent:a.id,state:'missing'};
+  if(st.isSymbolicLink()&&await sameTarget(target,canonical)){await removeLink(target);return {ok:true,name:key,agent:a.id,state:'missing',removed:true};}
+  fail('这条链接不是 bobo 建的，未删除：'+target);
  }
 
  // ---- 来源解析 ----
@@ -357,5 +408,5 @@ export function createSkills({home,env=process.env,fail,exec}){
   return {path:dir,report};
  }
 
- return {canonicalDir,lockFile,scan,add,update,remove,init,link,unlinkAgents,readLock,writeLock,liveAgents,parseSource,discover,folderHash};
+ return {canonicalDir,lockFile,scan,add,update,remove,init,link,unlinkAgents,agents,setAgentLink,readLock,writeLock,liveAgents,parseSource,discover,folderHash};
 }

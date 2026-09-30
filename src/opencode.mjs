@@ -13,8 +13,11 @@ const displayModes=['auto','builtin','main'];
 // 额度查看方式：cycle 点圆环在可用来源之间切换；expand 展开时并排显示各来源。quotaCount 是并排时
 // 最多显示几家（3 / 5 / 7），0 = 自适应——原生按屏幕剩余空间算，不越过展开后的中轴线（见 IslandBarGeometry.quotaChips）。
 const quotaViews=['cycle','expand'],quotaCounts=[0,3,5,7];
+// 收尾事件漏掉时的兜底对账（见 reconcile）：静默超过 RECONCILE_MS 还停在「运行中」的会话，
+// 每 RECONCILE_TICK_MS 拿一次 /api/session/active 核对，不在跑的就按正常「结束」落定。
+const RECONCILE_MS=90*1000,RECONCILE_TICK_MS=30*1000;
 
-export function createOpenCode({home}){
+export function createOpenCode({home,reconcileMs=RECONCILE_MS,reconcileTick=RECONCILE_TICK_MS}){
  const dataDir=path.join(home,'.bobo'),settingsFile=path.join(dataDir,'opencode.json');
  const sessions=new Map(),listeners=new Set();
  // 子 agent 的子会话不上面板：会话列表与 session.created 里的 parentID 标出父子关系（task 工具派生），
@@ -22,7 +25,7 @@ export function createOpenCode({home}){
  // 之后任何带这个 id 的事件（工具调用、结束、提问）都一律不处理。集合超过上限就丢掉最早记住的一批。
  const children=new Set(),CHILD_LIMIT=300;
  function rememberChild(id){if(!id)return;children.add(id);sessions.delete(id);if(children.size>CHILD_LIMIT)children.delete(children.values().next().value);}
- let settings={notify:true,sound:true,notch:true,hideWhenIdle:false,autoExpand:true,rows:3,menubar:false,movable:false,display:'auto',quotaView:'expand',quotaCount:0},connected=false,closed=false,controller=null,retryTimer=null;
+ let settings={notify:true,sound:true,notch:true,hideWhenIdle:false,autoExpand:true,rows:3,menubar:false,movable:false,display:'auto',quotaView:'expand',quotaCount:0},connected=false,closed=false,controller=null,retryTimer=null,reconcileTimer=null;
  let noticeSeq=0,notice=null;
  const emit=()=>{for(const l of listeners){try{l();}catch{}}};
  const setConnected=value=>{if(connected!==value){connected=value;emit();}};
@@ -176,6 +179,19 @@ export function createOpenCode({home}){
    if(grew)emit();
   }catch{}
  }
+ // 兜底对账：收尾事件漏掉（断流、或被挂起窗口里的活动事件顶掉）时会话会永远停在「运行中」。
+ // 只有存在静默较久的 working 会话时才向服务端要一次活跃列表，不在跑的就按正常「结束」落定
+ // （挂起 300ms，期间有活动事件会撤销；已在挂起落定中的不重复挂，服务端读不到时保持原状等下一轮）。
+ async function reconcile(){
+  const stale=()=>[...sessions.values()].filter(s=>s.state==='working'&&Date.now()-s.at>reconcileMs);
+  if(!stale().length)return;
+  const service=await openService();
+  if(!service)return;
+  const active=await request(service,'/api/session/active').catch(()=>null);
+  if(!active?.data)return;
+  const running=new Set(Object.keys(active.data));
+  for(const s of stale())if(!running.has(s.id)&&!idleTimers.has(s.id))settle(s.id,{state:'idle'},'done',300);
+ }
  function handle(ev){
   const type=ev?.type||'',data=ev?.data||{},dir=ev?.location?.directory||'';
   const id=data.sessionID||data.form?.sessionID||'';
@@ -282,7 +298,7 @@ export function createOpenCode({home}){
   snapshot,
   subscribe,
   remind,
-  start(){closed=false;void loadSettings().then(connect);},
-  stop(){closed=true;clearTimeout(retryTimer);controller?.abort();for(const timer of [...idleTimers.values(),...askTimers.values()])clearTimeout(timer);idleTimers.clear();askTimers.clear();listeners.clear();},
+  start(){closed=false;void loadSettings().then(connect);reconcileTimer=setInterval(()=>void reconcile(),reconcileTick);reconcileTimer.unref?.();},
+  stop(){closed=true;clearTimeout(retryTimer);clearInterval(reconcileTimer);controller?.abort();for(const timer of [...idleTimers.values(),...askTimers.values()])clearTimeout(timer);idleTimers.clear();askTimers.clear();listeners.clear();},
  };
 }

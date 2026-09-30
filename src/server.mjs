@@ -15,6 +15,7 @@ import { createAgy } from './agy.mjs';
 import { createUsage } from './usage.mjs';
 import { createDevices } from './devices.mjs';
 import { createNetwork } from './network.mjs';
+import { createLinks } from './links.mjs';
 import { createTerminals } from './terminals.mjs';
 import { createBrowser } from './browser.mjs';
 import { createUpdate } from './update.mjs';
@@ -83,13 +84,13 @@ async function dshWebAlive(){
 }
 // 终端归属按需扫描：网页打开通知岛 / 刘海面板展开时 POST /api/terminals/watch 续期（10 秒），期间每 3 秒扫一次
 // 「正在运行」的终端标签页，把每个会话归属的终端并进状态流；没人看后自然过期停止，不常驻子进程。
-let terminalWatchUntil=0, sessionTerminals={}, terminalScanBusy=false, ackViewedBusy=false;
+let terminalWatchUntil=0, linksWatchUntil=0, sessionTerminals={}, terminalScanBusy=false, ackViewedBusy=false;
 async function scanTerminals(){if(terminalScanBusy)return;terminalScanBusy=true;try{const rows=sessionsMerged();sessionTerminals=rows.length?await terminals.locate(rows):{};}finally{terminalScanBusy=false;}}
 setInterval(()=>{if(Date.now()<terminalWatchUntil)scanTerminals().catch(()=>{});},3000);
 // 状态流与 /api/opencode 共用的快照：各来源只取一次，避免同一轮重复计算六个 snapshot。
 function islandSnapshot(){
  const parts={opencode:opencode.snapshot(),codex:codex.snapshot(),omp:omp.snapshot(),claude:claude.snapshot(),dsh:dsh.snapshot(),agy:agy.snapshot()};
- return {...parts.opencode,sessions:sessionsMerged(parts).map(s=>({...s,terminal:sessionTerminals[s.id]})),codex:parts.codex,omp:parts.omp,claude:parts.claude,dsh:parts.dsh,agy:parts.agy};
+ return {...parts.opencode,sessions:sessionsMerged(parts).map(s=>({...s,terminal:sessionTerminals[s.id],link:links.linkFor(s.source)})),codex:parts.codex,omp:parts.omp,claude:parts.claude,dsh:parts.dsh,agy:parts.agy};
 }
 // 结束 / 终止的头像要留到用户看过终端才收起：对应终端在前台且正停在那个标签页时算已查看；
 // 手动切标签页与点会话行跳过去（/api/opencode/focus）命中同一套匹配。
@@ -105,6 +106,9 @@ devices.start();
 // 网络：延迟 / 下载 / 上传，同样常驻采样：延迟走 ping（封 ICMP 时退回 TCP），流量读网卡计数器。
 const network=createNetwork();
 network.start();
+// 线路读数只在展开列表或网页网络分栏里可见；折叠常驻时保留缓存，不主动探测第三方服务。
+const links=createLinks({home,env:process.env,shouldCheck:()=>Date.now()<terminalWatchUntil||Date.now()<linksWatchUntil});
+links.start();
 let catalog=[], catalogTime=0, job=null, busy=false;
 const dataDir=path.join(home,'.bobo');
 // 改名迁移：把旧的 ~/.skills-manager 里的每一项搬到 ~/.bobo；新目录里已有的项不覆盖。
@@ -141,7 +145,7 @@ async function list(force=false){
    const real=await fs.realpath(e.path).catch(()=>e.path);
    if(covered.has(e.path)||covered.has(real))continue;
    let parsed=null;try{parsed=parseSkill(await fs.readFile(path.join(e.path,'SKILL.md'),'utf8'));}catch{}
-   catalog.push({name:e.name,path:e.path,agents:[],source:null,description:parsed?.description||'',id:hash(e.path).slice(0,20),mine:{root:root.path,name:root.name||path.basename(root.path),repo:root.repo||null,mineStatus:e.status}});
+   catalog.push({name:e.name,path:e.path,entry:path.basename(e.path),agents:[],agentLinks:[],inCanonical:false,source:null,description:parsed?.description||'',id:hash(e.path).slice(0,20),mine:{root:root.path,name:root.name||path.basename(root.path),repo:root.repo||null,mineStatus:e.status}});
   }
  }
  await reader.invalidate(previous.filter(s=>!catalog.some(n=>n.id===s.id)).map(s=>s.id));catalogTime=Date.now();
@@ -152,7 +156,7 @@ async function startup(){
  if(catalogTime)return {skills:await list(),cached:false};
  try{
   const snapshot=JSON.parse(await fs.readFile(catalogFile,'utf8'));
-  if(!Array.isArray(snapshot)||!snapshot.every(s=>typeof s.path==='string'&&typeof s.name==='string'&&Array.isArray(s.agents)))throw Error('无效快照');
+  if(!Array.isArray(snapshot)||!snapshot.every(s=>typeof s.path==='string'&&typeof s.name==='string'&&Array.isArray(s.agents)&&Array.isArray(s.agentLinks)))throw Error('无效快照');
   const present=await Promise.all(snapshot.map(async s=>{try{await fs.access(path.join(s.path,'SKILL.md'));return s;}catch{return null;}}));
   catalog=present.filter(Boolean);catalogTime=Date.now();return {skills:catalog,cached:true};
  }catch{return {skills:await list(true),cached:false};}
@@ -225,6 +229,8 @@ const server=http.createServer(async(req,res)=>{
    if(req.headers.origin&&req.headers.origin!=='http://'+req.headers.host)fail('跨站请求被拒绝',403);
    if(req.method==='GET'&&url.pathname==='/api/startup')return json(await startup());
    if(req.method==='GET'&&url.pathname==='/api/skills')return json(await list(url.searchParams.has('refresh')));
+    // 技能 → Agent：本机已安装且支持的 Agent 清单（含逐技能安装状态用的 agentLinks）。
+    if(req.method==='GET'&&url.pathname==='/api/skill/agents')return json(await skills.agents());
    if(req.method==='GET'&&url.pathname==='/api/sources')return json(await sources.overview());
    if(req.method==='GET'&&url.pathname==='/api/sources/roots')return json(await sources.roots());
    if(req.method==='GET'&&url.pathname==='/api/ai/document')return json(await reader.document(url.searchParams.get('id'),relPath(url.searchParams.get('path'))));
@@ -241,11 +247,16 @@ const server=http.createServer(async(req,res)=>{
    if(req.method==='GET'&&url.pathname==='/api/ai/config/document')return json(await configReader.document(url.searchParams.get('id')));
    if(req.method==='GET'&&url.pathname==='/api/job')return json(job);
    if(req.method==='GET'&&url.pathname==='/api/opencode')return json(islandSnapshot());
-   if(req.method==='GET'&&url.pathname==='/api/usage')return json(url.searchParams.has('refresh')?await usage.refresh():usage.snapshot());
+   // ?refresh=1 强制刷新；?direct=1 表示用户在界面上确认过「Claude 就按直连请求一次」（见 usage.mjs 的 claudeGate）。
+   if(req.method==='GET'&&url.pathname==='/api/usage')return json(url.searchParams.has('refresh')?await usage.refresh(true,{claudeDirect:url.searchParams.has('direct')}):usage.snapshot());
    // 设备：CPU / 内存 / 磁盘。服务端常驻采样，这里读缓存；网页每 2 秒拉一次，刘海面板走状态流。
-   if(req.method==='GET'&&url.pathname==='/api/devices')return json(url.searchParams.has('refresh')?await devices.refresh():devices.snapshot());
+   if(req.method==='GET'&&url.pathname==='/api/devices'){devices.watch();return json(url.searchParams.has('refresh')?await devices.refresh():devices.snapshot());}
    // 网络：延迟 / 下载 / 上传。同样常驻采样，网页与刘海面板读同一份（?refresh=1 立刻重采一次）。
-   if(req.method==='GET'&&url.pathname==='/api/network')return json(url.searchParams.has('refresh')?await network.refresh():network.snapshot());
+   if(req.method==='GET'&&url.pathname==='/api/network'){network.watch();return json(url.searchParams.has('refresh')?await network.refresh():network.snapshot());}
+   // 服务线路：每个 AI 服务与出口的延迟信号、出口 IP 与纯净度（类似 ping0.cc 的部分能力）。
+   // 按需探测（打开「设备 → 网络」分栏时由页面触发，结果在内存里缓存）；?refresh=1 立刻重测。
+   // 探测在后台跑，这里立即返回（checking=true 时页面稍后再拉一次）。
+   if(req.method==='GET'&&url.pathname==='/api/links'){linksWatchUntil=Date.now()+70000;return json(links.refresh(url.searchParams.has('refresh')));}
    // 进程列表：按需采样（不进常驻 tick 与状态流），只在网页停在 CPU / 内存分栏时拉取。
    if(req.method==='GET'&&url.pathname==='/api/devices/processes')return json(await devices.processes({limit:url.searchParams.get('limit'),sort:url.searchParams.get('sort')}));
     // 应用信息与更新状态：版本号来自 package.json；canUpdate 只有当服务跑在 .app 里才为 true。
@@ -262,12 +273,12 @@ const server=http.createServer(async(req,res)=>{
      pending=true;
      setImmediate(()=>{
       pending=false;
-      if(!res.destroyed)res.write(JSON.stringify({...islandSnapshot(),usage:usage.snapshot(),device:devices.snapshot(),network:network.snapshot()})+'\n');
+      if(!res.destroyed)res.write(JSON.stringify({...islandSnapshot(),usage:usage.snapshot(),device:devices.snapshot(),network:network.snapshot(),links:links.snapshot()})+'\n');
      });
     };
     send();
-    const stop=opencode.subscribe(send),stopUsage=usage.subscribe(send),stopCodex=codex.subscribe(send),stopOmp=omp.subscribe(send),stopClaude=claude.subscribe(send),stopDsh=dsh.subscribe(send),stopAgy=agy.subscribe(send),stopDevices=devices.subscribe(send),stopNetwork=network.subscribe(send);
-    const close=()=>{stop();stopUsage();stopCodex();stopOmp();stopClaude();stopDsh();stopAgy();stopDevices();stopNetwork();};
+    const stop=opencode.subscribe(send),stopUsage=usage.subscribe(send),stopCodex=codex.subscribe(send),stopOmp=omp.subscribe(send),stopClaude=claude.subscribe(send),stopDsh=dsh.subscribe(send),stopAgy=agy.subscribe(send),stopDevices=devices.subscribe(send),stopNetwork=network.subscribe(send),stopLinks=links.subscribe(send);
+    const close=()=>{stop();stopUsage();stopCodex();stopOmp();stopClaude();stopDsh();stopAgy();stopDevices();stopNetwork();stopLinks();};
     req.on('close',close);res.on('close',close);
     return;
    }
@@ -289,10 +300,18 @@ const server=http.createServer(async(req,res)=>{
    if(url.pathname==='/api/usage/range')return json(usage.cycleRange(b.id));
    // 来源启停：关掉的来源不参与刘海胶囊的切换循环。
    if(url.pathname==='/api/usage/enabled')return json(usage.setEnabled(b.id,b.enabled));
-   // 额度重置提醒开关：Codex 的额度窗口回到 100% 时提醒（系统通知 + 提示音）。
+   // 额度重置提醒开关：Codex / Claude Code / Antigravity 的额度窗口回到 100% 时提醒（系统通知 + 提示音）。
    if(url.pathname==='/api/usage/reset-notify')return json(usage.setNotifyReset(b.enabled));
-   // 手动填写 / 清除 OpenCode Go 的 API Key（保存前先调一次接口验证）。
-   if(url.pathname==='/api/usage/key')return json(b.clear?{ok:true,message:'已清除手动 Key，改回读取本机登录',snapshot:await usage.clearKey()}:await usage.setKey(b.key));
+   // 手动填写的 Token / API Key：{id} 默认 OpenCode Go，Claude Code 用 {id:'claude'}；
+   // {keychain:true} 显式读取 macOS 钥匙串里的 Claude Code 登录（会弹一次系统授权）。
+   if(url.pathname==='/api/usage/key'){
+    const id=typeof b.id==='string'?b.id:'opencode-go',direct=b.direct===true;
+    if(b.keychain)return json(await usage.readKeychain(id,{direct}));
+    if(b.clear)return json({ok:true,message:'已清除手动 Token，改回读取本机登录',snapshot:await usage.clearKey(id)});
+    return json(await usage.setKey(id,b.key,{direct}));
+   }
+   // 「直连时也请求」：没有 VPN / 代理时也携带登录请求 Claude（默认关，见 usage.mjs 的 claudeGate）。
+   if(url.pathname==='/api/usage/claude-direct')return json(usage.setClaudeDirect(b.enabled));
     // 应用内更新：窗口恢复用 {auto:true} 遵守自动检查间隔；按钮手动检查仍立即请求。
     if(url.pathname==='/api/update/check')return json(await update.check({auto:b.auto===true}));
     if(url.pathname==='/api/update/install')return json(await update.install());
@@ -313,13 +332,20 @@ const server=http.createServer(async(req,res)=>{
     return json(r);
    }
    // 终端归属按需扫描的续期：网页打开通知岛 / 刘海面板展开时每几秒调一次，服务端据此决定要不要扫。
-   if(url.pathname==='/api/terminals/watch'){terminalWatchUntil=Date.now()+10000;return json({ok:true});}
+   if(url.pathname==='/api/terminals/watch'){
+    terminalWatchUntil=Date.now()+10000;
+    devices.watch();network.watch();
+    if(!process.env.BOBO_HOME)links.refresh();
+    return json({ok:true});
+   }
    if(url.pathname==='/api/sources/add')return json(await sourcesMutate(()=>sources.add(b)));
    if(url.pathname==='/api/sources/remove')return json(await sourcesMutate(()=>sources.remove(b.path)));
    if(url.pathname==='/api/sources/link')return json(await sourcesMutate(()=>sources.relink(b.path)));
    if(url.pathname==='/api/sources/toggle')return json(await sourcesMutate(()=>sources.setEnabled(b.path,b.name,b.enabled)));
    if(url.pathname==='/api/sources/delete')return json(await sourcesMutate(()=>sources.removeSkill(b.path,b.name)));
    if(url.pathname==='/api/sources/create')return json(await sourcesMutate(()=>sources.createSkill(b.path,b.name,b.description)));
+   // 技能 → 某个 Agent 的安装 / 移除：只动 Agent 技能目录里的相对符号链接，通用 Agent 无需操作。
+   if(url.pathname==='/api/skill/agent')return json(await mutate(async()=>{const s=await skill(b.id);const r=await skills.setAgentLink(s.entry||path.basename(s.path),b.agent,b.enabled);catalogTime=0;return r;}));
    if(url.pathname==='/api/sources/pick')return json(await sources.pick());
    if(url.pathname==='/api/sources/sync')return json(await mutate(()=>sources.sync(b.path,b)));
    if(url.pathname==='/api/sources/sync-all')return json(await mutate(()=>sources.syncAll()));

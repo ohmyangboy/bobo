@@ -216,3 +216,48 @@ test('额度查看方式设置默认展开并排与自适应，非法值回退',
   await fs.rm(home,{recursive:true,force:true});
  }
 });
+// 兜底对账：收尾事件漏掉（断流、或被尾部活动事件顶掉挂起判定）时会话会永远停在「运行中」，
+// 静默够久后拿活跃列表核对一次：还在跑的保持运行中，不在跑的就按正常「结束」落定并提醒。
+test('漏掉收尾事件的会话按活跃列表兜底落定',async()=>{
+ const home=await fs.mkdtemp(path.join(os.tmpdir(),'bobo-opencode-reconcile-'));let stream=null,active={},activeCalls=0;
+ const service=http.createServer((req,res)=>{
+  res.setHeader('Content-Type','application/json');
+  if(req.url.startsWith('/api/session/active')){activeCalls++;return res.end(JSON.stringify({data:active}));}
+  if(req.url.startsWith('/api/session?'))return res.end('{"data":[]}');
+  if(req.url==='/api/event'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.flushHeaders();res.write(': ok\n\n');stream=res;return;}
+  res.writeHead(404);res.end();
+ });
+ await new Promise(r=>service.listen(0,'127.0.0.1',r));
+ const push=ev=>stream.write('data: '+JSON.stringify(ev)+'\n\n');
+ const until=async(fn,ms=2500)=>{const end=Date.now()+ms;while(Date.now()<end){if(fn())return true;await new Promise(r=>setTimeout(r,10));}return fn();};
+ const sessions=()=>client.snapshot().sessions,state=id=>sessions().find(s=>s.id===id)?.state;
+ let client;
+ try{
+  await fs.mkdir(path.join(home,'.bobo'),{recursive:true});
+  await fs.writeFile(path.join(home,'.bobo/opencode.json'),'{"notify":true,"sound":false}');
+  await fs.mkdir(path.join(home,'.local/state/opencode'),{recursive:true});
+  await fs.writeFile(path.join(home,'.local/state/opencode/service.json'),JSON.stringify({url:'http://127.0.0.1:'+service.address().port,password:'test'}));
+  // 把对账节奏压到毫秒级，测试不用等真实的 90 秒静默窗口。
+  client=createOpenCode({home,reconcileMs:60,reconcileTick:40});
+  client.start();
+  assert.ok(await until(()=>client.snapshot().connected&&stream),'事件流没有连上');
+  // 没有可疑会话时不去打扰服务端（连接时的 hydrate 读一次活跃表，之后不再查）。
+  const baseline=activeCalls;
+  await new Promise(r=>setTimeout(r,200));
+  assert.equal(activeCalls,baseline,'没有静默的运行中会话时不该查活跃列表');
+  // 服务端还在跑：对账后保持运行中。
+  push({type:'session.inbox.enqueued',data:{sessionID:'s1',item:{payload:{text:'慢慢跑'}}},location:{directory:'/tmp/s1'}});
+  active={s1:{type:'running'}};
+  assert.ok(await until(()=>state('s1')==='working'),'会话没有开始');
+  assert.ok(await until(()=>activeCalls>baseline),'静默后应查一次活跃列表');
+  await new Promise(r=>setTimeout(r,400));
+  assert.equal(state('s1'),'working','还在跑的会话不该被兜底落定');
+  // 收尾事件漏掉（比如流断在结束前）：活跃表里没有它了，兜底落定成「已结束」并提醒。
+  active={};
+  assert.ok(await until(()=>state('s1')==='idle',2000),'不在跑的会话应被兜底落定：'+state('s1'));
+  assert.equal(sessions().find(s=>s.id==='s1').acked,false,'兜底落定也要算未查看');
+  assert.equal(client.snapshot().notice?.kind,'done');
+ }finally{
+  client?.stop();await new Promise(r=>service.close(r));await fs.rm(home,{recursive:true,force:true});
+ }
+});

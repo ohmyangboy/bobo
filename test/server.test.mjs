@@ -12,13 +12,13 @@ test('隔离环境：列表、文件增删改、冲突保护、路径保护、�
   assert.equal((await req('ai/settings',null,{Origin:'https://evil.example'})).status,403);
   assert.equal((await req('ai/settings',{keySource:'manual',baseUrl:'http://127.0.0.1:1/v1',model:'test',clearKey:true})).status,200);
   assert.equal((await req('skills',null,{Origin:'https://evil.example'})).status,403);
-  // 用量接口：隔离环境里没有 OpenCode 数据库、Codex 登录与 agy 会话，三家都不可用但接口本身要正常。
+  // 用量接口：隔离环境里没有 OpenCode 数据库、Codex / Claude Code 登录与 agy 会话，四家都不可用但接口本身要正常。
   const usage=(await req('usage')).data;
-  assert.equal(usage.available,false);assert.equal(usage.providers.length,3);assert.equal(usage.providers[0].id,'codex');assert.equal(usage.providers[1].id,'opencode-go');assert.equal(usage.providers[2].id,'agy');
+  assert.equal(usage.available,false);assert.equal(usage.providers.length,4);assert.equal(usage.providers[0].id,'codex');assert.equal(usage.providers[1].id,'claude');assert.equal(usage.providers[2].id,'opencode-go');assert.equal(usage.providers[3].id,'agy');
   const island=(await req('opencode')).data;
   assert.ok(island.agy);
   await fs.mkdir(path.join(home,'.bobo'),{recursive:true});
-  await fs.writeFile(path.join(home,'.bobo/catalog.json'),JSON.stringify([{name:'cached-demo',path:root,agents:['Codex'],source:'test/demo',id:'cached'}]));
+  await fs.writeFile(path.join(home,'.bobo/catalog.json'),JSON.stringify([{name:'cached-demo',path:root,agents:['Codex'],agentLinks:[],source:'test/demo',id:'cached'}]));
   const startup=(await req('startup')).data;
   assert.equal(startup.cached,true);assert.equal(startup.skills[0].name,'cached-demo');
   // 强制刷新必须替换快照，而不是继续返回旧列表。
@@ -54,6 +54,8 @@ test('按分组删除与更新：只作用于同一来源的技能，不影响�
  const home=await fs.mkdtemp(path.join(os.tmpdir(),'bobo-group-'));
  const roots={alpha:path.join(home,'.agents/skills/alpha'),beta:path.join(home,'.agents/skills/beta'),gamma:path.join(home,'.claude/skills/gamma')};
  for(const [name,root] of Object.entries(roots)){await fs.mkdir(root,{recursive:true});await fs.writeFile(path.join(root,'SKILL.md'),`---\nname: ${name}\ndescription: ${name}\n---\nHello`);}
+ // ~/.claude 里除了 skills/ 还要有别的内容才算「已安装」（bobo 链接技能时建的空目录不算数）。
+ await fs.writeFile(path.join(home,'.claude/settings.json'),'{}');
  // alpha / beta 是本地来源（更新时从来源目录重新复制），gamma 属于另一个来源，分组操作不该碰它。
  const sources={alpha:path.join(home,'src/alpha'),beta:path.join(home,'src/beta')};
  for(const [name,dir] of Object.entries(sources)){await fs.mkdir(dir,{recursive:true});await fs.writeFile(path.join(dir,'SKILL.md'),`---\nname: ${name}\ndescription: ${name}\n---\nHello`);}
@@ -129,6 +131,8 @@ test('添加技能：从本地 Git 仓库安装并自动链接到 Agent 目录',
  await fs.mkdir(path.join(work,'skills/one'),{recursive:true});
  await fs.writeFile(path.join(work,'skills/one/SKILL.md'),'---\nname: one\ndescription: One 技能\n---\n\n# one\n');
  await fs.mkdir(path.join(home,'.claude'),{recursive:true});
+ // 给 ~/.claude 一份真实内容：只有 skills/ 空目录的「Agent」不算已安装。
+ await fs.writeFile(path.join(home,'.claude/settings.json'),'{}');
  const git=(...args)=>new Promise(resolve=>{const c=spawn('git',args,{cwd:work,stdio:'ignore'});c.on('close',resolve);});
  await git('init','-q','-b','main');await git('add','-A');await git('-c','user.email=t@t','-c','user.name=t','commit','-qm','init');
  await fs.writeFile(path.join(home,'package.json'),'{"type":"module"}');
@@ -148,6 +152,18 @@ test('添加技能：从本地 Git 仓库安装并自动链接到 Agent 目录',
   assert.equal(one.path,path.join(home,'.agents/skills/one'));
   assert.deepEqual(one.agents,['Claude Code']);
   assert.equal(await fs.readlink(path.join(home,'.claude/skills/one')),path.join('..','..','.agents','skills','one'));
+  // 技能 → Agent：本机已安装且支持的 Agent 清单，与逐 Agent 的安装 / 移除。
+  const info=(await req('skill/agents')).data;
+  assert.equal(info.agents.find(a=>a.id==='claude-code').installed,true);
+  assert.equal(info.agents.find(a=>a.id==='junie').installed,false);
+  assert.equal((await req('skill/agent',{id:one.id,agent:'codex',enabled:true})).data.state,'universal','通用 Agent 直接读 ~/.agents/skills');
+  assert.equal((await req('skill/agent',{id:one.id,agent:'claude-code',enabled:false})).data.removed,true);
+  assert.equal(await fs.lstat(path.join(home,'.claude/skills/one')).catch(()=>null),null);
+  assert.equal((await req('skill/agent',{id:one.id,agent:'claude-code',enabled:true})).data.linked,true);
+  assert.equal((await req('skill/agent',{id:one.id,agent:'junie',enabled:true})).status,400,'未安装的 Agent 不能安装');
+  assert.equal((await req('skill/agent',{id:one.id,agent:'nope',enabled:true})).status,404);
+  const refreshed=(await req('skills?refresh=1')).data.find(r=>r.name==='one');
+  assert.equal(refreshed.agentLinks.find(x=>x.id==='claude-code').state,'linked');
   // 再装一次：同名技能被替换（先备份），不产生第二份。
   assert.equal((await req('command',{args:['add',work,'-g','--skill','one']})).status,200);
   for(let i=0;i<200;i++){job=(await req('job')).data;if(!job.running)break;await new Promise(r=>setTimeout(r,30));}

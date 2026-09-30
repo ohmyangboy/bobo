@@ -1,6 +1,6 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs/promises';import os from 'node:os';import path from 'node:path';import http from 'node:http';
 import {DatabaseSync} from 'node:sqlite';
-import {createUsage, agySnapshot, macHTTPSProxy, curlCodexUsage} from '../src/usage.mjs';
+import {createUsage, agySnapshot, macHTTPSProxy, curlUsage, claudeSnapshot, claudeCredentials, keychainDecode, tunnelInterface} from '../src/usage.mjs';
 // 每日历史按本地日历分桶，测试固定 UTC，让「天」的断言在任何时区都稳定。
 process.env.TZ='UTC';
 // 与 CodexBar 的 OpenCodeGoLocalUsageReader 测试同一基准：2026-03-06T12:00:00Z。
@@ -26,7 +26,7 @@ test('Codex：代理请求能带账号头读取额度响应',async()=>{
  await new Promise(resolve=>proxy.listen(0,'127.0.0.1',resolve));
  try{
   const {port}=proxy.address();
-  const response=await curlCodexUsage(`http://127.0.0.1:${port}`,{'authorization':'Bearer fake-token','chatgpt-account-id':'acct-test'},'http://codex-usage.test/backend-api/wham/usage');
+  const response=await curlUsage(`http://127.0.0.1:${port}`,{'authorization':'Bearer fake-token','chatgpt-account-id':'acct-test'},'http://codex-usage.test/backend-api/wham/usage');
   assert.equal(response.status,200);
   assert.equal((await response.json()).rate_limit.primary_window.used_percent,42);
   assert.deepEqual(request,{url:'http://codex-usage.test/backend-api/wham/usage',authorization:'Bearer fake-token',account:'acct-test'});
@@ -230,21 +230,21 @@ test('Codex：正常读取 5 小时 + 周两个窗口，selected 点击后循环
   // 写盘是异步的：等到文件里的顺序就是当前顺序（而不是更早那一次），避免和下一次切换赛跑。
   const readSettings=async()=>JSON.parse(await fs.readFile(path.join(home,'.bobo/usage.json'),'utf8'));
   const waitOrder=want=>waitFor(async()=>{const r=await readSettings();if((r.order||[]).join()!==want)throw Error('顺序还没写到 '+want);return r;});
-  const saved=await waitOrder('agy,codex,opencode-go');
-  assert.equal(saved.order.join(),'agy,codex,opencode-go','两次点击切换把前两家依次挪到了末尾');
+  const saved=await waitOrder('claude,agy,codex,opencode-go');
+  assert.equal(saved.order.join(),'claude,agy,codex,opencode-go','两次点击切换把前两家依次挪到了末尾');
   // 新进程读同一份设置：顺序被记住，折叠胶囊显示顺序里第一个可用的那家。
   usage.selectProvider('opencode-go');
-  await waitOrder('opencode-go,agy,codex');
+  await waitOrder('opencode-go,claude,agy,codex');
   const again=createUsage({home,now:()=>NOW,env:{},fetchImpl:async()=>fakeFetch(codexBody())});
   try{
    const s2=await again.refresh();
    assert.equal(s2.selected,'opencode-go');
-   assert.deepEqual(s2.providers.map(p=>p.id),['opencode-go','agy','codex'],'快照按用户排的顺序返回');
+   assert.deepEqual(s2.providers.map(p=>p.id),['opencode-go','claude','agy','codex'],'快照按用户排的顺序返回');
   }finally{await again.stop();}
   // 拖动排序（setOrder）：认不出的 id 忽略、没提到的按默认顺序补在后面；agy 不可用时显示下一个可用的。
-  assert.deepEqual(usage.setOrder(['agy','codex']).providers.map(p=>p.id),['agy','codex','opencode-go']);
+  assert.deepEqual(usage.setOrder(['agy','codex']).providers.map(p=>p.id),['agy','codex','claude','opencode-go']);
   assert.equal(usage.snapshot().selected,'codex','顺序里第一家不可用就显示下一家');
-  await waitOrder('agy,codex,opencode-go');
+  await waitOrder('agy,codex,claude,opencode-go');
   assert.equal(usage.selectProvider('不存在的来源'),usage.snapshot(),'认不出的来源不动任何状态');
  }finally{await usage.stop();await cleanup(home);}
 });
@@ -345,9 +345,9 @@ test('来源开关与手动 Key：关掉的不参与切换，手动 Key 优先�
   assert.equal(auths.at(-1),'Bearer sk-env-key');
   assert.equal(provider(s,'opencode-go').keySource,'env');
   // 手动 Key：保存前验证；保存后优先于环境变量，并把尾号回给界面（不回显完整 Key）。
-  const bad=await usage.setKey('sk-bad');
+  const bad=await usage.setKey('opencode-go','sk-bad');
   assert.equal(bad.ok,false);assert.match(bad.message,/登录|401|拒绝/);
-  const good=await usage.setKey('sk-manual-abcd');
+  const good=await usage.setKey('opencode-go','sk-manual-abcd');
   assert.equal(good.ok,true);assert.match(good.message,/已保存并验证/);
   assert.equal(auths.at(-1),'Bearer sk-manual-abcd');
   let local=provider(good.snapshot,'opencode-go');
@@ -364,7 +364,7 @@ test('来源开关与手动 Key：关掉的不参与切换，手动 Key 优先�
   assert.equal(s.selected,'codex','重新开启后顺序里第一家可用的又显示出来');
   assert.equal(usage.cycleProvider().selected,'opencode-go','点击切换轮到顺序里的下一家');
   // 清除手动 Key 后回退到环境变量。
-  s=await usage.clearKey();
+  s=await usage.clearKey('opencode-go');
   local=provider(s,'opencode-go');
   assert.equal(local.keySource,'env');
   const cleared=JSON.parse(await fs.readFile(path.join(home,'.bobo/usage.json'),'utf8'));
@@ -632,4 +632,304 @@ test('Antigravity：未检测到 CLI 时精准提示，CLI 命令输出及未登
  }finally{
   await fs.rm(home,{recursive:true,force:true});
  }
+});
+
+// ---- Claude Code ----
+// 用量接口的形状：utilization 是「已用百分比」（0–100）、resets_at 是 ISO 时间、金额字段是分。
+const claudeBody=({five={utilization:12,resets_at:new Date(NOW+3*3600e3).toISOString()},week={utilization:40,resets_at:new Date(NOW+4*86400e3).toISOString()},opus=null,sonnet=null,limits=null,extra=null}={})=>({five_hour:five,seven_day:week,seven_day_opus:opus,seven_day_sonnet:sonnet,...(limits?{limits}:{}),...(extra?{extra_usage:extra}:{})});
+const claudeCred={accessToken:'sk-ant-oat01-test',refreshToken:'sk-ant-ort01-test',expiresAt:NOW+3600e3,scopes:['user:profile','user:inference'],subscriptionType:'max',rateLimitTier:'default_claude_max_20x'};
+async function writeClaudeCredentials(home,cred=claudeCred){
+ const dir=path.join(home,'.claude');await fs.mkdir(dir,{recursive:true});
+ await fs.writeFile(path.join(dir,'.credentials.json'),JSON.stringify({claudeAiOauth:cred}));
+}
+const claudeFetch=(calls,body=claudeBody())=>async(url,options)=>{
+ calls.push({url:String(url),headers:options.headers});
+ if(!/api\.anthropic\.com\/api\/oauth\/usage/.test(String(url)))throw Error('不该联网：'+url);
+ if(/sk-ant-oat01-bad/.test(String(options.headers.authorization)))return fakeFetch({}, {status:401});
+ return fakeFetch(body);
+};
+
+test('Claude Code：凭据与窗口解析（含按模型的周额度与额外用量）',()=>{
+ assert.deepEqual(claudeCredentials({claudeAiOauth:claudeCred}),
+  {accessToken:'sk-ant-oat01-test',scopes:['user:profile','user:inference'],subscriptionType:'max',rateLimitTier:'default_claude_max_20x',expiresAt:NOW+3600e3});
+ assert.equal(claudeCredentials({claudeAiOauth:{refreshToken:'x'}}),null,'没有 accessToken 不算登录');
+ // 老版本把 expiresAt 存成秒：读进来统一成毫秒。
+ assert.equal(claudeCredentials({claudeAiOauth:{accessToken:'a',expiresAt:Math.floor(NOW/1000)}}).expiresAt,Math.floor(NOW/1000)*1000);
+ // 钥匙串输出里带换行时 `security -w` 会给十六进制。
+ const json=JSON.stringify({claudeAiOauth:claudeCred});
+ assert.equal(keychainDecode(Buffer.from(json).toString('hex')),json);
+ assert.equal(keychainDecode(json),json);
+ assert.equal(keychainDecode('not json'),'not json');
+
+ const snap=claudeSnapshot(claudeBody({
+  sonnet:{utilization:8,resets_at:new Date(NOW+86400e3).toISOString()},
+  limits:[{kind:'weekly_scoped',percent:75,resets_at:new Date(NOW+86400e3).toISOString(),scope:{model:{display_name:'Fable 5'}}},
+          {kind:'weekly_all',percent:40,scope:{model:{display_name:'忽略'}}}],
+  extra:{is_enabled:true,monthly_limit:2000,used_credits:1234,utilization:61.7}
+ }),NOW);
+ assert.equal(snap.id,'claude');assert.equal(snap.available,true);assert.equal(snap.source,'api');
+ assert.deepEqual(snap.windows.map(w=>w.key),['session','week','sonnet','week-fable-5','extra']);
+ assert.deepEqual(snap.windows.map(w=>w.label),['5 小时滚动','本周','本周 · Sonnet','本周 · Fable 5','额外用量（月度）']);
+ const session=snap.windows[0];
+ assert.equal(session.usedPercent,12);assert.equal(session.remainingPercent,88);assert.equal(session.resetInSec,3*3600);assert.equal(session.status,'ok');
+ assert.equal(snap.windows[1].remainingPercent,60);
+ const extra=snap.windows[4];
+ assert.equal(extra.usedUSD,12.34);assert.equal(extra.limitUSD,20);assert.equal(extra.usedPercent,61.7);
+ // 用满的窗口带「已限额」标记；没有 utilization 的窗口整条丢掉。
+ const limited=claudeSnapshot({five_hour:{utilization:100,resets_at:new Date(NOW+600e3).toISOString()},seven_day:{resets_at:new Date(NOW+600e3).toISOString()},extra_usage:{is_enabled:false,monthly_limit:2000,used_credits:1}},NOW);
+ assert.equal(limited.windows.length,1);assert.equal(limited.windows[0].remainingPercent,0);assert.equal(limited.windows[0].status,'rate-limited');
+});
+
+test('Claude Code：读凭据文件调用量接口（只读、不刷新），套餐与来源都回给界面',async()=>{
+ const home=await makeHome();await writeClaudeCredentials(home);
+ const calls=[];
+ const usage=createUsage({home,now:()=>NOW,env:{},fetchImpl:claudeFetch(calls)});
+ try{
+  const s=await usage.refresh(),claude=provider(s,'claude');
+  assert.equal(calls.length,1);
+  assert.equal(calls[0].headers.authorization,'Bearer sk-ant-oat01-test');
+  assert.equal(calls[0].headers['anthropic-beta'],'oauth-2025-04-20');
+  assert.match(calls[0].headers['user-agent'],/^claude-code\//);
+  assert.equal(claude.available,true);assert.equal(claude.keySource,'file');assert.equal(claude.plan,'Max 20x');
+  assert.equal(claude.windows.find(w=>w.key==='session').usedPercent,12);
+  // 凭据文件保持原样：不刷新 token、不回写（含 refreshToken 等字段）。
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(home,'.claude/.credentials.json'),'utf8')),{claudeAiOauth:claudeCred});
+ }finally{await usage.stop();await cleanup(home);}
+ // CLAUDE_CONFIG_DIR 指到哪儿就读哪儿；环境变量里的 Token 优先于文件。
+ const moved=await makeHome();
+ await writeClaudeCredentials(path.join(moved,'cfg'),{...claudeCred,accessToken:'sk-ant-oat01-file'});
+ const envCalls=[];
+ const envUsage=createUsage({home:moved,now:()=>NOW,env:{CLAUDE_CONFIG_DIR:path.join(moved,'cfg'),CLAUDE_CODE_OAUTH_TOKEN:'sk-ant-oat01-env'},fetchImpl:claudeFetch(envCalls)});
+ try{
+  const claude=provider(await envUsage.refresh(),'claude');
+  assert.equal(claude.keySource,'env');assert.equal(envCalls[0].headers.authorization,'Bearer sk-ant-oat01-env');
+ }finally{await envUsage.stop();await cleanup(moved);}
+});
+
+test('Claude Code：没有登录 / 登录过期 / 缺 user:profile / 401 / 429 都给可读原因，失败不覆盖上一次数据',async()=>{
+ // 没有登录：不联网。
+ const bare=await makeHome();
+ let calls=0;
+ const none=createUsage({home:bare,now:()=>NOW,env:{},fetchImpl:async()=>{calls++;return fakeFetch(claudeBody());}});
+ try{
+  const claude=provider(await none.refresh(),'claude');
+  assert.equal(claude.available,false);assert.match(claude.reason,/claude/);assert.equal(calls,0);
+ }finally{await none.stop();await cleanup(bare);}
+ // 登录过期：连请求都不该发（Token 刷新由 Claude Code 自己做）。
+ const expired=await makeHome();await writeClaudeCredentials(expired,{...claudeCred,expiresAt:NOW-3600e3});
+ const expiredUsage=createUsage({home:expired,now:()=>NOW,env:{},fetchImpl:async()=>{calls++;return fakeFetch(claudeBody());}});
+ try{assert.match(provider(await expiredUsage.refresh(),'claude').reason,/已过期/);assert.equal(calls,0);}
+ finally{await expiredUsage.stop();await cleanup(expired);}
+ // setup-token 生成的长效 Token 只有推理权限。
+ const scoped=await makeHome();await writeClaudeCredentials(scoped,{...claudeCred,scopes:['user:inference']});
+ const scopedUsage=createUsage({home:scoped,now:()=>NOW,env:{},fetchImpl:async()=>{calls++;return fakeFetch(claudeBody());}});
+ try{assert.match(provider(await scopedUsage.refresh(),'claude').reason,/user:profile/);assert.equal(calls,0);}
+ finally{await scopedUsage.stop();await cleanup(scoped);}
+ // 401 / 429 / 网络失败：第一次成功，后面失败时保留上一次的窗口并带上 error。
+ const home=await makeHome();await writeClaudeCredentials(home);
+ let mode='ok',clock=NOW;
+ const usage=createUsage({home,now:()=>clock,env:{},fetchImpl:async url=>{
+  if(!/api\.anthropic\.com/.test(String(url)))throw Error('不该联网：'+url);
+  if(mode==='401')return fakeFetch({}, {status:401});
+  if(mode==='429')return fakeFetch({}, {status:429});
+  if(mode==='offline')throw Error('getaddrinfo ENOTFOUND api.anthropic.com');
+  return fakeFetch(claudeBody());
+ }});
+ try{
+  assert.equal(provider(await usage.refresh(),'claude').available,true);
+  mode='401';clock+=200000;
+  const rejected=provider(await usage.refresh(true),'claude');
+  assert.match(rejected.error,/拒绝了当前登录/);
+  assert.equal(rejected.windows.find(w=>w.key==='session').usedPercent,12,'401 时保留上一次的数据，等用户重新登录');
+  // 新进程里没有上一次的数据：直接给原因（不保留旧窗口）。
+  const fresh=createUsage({home,now:()=>NOW,env:{},fetchImpl:async url=>{
+   if(!/api\.anthropic\.com/.test(String(url)))throw Error('不该联网：'+url);
+   return fakeFetch({}, {status:401});
+  }});
+  try{assert.match(provider(await fresh.refresh(),'claude').reason,/拒绝了当前登录/);}
+  finally{await fresh.stop();}
+  mode='ok';clock+=200000;
+  assert.equal(provider(await usage.refresh(true),'claude').available,true);
+  mode='429';clock+=200000;
+  const limited=provider(await usage.refresh(true),'claude');
+  assert.equal(limited.available,true);assert.match(limited.error,/限制用量接口的频率/);
+  assert.equal(limited.windows.find(w=>w.key==='session').usedPercent,12,'限流时保留上一次的数据');
+  mode='offline';clock+=200000;
+  const offline=provider(await usage.refresh(true),'claude');
+  assert.match(offline.error,/连接 api\.anthropic\.com 失败/);
+ }finally{await usage.stop();await cleanup(home);}
+});
+
+test('Claude Code：手动 Token 先验证再保存，优先于文件登录',async()=>{
+ const home=await makeHome();await writeClaudeCredentials(home,{...claudeCred,accessToken:'sk-ant-oat01-file'});
+ const calls=[];
+ const usage=createUsage({home,now:()=>NOW,env:{},fetchImpl:claudeFetch(calls)});
+ try{
+  assert.equal(provider(await usage.refresh(),'claude').keySource,'file');
+  // 手动 Token：保存前验证；保存后优先于凭据文件，界面只拿到尾号。
+  const bad=await usage.setKey('claude','sk-ant-oat01-bad');
+  assert.equal(bad.ok,false);
+  const good=await usage.setKey('claude','sk-ant-oat01-manual-abcd');
+  assert.equal(good.ok,true);assert.match(good.message,/已保存并验证/);
+  assert.equal(calls.at(-1).headers.authorization,'Bearer sk-ant-oat01-manual-abcd');
+  assert.equal(calls.length,3,'验证用的那份直接进缓存，保存后不再多打一次网络');
+  const manual=provider(good.snapshot,'claude');
+  assert.equal(manual.keySource,'manual');assert.equal(manual.keyHint,'abcd');
+  const saved=JSON.parse(await fs.readFile(path.join(home,'.bobo/usage.json'),'utf8'));
+  assert.equal(saved.keys.claude,'sk-ant-oat01-manual-abcd');
+  assert.equal((await fs.stat(path.join(home,'.bobo/usage.json'))).mode&0o777,0o600,'Token 文件必须只有当前用户可读写');
+  // 清除后回到凭据文件。
+  assert.equal(provider(await usage.clearKey('claude'),'claude').keySource,'file');
+ }finally{await usage.stop();await cleanup(home);}
+});
+
+test('Claude Code：钥匙串要显式读取（点一次）才自动读，读不到时给可读原因',async()=>{
+ const keychainJson=JSON.stringify({claudeAiOauth:{...claudeCred,accessToken:'sk-ant-oat01-keychain'}});
+ const securityCalls=[];
+ const security=(out,error=null)=>(file,args,options,cb)=>{securityCalls.push([file,...args]);cb(error,out,'');};
+ // 没有点过「读取钥匙串」时一次都不碰钥匙串（背景里不该莫名弹授权框）。
+ const home=await makeHome();
+ const guarded=createUsage({home,now:()=>NOW,env:{USER:'tester'},fetchImpl:claudeFetch([]),execFileImpl:security(keychainJson)});
+ try{
+  const claude=provider(await guarded.refresh(),'claude');
+  assert.equal(claude.available,false);assert.match(claude.reason,/未找到 Claude Code 的本机登录/);
+  assert.equal(securityCalls.length,0);
+ }finally{await guarded.stop();}
+ // 显式读取：先按 $USER 找 `Claude Code-credentials`，验证通过后记住允许自动读；Token 只在内存里用，不写盘。
+ const calls=[];
+ const withKeychain=createUsage({home,now:()=>NOW,env:{USER:'tester'},fetchImpl:claudeFetch(calls),execFileImpl:security(Buffer.from(keychainJson).toString('hex'),null)});
+ try{
+  const r=await withKeychain.readKeychain('claude');
+  assert.equal(r.ok,true);assert.match(r.message,/已读取钥匙串/);
+  assert.deepEqual(securityCalls[0],['/usr/bin/security','find-generic-password','-s','Claude Code-credentials','-w','-a','tester']);
+  assert.equal(calls.at(-1).headers.authorization,'Bearer sk-ant-oat01-keychain');
+  assert.equal(calls.length,1,'验证用的那份直接进缓存，刷新不再多打一次网络');
+  const json=JSON.parse(await fs.readFile(path.join(home,'.bobo/usage.json'),'utf8'));
+  assert.equal(json.keychain,true,'读成功后记住允许');
+  assert.equal(json.keys.claude,undefined,'钥匙串里的 Token 不写盘');
+  assert.equal(provider(withKeychain.snapshot(),'claude').keySource,'keychain');
+  // 读过之后新进程也自动读钥匙串，不用再点一次。
+  const seen=[];
+  const again=createUsage({home,now:()=>NOW,env:{USER:'tester'},fetchImpl:claudeFetch(calls),execFileImpl:(file,args,options,cb)=>{seen.push([file,...args]);cb(null,keychainJson,'');}});
+  try{
+   const claude=provider(await again.refresh(),'claude');
+   assert.equal(claude.keySource,'keychain');assert.equal(claude.available,true);
+   assert.equal(seen.length,1,'自动读一次');
+   assert.equal(provider(await again.clearKey('claude'),'claude').keySource,'keychain','清除手动 Token 不影响钥匙串登录');
+  }finally{await again.stop();}
+ }finally{await withKeychain.stop();await cleanup(home);}
+ // 钥匙串读不到（没授权 / 没有条目）：报可读原因，不写「允许自动读」。
+ const denied=await makeHome();
+ const deniedCalls=[];
+ const deniedUsage=createUsage({home:denied,now:()=>NOW,env:{USER:'tester'},fetchImpl:claudeFetch([]),execFileImpl:(file,args,options,cb)=>{deniedCalls.push([file,...args]);cb(Object.assign(Error('security 退出码 44'),{code:44}),'','');}});
+ try{
+  const r=await deniedUsage.readKeychain('claude');
+  assert.equal(r.ok,false);assert.match(r.message,/钥匙串里没有可用的 Claude Code 登录/);
+  const claude=provider(await deniedUsage.refresh(),'claude');
+  assert.equal(claude.available,false);assert.match(claude.reason,/未找到 Claude Code 的本机登录/);
+  assert.equal(deniedCalls.filter(a=>a.includes('Claude Code-credentials')).length,2,'读不到就不再自动试（等用户再点）：只有刚点的那次按 $USER 与无账号各试一遍');
+ }finally{await deniedUsage.stop();await cleanup(denied);}
+});
+
+test('Claude Code：手动 Token 会清掉引号与 Bearer 前缀',async()=>{
+ const home=await makeHome();
+ const calls=[];
+ const usage=createUsage({home,now:()=>NOW,env:{},fetchImpl:claudeFetch(calls)});
+ try{
+  const r=await usage.setKey('claude','  "Bearer sk-ant-oat01-manual" ');
+  assert.equal(r.ok,true);
+  assert.equal(calls.at(-1).headers.authorization,'Bearer sk-ant-oat01-manual');
+  const saved=JSON.parse(await fs.readFile(path.join(home,'.bobo/usage.json'),'utf8'));
+  assert.equal(saved.keys.claude,'sk-ant-oat01-manual');
+ }finally{await usage.stop();await cleanup(home);}
+});
+
+// ---- Claude Code 的网络闸门（VPN / 直连） ----
+const claudeGateFetch=(calls,{probeOk=true}={})=>async(url,options)=>{
+ if(!/api\.anthropic\.com/.test(String(url)))throw Error('不该联网：'+url);
+ const auth=options.headers.authorization;
+ calls.push(auth?'usage':'probe');
+ if(!auth)return probeOk?fakeFetch({}, {status:401}):Promise.reject(Error('连接 api.anthropic.com 失败'));
+ return fakeFetch(claudeBody());
+};
+
+test('Claude Code：隧道接口判定（utun / tun / ipsec / ppp 算 VPN，物理网卡算直连）',()=>{
+ for(const name of ['utun0','utun4','tun0','tap1','ipsec0','ppp0','wg0','gpd0'])assert.equal(tunnelInterface(name),true,name);
+ for(const name of ['en0','en5','eth0','bridge100','lo0','awdl0',''])assert.equal(tunnelInterface(name),false,name||'（空）');
+});
+
+test('Claude Code：直连时整个跳过（不带登录请求），确认后才发；隧道下先做不带登录的探测',async()=>{
+ const home=await makeHome();await writeClaudeCredentials(home);
+ // 直连：一次请求都不发，明确告诉界面「需要二次确认」。
+ const directCalls=[];
+ const direct=createUsage({home,now:()=>NOW,env:{},fetchImpl:claudeGateFetch(directCalls),claudeNetwork:async()=>'direct'});
+ try{
+  const claude=provider(await direct.refresh(),'claude');
+  assert.equal(claude.available,false);assert.equal(claude.needsDirectConfirm,true);
+  assert.match(claude.reason,/直连/);
+  assert.deepEqual(directCalls,[],'直连时不应携带登录发起任何请求');
+  // 用户在界面上确认之后（?direct=1）：不再探测，直接带登录请求一次。
+  const confirmed=provider(await direct.refresh(true,{claudeDirect:true}),'claude');
+  assert.equal(confirmed.available,true);assert.equal(confirmed.needsDirectConfirm,false);
+  assert.deepEqual(directCalls,['usage']);
+ }finally{await direct.stop();}
+ // 隧道：先探测（不带 Authorization），通了才带登录请求；探测结果记一小会儿，连着刷新不重复探测。
+ const calls=[];
+ let clock=NOW;
+ const tunnel=createUsage({home,now:()=>clock,env:{},fetchImpl:claudeGateFetch(calls),claudeNetwork:async()=>'tunnel'});
+ try{
+  const claude=provider(await tunnel.refresh(),'claude');
+  assert.equal(claude.available,true);assert.equal(claude.needsDirectConfirm,false);
+  assert.deepEqual(calls,['probe','usage']);
+  clock+=200000;
+  await tunnel.refresh(true);
+  assert.deepEqual(calls,['probe','usage','usage'],'探测结果还在有效期内就不重复探测');
+ }finally{await tunnel.stop();}
+ // 隧道通了才算数：探测失败就不发登录请求。
+ const failCalls=[];
+ const tunnelFail=createUsage({home,now:()=>NOW,env:{},fetchImpl:claudeGateFetch(failCalls,{probeOk:false}),claudeNetwork:async()=>'tunnel'});
+ try{
+  const claude=provider(await tunnelFail.refresh(),'claude');
+  assert.equal(claude.available,false);assert.match(claude.reason,/claude 站点连不通/);
+  assert.deepEqual(failCalls,['probe']);
+ }finally{await tunnelFail.stop();}
+ // 判定不出（非 macOS / Linux，或本机命令不可用）时不拦：照旧直接请求。
+ const unknownCalls=[];
+ const unknown=createUsage({home,now:()=>NOW,env:{},fetchImpl:claudeGateFetch(unknownCalls),claudeNetwork:async()=>'unknown'});
+ try{
+  assert.equal(provider(await unknown.refresh(),'claude').available,true);
+  assert.deepEqual(unknownCalls,['usage']);
+ }finally{await unknown.stop();}
+ await cleanup(home);
+});
+
+test('Claude Code：直连时保留上一次的窗口并标出原因，打开「直连时也请求」后自动恢复',async()=>{
+ const home=await makeHome();await writeClaudeCredentials(home);
+ let route='tunnel',clock=NOW;
+ const calls=[];
+ const usage=createUsage({home,now:()=>clock,env:{},fetchImpl:claudeGateFetch(calls),claudeNetwork:async()=>route});
+ try{
+  const first=provider(await usage.refresh(),'claude');
+  assert.equal(first.available,true);assert.equal(first.windows.find(w=>w.key==='session').usedPercent,12);
+  route='direct';clock+=200000;
+  const skipped=provider(await usage.refresh(true),'claude');
+  assert.equal(skipped.available,true);assert.equal(skipped.needsDirectConfirm,true);
+  assert.match(skipped.error,/直连/);
+  assert.equal(skipped.windows.find(w=>w.key==='session').usedPercent,12,'直连跳过时保留上一次的数据');
+  // 打开开关（写进 usage.json）：自动刷新不再拦，也不再问确认。
+  usage.setClaudeDirect(true);
+  assert.equal(usage.snapshot().claudeDirect,true);
+  const saved=await waitFor(async()=>{const r=JSON.parse(await fs.readFile(path.join(home,'.bobo/usage.json'),'utf8'));if(r.claudeDirect!==true)throw Error('开关还没写盘');return r;});
+  assert.equal(saved.claudeDirect,true);
+  clock+=200000;
+  const resumed=provider(await usage.refresh(true),'claude');
+  assert.equal(resumed.available,true);assert.equal(resumed.needsDirectConfirm,false);
+  // 手动 Token 的保存也走同一道闸门：直连时先回 needsDirectConfirm，确认后才验证。
+  usage.setClaudeDirect(false);
+  clock+=200000;
+  const blocked=await usage.setKey('claude','sk-ant-oat01-manual-abcd');
+  assert.equal(blocked.ok,false);assert.equal(blocked.needsDirectConfirm,true);
+  const ok=await usage.setKey('claude','sk-ant-oat01-manual-abcd',{direct:true});
+  assert.equal(ok.ok,true);assert.equal(provider(ok.snapshot,'claude').keySource,'manual');
+ }finally{await usage.stop();await cleanup(home);}
 });

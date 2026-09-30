@@ -1,5 +1,5 @@
 // 设备：CPU / 内存 / 磁盘三个指标。只读本机、不写任何文件、不联网。
-// CPU 用 os.cpus() 的累计时间差算占用（2 秒窗口），另读 os.loadavg() 的 1/5/15 分钟负载；
+// CPU 用 os.cpus() 的累计时间差算占用，另读 os.loadavg() 的 1/5/15 分钟负载；
 // 内存解析 /usr/bin/vm_stat 的页统计（已用 = 活跃 + 联动 + 压缩占用 − 可回收，缓存单独列出，
 // 口径接近「活动监视器」），压力等级读 kern.memorystatus_vm_pressure_level（1 正常 / 2 警告 / 4 紧张，
 // 与活动监视器的内存压力图同源）；磁盘用 fs.statfs('/')（APFS 容器级，与 Finder 显示的可用空间一致）。
@@ -7,10 +7,11 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import {spawn} from 'node:child_process';
+import {createActivitySampler} from './activity-sampler.mjs';
 
 const vmStatBin='/usr/bin/vm_stat',sysctlBin='/usr/sbin/sysctl';
 const psBin='/bin/ps',psColumns='pid=,pcpu=,pmem=,rss=,etime=,comm=';
-const tickMs=3000,memoryEvery=2,diskEvery=20;   // 3 秒一跳；内存每 2 跳（约 6 秒）、磁盘每 20 跳（约 60 秒）
+const memoryEvery=2,diskEvery=20;   // 使用时 3 秒一跳，常驻时 15 秒；内存每 2 跳、磁盘每 20 跳
 // 进程列表：不进常驻采样，只在网页停在「设备」的 CPU / 内存分栏时按需拉取（见 app.js 的 processTimer）。
 // 结果缓存 1.5 秒，多开页面或重复请求时复用同一份，避免反复 fork ps。
 const processCacheMs=1500,processLimitMax=50,processLimitDefault=15;
@@ -98,7 +99,7 @@ function cpuUsage(prev,next){
 }
 
 export function createDevices({now=Date.now,cpus=os.cpus,loadavg=os.loadavg,totalmem=os.totalmem,freemem=os.freemem,statfs=fs.statfs,exec=run,platform=process.platform,selfPid=process.pid}={}){
- let cpu=null,memory=null,disk=null,prevTicks=null,updatedAt=0,errors={},signature='',state=null,listeners=new Set(),timer=null,ticks=0,busy=null,closed=false,processCache=null,processBusy=null;
+ let cpu=null,memory=null,disk=null,prevTicks=null,updatedAt=0,errors={},signature='',state=null,listeners=new Set(),ticks=0,busy=null,closed=false,processCache=null,processBusy=null;
  const isMac=platform==='darwin',isWin=platform==='win32';
  // 磁盘看哪个挂载点：macOS / Linux 是根分区，Windows 是系统盘（statfs 在三个平台都可用）。
  const diskMount=isWin?(process.env.SystemDrive||'C:')+'\\':'/';
@@ -194,12 +195,14 @@ export function createDevices({now=Date.now,cpus=os.cpus,loadavg=os.loadavg,tota
   busy=(async()=>{try{await tick(all);}catch(e){errors.sample=describe(e,'读取设备信息失败：');}finally{busy=null;}return snapshot();})();
   return busy;
  }
+ const sampler=createActivitySampler({sample:refresh,now});
  return {
   snapshot:()=>state||snapshot(),
   processes,
   refresh,
   subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener);},
-  start(){closed=false;void refresh(true);timer=setInterval(()=>{void refresh(false);},tickMs);timer.unref?.();},
-  stop(){closed=true;if(timer)clearInterval(timer);timer=null;listeners.clear();},
+  watch:()=>sampler.watch(),
+  start(){closed=false;sampler.start();},
+  stop(){closed=true;sampler.stop();listeners.clear();},
  };
 }

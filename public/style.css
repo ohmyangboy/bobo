@@ -175,6 +175,19 @@ h2{font-size:18px;font-weight:600}
 .metadata{margin:0 26px 14px;color:var(--muted);font-size:11.5px}
 .metadata summary{cursor:default;font-weight:500}
 .metadata p{margin:6px 0;line-height:1.6;overflow-wrap:anywhere}
+/* 技能详情「安装位置与 Agent」：本机已安装的 Agent 逐个列出，右边给出安装 / 移除动作。
+   状态 = linked 已安装 / universal 通用自动可见 / other 目录里已有同名内容 / missing 未安装。 */
+.agent-links{margin-top:8px}
+.agent-links p{margin:0 0 8px;line-height:1.6}
+.agent-links-summary{color:var(--muted)}
+.agent-links-note{padding:8px 12px;border:1px solid var(--line);border-left:3px solid var(--control-border);border-radius:8px;background:var(--card);color:var(--text-2)}
+.agent-rows{display:grid;gap:4px;max-width:560px}
+.agent-row{display:flex;align-items:center;gap:10px;min-height:30px;padding:3px 4px 3px 11px;border:1px solid var(--line);border-radius:9px;background:var(--card)}
+.agent-row .agent-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-size:12px}
+.agent-row .agent-mark{flex:none;font-size:11px;color:var(--muted)}
+.agent-row[data-state=linked] .agent-mark{color:var(--accent)}
+.agent-row[data-state=other] .agent-mark{color:var(--danger)}
+.agent-row .agent-action{flex:none;min-height:24px;padding:2px 10px;font-size:11px;border-radius:7px}
 .folder-skills{overflow:auto;padding:10px 26px 44px;display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px;align-content:start}
 .folder-skill{display:block;text-align:left;white-space:normal;padding:15px 16px;border:1px solid var(--line);border-radius:13px;background:var(--card);box-shadow:none;min-height:80px}
 .folder-skill strong{display:block;font-size:13.5px;font-weight:600;margin-bottom:6px}
@@ -404,6 +417,37 @@ body[data-view=usage] #usageRefresh,body[data-view=device] #deviceRefresh{displa
 .process-row .tag{margin-left:6px;padding:2px 6px;border-radius:5px;background:var(--bg);color:var(--muted);font-size:10px;font-weight:500}
 .process-foot{padding:7px 16px 10px;color:var(--muted);font-size:10.5px}
 .process-head+.process-row{border-top:0}
+/* 设备 → 网络 → 服务线路：每个 AI 服务与出口一行。左边图标，中间名称 + 细节（出口 IP、归属、类型、风控），
+   右边信号格 + 首字节毫秒与结论。信号格是四根渐高的竖条（≤ 150 / 350 / 700 ms 四到两格，其余成功请求一格），
+   只按等级上色；出口类型 / 风控值在细节里单独上色（纯净绿 / 一般橙 / 不纯净红）。 */
+.link-row{display:flex;align-items:center;gap:12px;padding:9px 18px;font-size:12.5px}
+.link-row+.link-row{border-top:1px solid var(--line-soft)}
+.link-row>.sf{width:20px;height:20px;flex:none;opacity:.9}
+.link-main{flex:1;min-width:0}
+.link-name{color:var(--text);font-size:12.5px;font-weight:600}
+.link-sub{display:flex;align-items:baseline;gap:6px;margin-top:3px;color:var(--muted);font-size:11.5px}
+.link-sub-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.link-purity{flex:none;color:var(--text-2)}
+.link-purity[data-level=ok]{color:#30d158}
+.link-purity[data-level=warn]{color:#ff9f0a}
+.link-purity[data-level=low]{color:#ff453a}
+.link-latency{display:flex;align-items:center;gap:8px;flex:none}
+.link-latency b{min-width:58px;text-align:right;color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+.link-signal{display:inline-flex;align-items:flex-end;gap:2px;height:16px}
+.link-signal i{width:4px;height:4px;border-radius:1px;background:var(--muted);opacity:.35}
+.link-signal i:nth-child(2){height:8px}
+.link-signal i:nth-child(3){height:12px}
+.link-signal i:nth-child(4){height:16px}
+.link-signal i.on{opacity:1}
+.link-signal[data-level=ok] i.on{background:#30d158}
+.link-signal[data-level=warn] i.on{background:#ff9f0a}
+.link-signal[data-level=low] i.on{background:#ff453a}
+.link-health{flex:none;width:54px;text-align:right;color:var(--muted);font-size:12px}
+.link-health[data-level=ok]{color:#30d158}
+.link-health[data-level=warn]{color:#ff9f0a}
+.link-health[data-level=low]{color:#ff453a}
+.link-empty{padding:14px 18px;color:var(--muted);font-size:12px}
+.link-foot{padding:7px 16px 10px;color:var(--muted);font-size:10.5px}
 
 /* 设置页：左侧分类导航 + 右侧分区卡片（大标题、分组标题、控件右对齐）。左栏与其它视图同构，不再单独加顶部内边距。 */
 .settings-menu{display:flex;flex-direction:column;align-items:stretch;gap:2px;flex:1;min-height:0;overflow:auto;padding:0 8px}
@@ -473,4 +517,6 @@ body[data-view=usage] #usageRefresh,body[data-view=device] #deviceRefresh{displa
 
 @media(max-width:900px){.library{width:220px}.agent-items{width:230px}.files{width:150px}.editor-foot span:last-child{display:none}}
 @media(max-width:760px){header{gap:8px}.glass-group button{padding:4px 8px;font-size:12px}.library{width:190px}}
+/* WKWebView 隐藏或应用不在前台时，同步暂停 CSS 呼吸；重新使用时从原相位继续。 */
+body.window-inactive *,body.window-inactive *::before,body.window-inactive *::after{animation-play-state:paused!important}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}.is-loading .summary-spark{animation:none}.top-links #appVersion.is-ready{animation:none}}

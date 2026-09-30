@@ -1,6 +1,7 @@
 // 「通知岛」的 Claude Code 数据层。Claude Code 没有对外的事件流，但有两份可读信号：
 // 1) ~/.claude/sessions/<pid>.json 是活跃会话的注册表（进程退出即删），status 取 idle / busy / waiting，
-//    waiting 时 waitingFor 说明在等什么（`permission prompt` 权限确认 / `input needed` 要你回答）——实时状态以它为准；
+//    waiting 时 waitingFor 说明在等什么——只有真正把会话卡住的询问才算「等你回答」，`/model` 这类内置命令的
+//    面板只给 `dialog open`（界面开着，不是在问你），按运行中处理（见 ASK_WAITING）；
 // 2) ~/.claude/projects/<目录编码>/<会话ID>.jsonl 是会话日志：尾部有 ai-title（AI 生成的标题）与 last-prompt，
 //    退出后也还在，用来补标题与 cwd。
 // 这里只读这两处（jsonl 只读头尾、按 mtime + size 缓存），不写任何 Claude Code 配置。
@@ -16,7 +17,11 @@ const POLL_MS=2000;
 const LABELS={working:'运行中',waiting:'等你回答',idle:'已结束',error:'已终止'};
 // 注册表 status → 通知岛状态；waitingFor 决定「等你回答」的说明文字。
 const STATUS={busy:'working',waiting:'waiting',idle:'idle'};
-const WAIT_HINTS={'permission prompt':'等待权限确认','input needed':'需要你回答'};
+// Claude Code 2.1.x 的 waitingFor 取值里，只有这几个是真的在等你：要你回答、权限确认、沙箱要联网授权、
+// 子代理请求、目标提议。`dialog open` 是「有个面板开着」的通用桶（/model、/config 这类内置命令的界面，
+// 不是提问），不在名单里的一律按运行中处理——宁可少报，也不要为打开一个面板弹「需要你回答」。
+const ASK_WAITING=new Set(['input needed','permission prompt','sandbox request','worker request','goal proposal']);
+const WAIT_HINTS={'permission prompt':'等待权限确认','input needed':'需要你回答','sandbox request':'等待沙箱联网授权','worker request':'等待子代理请求','goal proposal':'等待确认目标'};
 
 async function readChunk(file,start,length){
  const fh=await fs.open(file,'r');
@@ -138,10 +143,13 @@ export function createClaude({home,remind=()=>{},interval=POLL_MS}={}){
    const base={source:'claude',directory,name:directory?path.basename(directory):'claude',title,sessionId:sid};
    seen.add(id);
    if(reg){
+    const waitingFor=String(reg.waitingFor||'').trim();
     let state=STATUS[String(reg.status||'').toLowerCase()]||'working';
+    // 只有名单里的 waitingFor 才算「等你回答」；`dialog open`（内置命令面板开着）按运行中处理，不提醒。
+    if(state==='waiting'&&!ASK_WAITING.has(waitingFor))state='working';
     const at=Number(reg.statusUpdatedAt)||Number(reg.updatedAt)||Date.now();
     if(state==='working'&&Date.now()-at>STALE_MS)state='idle';
-    const detail=state==='waiting'?(WAIT_HINTS[reg.waitingFor]||String(reg.waitingFor||'').trim()||'需要你回答'):'';
+    const detail=state==='waiting'?(WAIT_HINTS[waitingFor]||waitingFor||'需要你回答'):'';
     // 计时：注册表记着会话开始时间（startedAt），比日志首行更准；日志没有或读不到时退回会话日志。
     const startedAt=Number(reg.startedAt)||log?.startedAt||prev?.startedAt||at;
     update(id,{...base,state,detail,at,pid:reg.pid,gone:false,startedAt});

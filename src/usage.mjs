@@ -1,11 +1,15 @@
-// 用量：三家额度。Codex 读 ~/.codex/auth.json 的 OAuth token，调 chatgpt.com 的
+// 用量：四家额度。Codex 读 ~/.codex/auth.json 的 OAuth token，调 chatgpt.com 的
 // /backend-api/wham/usage，按 limit_window_seconds 归类窗口（18000 秒 = 5 小时、604800 秒 = 一周，
-// 与 CodexBar 的 CodexRateWindowNormalizer 一致）；OpenCode Go 读
+// 与 CodexBar 的 CodexRateWindowNormalizer 一致）；Claude Code 读 ~/.claude/.credentials.json（或用户点
+// 「读取钥匙串」后读 macOS 钥匙串）里的 OAuth Token，调 api.anthropic.com 的 /api/oauth/usage
+// （与 CodexBar 的 Claude OAuth 路径一致）；OpenCode Go 读
 // ~/.local/share/opencode/opencode.db 里 opencode-go 的费用，按 CodexBar 的 12 / 30 / 60 美元口径估算。
 // Antigravity（agy）优先读本地 Language Server 的 RetrieveUserQuotaSummary，拿不到就退回 agy CLI 的 /usage 报告
 // （见下面的 readAgy）。
-// Codex 走的是官方账号自己的接口、不改任何凭据；本地库只读（没有 sidecar 时用 immutable 直读，不创建文件）。
+// Codex 与 Claude Code 走的都是官方账号自己的接口、不改任何凭据（不刷新 token、不回写钥匙串）；本地库只读
+// （没有 sidecar 时用 immutable 直读，不创建文件）。
 import {execFile,spawn} from 'node:child_process';
+import dns from 'node:dns/promises';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,13 +17,21 @@ import path from 'node:path';
 export const limits={session:12,week:30,month:60};
 export const providers=[
  {id:'codex',name:'Codex',symbol:'sparkles'},
+ {id:'claude',name:'Claude Code',symbol:'sparkles'},
  {id:'opencode-go',name:'OpenCode Go',symbol:'terminal'},
  {id:'agy',name:'Antigravity',symbol:'sparkles'},
 ];
 const codexUsageURL='https://chatgpt.com/backend-api/wham/usage';
 const opencodeUsageURL='https://opencode.ai/zen/go/v1/usage';
+const claudeUsageURL='https://api.anthropic.com/api/oauth/usage';
+// 用量接口对认不出的客户端限流更凶，User-Agent 要像 Claude Code 自己（CodexBar 同样固定成 claude-code/<版本>；
+// 版本号本身不是关键，没必要为了它去跑一次 claude --version）。
+const claudeUserAgent='claude-code/2.1.0';
+const claudeHost='api.anthropic.com';
 const sessionSeconds=5*3600,weekSeconds=7*86400,dayMs=24*60*60*1000,historyDays=30;
-const tickMs=60000,netIntervalMs=180000,netHardMinMs=60000,codexTimeoutMs=10000;
+const tickMs=60000,netIntervalMs=180000,netHardMinMs=60000,codexTimeoutMs=10000,claudeProbeMs=6000;
+// 连通性探测的结果记一小会儿：连着几次刷新不重复探测（探测通了记 5 分钟，不通只记 1 分钟，方便手动重试）。
+const claudeProbeOkMs=300000,claudeProbeFailMs=60000;
 // 读取连续失败时的重试退避：2 / 4 / 8 / 10 分钟（封顶），成功后清零（见 refresh）。
 const backoffMaxMs=600000;
 // 步骤级费用：取 opencode-go 的助手消息，有 step-finish 分片时按分片累加，否则回退到消息级 cost
@@ -45,6 +57,8 @@ SELECT createdMs,cost,model FROM (
 const pad=n=>String(n).padStart(2,'0');
 const userError=message=>Object.assign(Error(message),{userFacing:true});
 const describe=(e,prefix)=>e?.userFacing?e.message:prefix+(e?.message||e);
+// 手动粘贴的 Token 常带引号或 "Bearer " 前缀：先清掉再验证 / 保存。
+const cleanToken=v=>String(v||'').trim().replace(/^["']|["']$/g,'').replace(/^Bearer\s+/i,'').trim();
 // Node 22 的 fetch 不读取 macOS 系统代理；桌面应用从 Finder 启动时通常也没有 HTTPS_PROXY。
 export function macHTTPSProxy(output){
  if(!/\bHTTPSEnable\s*:\s*1\b/.test(output))return '';
@@ -56,8 +70,9 @@ export function macHTTPSProxy(output){
 function systemHTTPSProxy(){
  return new Promise(resolve=>execFile('/usr/sbin/scutil',['--proxy'],{timeout:2000,maxBuffer:65536},(error,stdout)=>resolve(error?'':macHTTPSProxy(stdout))));
 }
-// curl 遵循系统 HTTPS 代理。凭据只从 stdin 送入 curl 配置，不出现在进程参数或错误信息中。
-export function curlCodexUsage(proxy,headers,url=codexUsageURL){
+// curl 遵循系统 HTTPS 代理：Node 的 fetch 不读 macOS 的系统代理，配了代理的来源都从这里走。
+// 凭据只从 stdin 送入 curl 配置，不出现在进程参数或错误信息中。
+export function curlUsage(proxy,headers,url=codexUsageURL){
  return new Promise((resolve,reject)=>{
   const child=spawn('/usr/bin/curl',['--config','-'],{shell:false,stdio:['pipe','pipe','pipe']});
   let out='',err='';
@@ -161,15 +176,84 @@ export function agySnapshot(body,nowMs){
  return {id:'agy',name:'Antigravity',symbol:'sparkles',available:true,estimated:false,source:'api',keySource:'cli',keyHint:'',plan:'Google Code Assist',credits:null,windows,error:null,updatedAt:nowMs};
 }
 
-export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,notify=null,execFileImpl=execFile}={}){
+// 内核把请求路由到哪块网卡：utun / tun / tap / ipsec / ppp 这类隧道接口算边走 VPN，物理网卡就是直连。
+export function tunnelInterface(name){
+ return /^(utun|tun|tap|ipsec|ppp|gpd|wg)/i.test(String(name||''));
+}
+// Claude Code 的登录：凭据文件与 macOS 钥匙串里都是同一份 JSON（claudeAiOauth.accessToken），
+// 只读 accessToken 与套餐信息，其余字段（refreshToken、MCP 状态等）一概不动。
+export function claudeCredentials(raw){
+ const oauth=raw?.claudeAiOauth;
+ if(!oauth||typeof oauth.accessToken!=='string'||!oauth.accessToken.trim())return null;
+ const expiresAt=Number(oauth.expiresAt)||0;   // 毫秒；老版本存过秒
+ return {
+  accessToken:oauth.accessToken.trim(),
+  scopes:Array.isArray(oauth.scopes)?oauth.scopes.filter(s=>typeof s==='string'):[],
+  subscriptionType:typeof oauth.subscriptionType==='string'?oauth.subscriptionType:'',
+  rateLimitTier:typeof oauth.rateLimitTier==='string'?oauth.rateLimitTier:'',
+  expiresAt:expiresAt>0&&expiresAt<1e12?expiresAt*1000:expiresAt
+ };
+}
+// 套餐名：subscriptionType（max / pro / team / enterprise）+ rateLimitTier 里的倍数（default_claude_max_20x）。
+function claudePlan(cred){
+ const base={max:'Max',pro:'Pro',team:'Team',enterprise:'Enterprise'}[String(cred.subscriptionType||'').toLowerCase()]||cred.subscriptionType||'';
+ const mult=/(\d+)x$/.exec(cred.rateLimitTier||'');
+ return (base+(mult?' '+mult[1]+'x':'')).trim();
+}
+// `security -w` 在值里有换行等不可打印字符时返回十六进制，与 magpie / CodexBar 的处理一致；两种都认。
+export function keychainDecode(text){
+ const raw=String(text||'').trim();
+ if(!raw||raw.startsWith('{'))return raw;
+ if(raw.length%2===0&&/^[0-9a-fA-F]+$/.test(raw)){
+  const hex=Buffer.from(raw,'hex').toString('utf8');
+  if(hex.includes('{'))return hex;
+ }
+ return raw;
+}
+// Claude 用量响应：five_hour → 5 小时滚动、seven_day → 本周（两者都是「已用百分比」，
+// utilization 0–100、resets_at 是 ISO 时间），seven_day_sonnet / seven_day_opus 是模型自己的周额度，
+// 新的 limits[].weekly_scoped 再补上按模型统计的周额度（如 Fable）；extra_usage 是超出订阅额度后的
+// 按量计费（金额是分）。
+export function claudeSnapshot(body,nowMs){
+ const windows=[];
+ const add=(key,label,w)=>{
+  if(!w||typeof w.utilization!=='number')return;
+  const usedPercent=clampPercent(w.utilization),resetsAt=Date.parse(w.resets_at||'')||0;
+  const resetInSec=resetsAt?Math.max(0,Math.round((resetsAt-nowMs)/1000)):0;
+  windows.push({key,label,usedUSD:null,limitUSD:null,usedPercent,remainingPercent:round10(100-usedPercent),resetInSec,resetsAt:resetsAt||nowMs+resetInSec*1000,status:usedPercent>=100?'rate-limited':'ok'});
+ };
+ add('session','5 小时滚动',body?.five_hour);
+ add('week','本周',body?.seven_day);
+ add('opus','本周 · Opus',body?.seven_day_opus);
+ add('sonnet','本周 · Sonnet',body?.seven_day_sonnet);
+ for(const item of Array.isArray(body?.limits)?body.limits:[]){
+  const name=String(item?.scope?.model?.display_name||'').trim();
+  if(item?.kind!=='weekly_scoped'||!name||typeof item.percent!=='number')continue;
+  const key='week-'+name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'');
+  if(!key||windows.some(w=>w.key===key))continue;
+  add(key,'本周 · '+name,{utilization:item.percent,resets_at:item.resets_at});
+ }
+ const extra=body?.extra_usage;
+ if(extra?.is_enabled===true&&typeof extra.used_credits==='number'&&typeof extra.monthly_limit==='number'&&extra.monthly_limit>0){
+  const usedUSD=roundUSD(extra.used_credits/100),limitUSD=roundUSD(extra.monthly_limit/100);
+  const usedPercent=typeof extra.utilization==='number'?clampPercent(extra.utilization):clampPercent(usedUSD/limitUSD*100);
+  windows.push({key:'extra',label:'额外用量（月度）',usedUSD,limitUSD,usedPercent,remainingPercent:round10(100-usedPercent),resetInSec:0,resetsAt:nowMs,status:usedPercent>=100?'rate-limited':'ok'});
+ }
+ return {id:'claude',name:'Claude Code',symbol:'sparkles',available:true,estimated:false,source:'api',keySource:'',keyHint:'',plan:'',credits:null,windows,error:null,updatedAt:nowMs};
+}
+
+export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,notify=null,execFileImpl=execFile,claudeNetwork=null}={}){
  const dataDir=path.join(home,'.bobo'),settingsFile=path.join(dataDir,'usage.json');
  const opencodeDir=path.join(home,'.local/share/opencode'),dbFile=path.join(opencodeDir,'opencode.db'),authFile=path.join(opencodeDir,'auth.json');
  const codexDir=env.CODEX_HOME||path.join(home,'.codex');
+ const claudeDir=env.CLAUDE_CONFIG_DIR||path.join(home,'.claude');
  let sqlite=null,order=providers.map(p=>p.id),state=empty(),signature='',listeners=new Set(),timer=null,reading=null,closed=false,localRowsCache=null,localDbStamp='';
  const cache=new Map(),backoff=new Map();
  // 持久化设置（~/.bobo/usage.json）：各来源的显示顺序（order，折叠胶囊显示顺序里第一个可用且开启的）、
- // 各来源的启停、手动填的 API Key、额度重置提醒、各来源圆环显示哪一档窗口（ranges，见 cycleRange）。
- const settings={keys:{},enabled:{},ranges:{},notifyReset:true};
+ // 各来源的启停、手动填的 API Key、额度重置提醒、各来源圆环显示哪一档窗口（ranges，见 cycleRange）；
+ // keychain 记「用户允许读过 macOS 钥匙串里的 Claude Code 登录」，没答应过就一次都不读（见 claudeAuth）；
+ // claudeDirect 记「直连时也请求」（默认关：没走 VPN / 代理就整个跳过，见 claudeGate）。
+ const settings={keys:{},enabled:{},ranges:{},notifyReset:true,keychain:false,claudeDirect:false};
  const isEnabled=id=>settings.enabled[id]!==false;
  // 顺序规范化：只认已知来源、去掉重复，没提到的按默认顺序补在后面。
  function normalizeOrder(ids){
@@ -199,6 +283,8 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
    if(Array.isArray(raw?.order))order=normalizeOrder(raw.order);
    else if(providers.some(p=>p.id===raw?.provider))order=normalizeOrder([raw.provider,...order]);
    if(typeof raw?.notifyReset==='boolean')settings.notifyReset=raw.notifyReset;
+   if(typeof raw?.keychain==='boolean')settings.keychain=raw.keychain;
+   if(typeof raw?.claudeDirect==='boolean')settings.claudeDirect=raw.claudeDirect;
    for(const p of providers){
     if(typeof raw?.enabled?.[p.id]==='boolean')settings.enabled[p.id]=raw.enabled[p.id];
     const range=raw?.ranges?.[p.id];
@@ -211,7 +297,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
  // 串行写盘（原子改名，避免半截 JSON）：连点切换时最后一次调用写入的就是当前顺序。
  let saving=Promise.resolve();
  function saveSettings(){
-  saving=saving.then(async()=>{try{await fs.mkdir(dataDir,{recursive:true});await fs.writeFile(settingsFile+'.tmp',JSON.stringify({order,enabled:settings.enabled,keys:settings.keys,ranges:settings.ranges,notifyReset:settings.notifyReset},{},1),{mode:0o600});await fs.rename(settingsFile+'.tmp',settingsFile);}catch{}});
+  saving=saving.then(async()=>{try{await fs.mkdir(dataDir,{recursive:true});await fs.writeFile(settingsFile+'.tmp',JSON.stringify({order,enabled:settings.enabled,keys:settings.keys,ranges:settings.ranges,notifyReset:settings.notifyReset,keychain:settings.keychain,claudeDirect:settings.claudeDirect},{},1),{mode:0o600});await fs.rename(settingsFile+'.tmp',settingsFile);}catch{}});
   return saving;
  }
 
@@ -338,7 +424,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   try{
    const headers={authorization:'Bearer '+accessToken,accept:'application/json','user-agent':'bobo',...(accountId?{'chatgpt-account-id':accountId}:{})};
    const proxy=fetchImpl===fetch&&process.platform==='darwin'?await systemHTTPSProxy():'';
-   response=proxy?await curlCodexUsage(proxy,headers):await fetchImpl(codexUsageURL,{headers,redirect:'error',signal:controller.signal});
+   response=proxy?await curlUsage(proxy,headers,codexUsageURL):await fetchImpl(codexUsageURL,{headers,redirect:'error',signal:controller.signal});
   }catch(e){throw userError('连接 chatgpt.com 失败：'+(e?.cause?.message||e?.message||e));}
   finally{clearTimeout(timeout);}
   if(response.status===401||response.status===403)throw userError('Codex 登录已失效，请重新运行 codex login');
@@ -347,6 +433,118 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   try{body=await response.json();}catch{throw userError('Codex 额度接口返回的不是 JSON');}
   return codexSnapshot(body,nowMs);
  }
+
+  // ---- Claude Code：~/.claude/.credentials.json / 手动 Token /（用户点过才读的）macOS 钥匙串 + api.anthropic.com ----
+  // 凭据只读、不刷新、不回写：token 过期时让用户自己在终端跑一次 claude 刷新。
+  // 钥匙串要用户点过「读取钥匙串」（settings.keychain）才会自动读，免得在后台莫名弹出系统授权框。
+  // 网络闸门（见 claudeGate）：直连时默认不带登录请求——从国内 IP 携带 token 容易被 Anthropic 风控，
+  // 没走 VPN / 代理就整个跳过，用户点了「刷新额度」二次确认（direct）或打开开关才照发。
+  const claudeProxy=async()=>fetchImpl===fetch&&process.platform==='darwin'?systemHTTPSProxy():'';
+  const execOnce=(file,args)=>new Promise(resolve=>execFileImpl(file,args,{timeout:3000,maxBuffer:65536},(error,stdout)=>resolve(error?null:String(stdout||''))));
+  // 到 api.anthropic.com 的路由：系统代理算 proxy；否则看内核把包发给哪块网卡（隧道接口算 VPN）。
+  // 测试环境（临时 HOME / BOBO_HOME）不去碰真实系统；判定不出（非 macOS / Linux、命令不可用）返回 unknown。
+  async function claudeRouteKind(){
+   if(claudeNetwork)return claudeNetwork();
+   if(env.BOBO_HOME||home.startsWith(os.tmpdir()))return 'unknown';
+   if(await claudeProxy())return 'proxy';
+   try{
+    const {address}=await dns.lookup(claudeHost);
+    const out=process.platform==='darwin'?await execOnce('/sbin/route',['-n','get',address])
+     :process.platform==='linux'?(await execOnce('/sbin/ip',['route','get',address]))||(await execOnce('/usr/sbin/ip',['route','get',address]))
+     :null;
+    const iface=/\binterface:\s*(\S+)/.exec(out||'')?.[1]||/\bdev\s+(\S+)/.exec(out||'')?.[1]||'';
+    if(!iface)return 'unknown';
+    return tunnelInterface(iface)?'tunnel':'direct';
+   }catch{return 'unknown';}
+  }
+  // 不带 Token 的探测：只确认这条路能把请求送到 claude 站点（任何 HTTP 状态都算通）。
+  let probeAt=0,probeOk=false;
+  async function claudeReachable(){
+   if(now()-probeAt<(probeOk?claudeProbeOkMs:claudeProbeFailMs))return probeOk;
+   const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),claudeProbeMs);
+   try{
+    const headers={accept:'application/json','user-agent':claudeUserAgent};
+    const proxy=await claudeProxy();
+    const response=proxy?await curlUsage(proxy,headers,claudeUsageURL):await fetchImpl(claudeUsageURL,{headers,redirect:'error',signal:controller.signal});
+    probeOk=Number.isInteger(response?.status);
+   }catch{probeOk=false;}
+   finally{clearTimeout(timeout);}
+   probeAt=now();
+   return probeOk;
+  }
+  async function claudeGate(direct){
+   if(direct||settings.claudeDirect)return;
+   const route=await claudeRouteKind();
+   if(route==='direct')throw Object.assign(userError('检测到直连（没有走 VPN / 代理）：已跳过 Claude 额度请求，避免从直连 IP 携带登录被 Anthropic 风控'),{needsDirectConfirm:true});
+   if((route==='tunnel'||route==='proxy')&&!await claudeReachable())throw userError('VPN / 代理已开，但 claude 站点连不通：已跳过 Claude 额度请求');
+  }
+  function claudeKeychainRead(){
+   return new Promise(resolve=>{
+    let account=typeof env.USER==='string'?env.USER.trim():'';
+    if(!account)try{account=os.userInfo().username;}catch{}
+    const tries=account?[['-a',account],[]]:[[]];
+    const next=index=>{
+     if(index>=tries.length)return resolve(null);
+     execFileImpl('/usr/bin/security',['find-generic-password','-s','Claude Code-credentials','-w',...tries[index]],{timeout:15000,maxBuffer:65536},(error,stdout)=>{
+      const text=String(stdout||'').trim();
+      if(error||!text)return next(index+1);
+      let cred=null;
+      try{cred=claudeCredentials(JSON.parse(keychainDecode(text)));}catch{}
+      resolve(cred||null);
+     });
+    };
+    next(0);
+   });
+  }
+  // 登录来源：手动 Token 优先，其次环境变量 CLAUDE_CODE_OAUTH_TOKEN，再读凭据文件，最后才碰钥匙串。
+  async function claudeAuth(){
+   const manual=cleanToken(settings.keys.claude);
+   if(manual)return {cred:claudeCredentials({claudeAiOauth:{accessToken:manual}}),keySource:'manual'};
+   const fromEnv=cleanToken(env.CLAUDE_CODE_OAUTH_TOKEN);
+   if(fromEnv)return {cred:claudeCredentials({claudeAiOauth:{accessToken:fromEnv}}),keySource:'env'};
+   const file=path.join(claudeDir,'.credentials.json');
+   try{
+    const cred=claudeCredentials(JSON.parse(await fs.readFile(file,'utf8')));
+    if(cred)return {cred,keySource:'file'};
+   }catch{}
+   if(settings.keychain===true){
+    const cred=await claudeKeychainRead();
+    if(cred)return {cred,keySource:'keychain'};
+    settings.keychain=false;void saveSettings();   // 读不到就不再自动试，等用户再点「读取钥匙串」
+    return {error:'读取钥匙串里的 Claude Code 登录失败；点「读取钥匙串」重试，或直接在下面粘贴 OAuth Token'};
+   }
+   return {error:'未找到 Claude Code 的本机登录（'+file+'）；在终端运行 claude 登录，或点「读取钥匙串」/ 粘贴 OAuth Token'};
+  }
+  // override 用于验证手动填的 Token / 刚读到的钥匙串登录：直接带凭据进，不经过设置里的来源顺序；
+  // direct 表示用户已在界面上确认「就按直连请求一次」。
+  async function readClaude(nowMs,{cred:givenCred=null,accessToken='',keySource='',direct=false}={}){
+   const source=givenCred?{cred:givenCred,keySource:keySource||'keychain'}
+    :accessToken?{cred:claudeCredentials({claudeAiOauth:{accessToken}}),keySource:keySource||'manual'}
+    :await claudeAuth();
+   const cred=source.cred;
+   if(!cred)throw userError(source.error);
+   if(cred.expiresAt&&cred.expiresAt+60000<nowMs)throw userError('Claude Code 登录已过期，在终端运行一次 claude（会自动刷新）或重新 claude login');
+   // 用量接口要 user:profile 权限；claude setup-token 生成的长效 Token 只有推理权限，先给出可读的原因。
+   if(cred.scopes.length&&!cred.scopes.includes('user:profile'))throw userError('当前 Claude Code 登录缺少 user:profile 权限，读不了额度（setup-token 生成的 Token 不能用于用量接口），在终端重新 claude login');
+   await claudeGate(direct);
+   const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),codexTimeoutMs);
+   let response;
+   try{
+    const headers={authorization:'Bearer '+cred.accessToken,accept:'application/json','anthropic-beta':'oauth-2025-04-20','user-agent':claudeUserAgent};
+    const proxy=await claudeProxy();
+    response=proxy?await curlUsage(proxy,headers,claudeUsageURL):await fetchImpl(claudeUsageURL,{headers,redirect:'error',signal:controller.signal});
+   }catch(e){throw userError('连接 api.anthropic.com 失败：'+(e?.cause?.message||e?.message||e));}
+   finally{clearTimeout(timeout);}
+   if(response.status===401||response.status===403)throw userError('Claude 用量接口拒绝了当前登录（可能已失效），在终端运行一次 claude 或 claude login');
+   if(response.status===429)throw userError('Anthropic 正在限制用量接口的频率，稍后会自动重试');
+   if(!response.ok)throw userError('Claude 用量接口返回 '+response.status);
+   let body;
+   try{body=await response.json();}catch{throw userError('Claude 用量接口返回的不是 JSON');}
+   const snap=claudeSnapshot(body,nowMs);
+   if(!snap.windows.length)throw userError('Claude 用量接口没有返回额度窗口');
+   snap.keySource=source.keySource;snap.keyHint=source.keySource==='manual'?cred.accessToken.slice(-4):'';snap.plan=claudePlan(cred);snap.needsDirectConfirm=false;
+   return snap;
+  }
 
   // ---- Antigravity（agy）：双通道获取配额（本地 Language Server 与 agy CLI usage 报告） ----
   async function agyCredentials(){
@@ -494,7 +692,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
 
  // ---- 刷新与推送 ----
  // 只在「有效数据」变化时推送：倒计时（resetInSec/resetsAt/updatedAt）每分钟都会变，不参与比较。
- const signatureOf=s=>JSON.stringify([s.selected,s.providers.map(p=>[p.id,p.available,p.enabled,p.range,p.keySource,p.keyHint,p.reason,p.error,p.plan,p.windows.map(w=>[w.key,w.usedPercent,w.usedUSD,w.status]),p.daily,p.models,p.totals,p.credits])]);
+ const signatureOf=s=>JSON.stringify([s.selected,s.providers.map(p=>[p.id,p.available,p.enabled,p.range,p.keySource,p.keyHint,p.reason,p.error,p.plan,p.needsDirectConfirm,p.windows.map(w=>[w.key,w.usedPercent,w.usedUSD,w.status]),p.daily,p.models,p.totals,p.credits])]);
  // 额度重置提醒：Codex 的窗口从「用过」（剩余 < 100%）回到 100% 时提醒一次（5 小时窗口用满后恢复、
  // 周窗口刷新都算）。只在前后两次都是有效读数时比较：服务刚启动、上一次不可用、这次降级都不报。
  // 开关在「用量 → Codex」里（settings.notifyReset），实际投递走通知岛的统一提醒通道（notify）。
@@ -506,14 +704,16 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
    for(const w of p.windows||[])previous.set(p.id+':'+w.key,w.remainingPercent);
   }
   for(const p of after.providers){
-   if((p.id!=='codex'&&p.id!=='agy')||!p.available)continue;
+   if((p.id!=='codex'&&p.id!=='agy'&&p.id!=='claude')||!p.available)continue;
    for(const w of p.windows||[]){
     const was=previous.get(p.id+':'+w.key);
     if(typeof was==='number'&&was<100&&w.remainingPercent>=100)notify('reset',(p.name||p.id)+' 额度已重置',(w.label||w.key)+' 回到 100%');
    }
   }
  }
- async function refresh(force=false){
+ // claudeDirect 表示这一轮是用户在界面上确认过「按直连请求一次」：Claude 跳过网络闸门，
+ // 并且不受 60 秒硬下限拦住（否则确认完还拿的是刚才被跳过的那份）。
+ async function refresh(force=false,{claudeDirect=false}={}){
   if(closed)return state;
   if(reading)return reading;
   reading=(async()=>{
@@ -527,13 +727,14 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
      if(cached)return stamp(cached.snapshot);
      return stamp({...p,available:false,reason:'已在刘海胶囊中关闭',error:null,windows:[],keySource:'',keyHint:'',updatedAt:nowMs});
     }
-    if(cached&&nowMs<cached.hardNextAt)return stamp(cached.snapshot);
+    if(cached&&nowMs<cached.hardNextAt&&!(claudeDirect&&id==='claude'))return stamp(cached.snapshot);
     if(cached&&!force&&nowMs<cached.nextAt)return stamp(cached.snapshot);
     let snapshot;
-    try{snapshot=id==='codex'?await readCodex(nowMs):id==='agy'?await readAgy(nowMs):await readOpenCodeGo(nowMs);}
+    try{snapshot=id==='codex'?await readCodex(nowMs):id==='claude'?await readClaude(nowMs,{direct:claudeDirect}):id==='agy'?await readAgy(nowMs):await readOpenCodeGo(nowMs);}
     catch(e){
      const reason=describe(e,'读取用量失败：');
-     snapshot=cached?.snapshot.available?{...cached.snapshot,error:reason,updatedAt:nowMs}:{...p,available:false,reason,error:null,windows:[],keySource:'',keyHint:'',updatedAt:nowMs};
+     const base=cached?.snapshot.available?{...cached.snapshot,error:reason}:{...p,available:false,reason,error:null,windows:[],keySource:'',keyHint:''};
+     snapshot={...base,needsDirectConfirm:e?.needsDirectConfirm===true,updatedAt:nowMs};
     }
     if(snapshot.error===undefined)snapshot.error=null;
     // 节奏：走网络（Codex / OpenCode 官方接口）3 分钟、最快 60 秒一次；纯本机读数每分钟都可以。
@@ -559,7 +760,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
    // 快照按用户排的顺序（usage.json 的 order）返回：折叠胶囊、并排的圆环、点击切换都用这个顺序；
    // 折叠胶囊显示顺序里第一个「可用且开启」的来源，关掉或不可用会自动让位给下一家。
    const ordered=orderOf(results);
-   const next={available:available.length>0,selected:displayOf(ordered),providers:ordered,notifyReset:settings.notifyReset,updatedAt:nowMs};
+   const next={available:available.length>0,selected:displayOf(ordered),providers:ordered,notifyReset:settings.notifyReset,claudeDirect:settings.claudeDirect,updatedAt:nowMs};
    detectResets(state,next);
    const key=signatureOf(next);
    if(key!==signature){signature=key;state=next;emit();}else state=next;
@@ -630,24 +831,49 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   emit();
   return state;
  }
- // 手动填写 OpenCode Go 的 API Key：先拿它调一次官方接口验证，通过才保存（文件权限 0600）。
- async function setKey(raw){
-  const key=typeof raw==='string'?raw.trim():'';
-  if(!key)return {ok:false,message:'请输入 API Key'};
+ // 手动填写的 Token / API Key：先拿它调一次官方接口验证，通过才保存（文件权限 0600）。
+ async function setKey(id,raw,{direct=false}={}){
+  const key=cleanToken(raw);
+  if(!key)return {ok:false,message:id==='claude'?'请输入 OAuth Token':'请输入 API Key'};
   try{
-   const windows=await readAPI(key,now());
-   settings.keys['opencode-go']=key;
+   // 验证用的就是真接口，拿到的那份直接当缓存，别再打一次网络（Claude 的请求要省着发）。
+   const snap=id==='claude'?await readClaude(now(),{accessToken:key,keySource:'manual',direct}):null;
+   const windows=snap?snap.windows:await readAPI(key,now());
+   settings.keys[id]=key;
    await saveSettings();
-   cache.delete('opencode-go');   // 换 Key 之后必须真的重新读一次，不能吃旧的缓存
-   await refresh(true);
+   if(snap)cache.set(id,{snapshot:snap,nextAt:now()+netIntervalMs,hardNextAt:now()+netHardMinMs});else cache.delete(id);
+   await refresh();
    return {ok:true,message:'已保存并验证：'+windows.map(w=>w.label+' 剩 '+Math.round(w.remainingPercent)+'%').join('、'),snapshot:state};
-  }catch(e){return {ok:false,message:e?.userFacing?e.message:'验证失败：'+(e?.message||e)};}
+  }catch(e){return {ok:false,needsDirectConfirm:e?.needsDirectConfirm===true,message:e?.userFacing?e.message:'验证失败：'+(e?.message||e)};}
  }
- async function clearKey(){
-  delete settings.keys['opencode-go'];
+ async function clearKey(id){
+  delete settings.keys[id];
   await saveSettings();
-  cache.delete('opencode-go');
+  cache.delete(id);
   await refresh(true);
+  return state;
+ }
+ // 「读取钥匙串」：显式读一次 macOS 钥匙串里的 Claude Code 登录，验证通过后记住允许，之后自动读就不弹授权框了。
+ async function readKeychain(id,{direct=false}={}){
+  if(id!=='claude')return {ok:false,message:'只有 Claude Code 的登录放在钥匙串里'};
+  if(process.platform!=='darwin')return {ok:false,message:'钥匙串只在 macOS 上可用，请在下面粘贴 OAuth Token'};
+  const cred=await claudeKeychainRead();
+  if(!cred)return {ok:false,message:'钥匙串里没有可用的 Claude Code 登录（可能没有授权），也可以在下面粘贴 OAuth Token'};
+  try{
+   const snap=await readClaude(now(),{cred,keySource:'keychain',direct});
+   settings.keychain=true;
+   await saveSettings();
+   cache.set('claude',{snapshot:snap,nextAt:now()+netIntervalMs,hardNextAt:now()+netHardMinMs});
+   await refresh();
+   return {ok:true,message:'已读取钥匙串里的 Claude Code 登录：'+snap.windows.map(w=>w.label+' 剩 '+Math.round(w.remainingPercent)+'%').join('、'),snapshot:state};
+  }catch(e){return {ok:false,needsDirectConfirm:e?.needsDirectConfirm===true,message:e?.userFacing?e.message:'验证失败：'+(e?.message||e)};}
+ }
+ // 「直连时也请求」的开关（默认关）：打开后不再拦 Claude 的请求，也不再问二次确认。
+ function setClaudeDirect(enabled){
+  settings.claudeDirect=enabled===true;
+  void saveSettings().then(()=>{if(settings.claudeDirect)void refresh(true);});
+  state={...state,claudeDirect:settings.claudeDirect};
+  emit();
   return state;
  }
  return {
@@ -661,6 +887,8 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   setNotifyReset,
   setKey,
   clearKey,
+  readKeychain,
+  setClaudeDirect,
   subscribe(listener){listeners.add(listener);return()=>listeners.delete(listener);},
   start(){closed=false;void refresh();timer=setInterval(()=>{void refresh();},tickMs);timer.unref?.();},
   stop(){closed=true;if(timer)clearInterval(timer);timer=null;listeners.clear();return saving;},

@@ -35,7 +35,7 @@ test('技能库：扫描收录规则、Agent 链接状态与来源',async()=>{
   // 通用 Agent 直接读 canonical，非通用 Agent 要有链接才算；此时还没链接。
   assert.deepEqual(alpha.agents,['Gemini CLI']);
   assert.equal(alpha.source,'someone/repo');assert.equal(alpha.sourceType,'github');
-  // 只检测到已安装的 Agent：没有 ~/.codex 就不该出现 Codex。
+ // 只检测到已安装的 Agent：没有 ~/.codex 就不该出现 Codex。
   assert.ok(!alpha.agents.includes('Codex'));
   // 非通用 Agent 需要链接：link 之后 Claude Code 目录里会出现相对链接，重新扫描就能看到它。
   const report=await skills.link('alpha',await skills.liveAgents());
@@ -47,6 +47,45 @@ test('技能库：扫描收录规则、Agent 链接状态与来源',async()=>{
   // 同名冲突不覆盖。
   await write(path.join(home,'.claude/skills/broken'),'SKILL.md',skillBody('broken','真的技能'));
   assert.deepEqual((await skills.link('broken',await skills.liveAgents())).conflicts,['Claude Code']);
+ }finally{await clean(home);}
+});
+
+test('技能库：收紧的已安装判定与逐 Agent 安装 / 移除',async()=>{
+ const {home,skills}=await fixture();
+ try{
+  // 只含 skills/ 的空目录（链接技能时顺手建出来的）不算已安装；空目录同样不算。
+  await fs.mkdir(path.join(home,'.junie/skills'),{recursive:true});
+  await fs.mkdir(path.join(home,'.kode'),{recursive:true});
+  assert.deepEqual((await skills.liveAgents()).map(a=>a.id).sort(),['claude-code','gemini-cli']);
+  const info=await skills.agents();
+  assert.equal(info.canonical,path.join(home,'.agents/skills'));
+  const byId=new Map(info.agents.map(a=>[a.id,a]));
+  assert.equal(byId.get('claude-code').installed,true);
+  assert.equal(byId.get('junie').installed,false);
+  assert.equal(byId.get('kode').installed,false);
+  assert.equal(byId.get('codex').installed,false);
+  assert.ok(info.agents.length>60,'注册表里的 Agent 都要列出来');
+  // 逐 Agent 安装 / 移除：写的是指向 canonical 的相对链接；通用 Agent 没有可管理的链接。
+  assert.equal((await skills.setAgentLink('alpha','codex',true)).state,'universal');
+  const linked=await skills.setAgentLink('alpha','claude-code',true);
+  assert.equal(linked.state,'linked');assert.equal(linked.linked,true);
+  assert.equal(await fs.readlink(path.join(home,'.claude/skills/alpha')),path.join('..','..','.agents','skills','alpha'));
+  assert.equal((await skills.scan()).find(r=>r.name==='alpha').agentLinks.find(x=>x.id==='claude-code').state,'linked');
+  assert.equal((await skills.setAgentLink('alpha','claude-code',true)).linked,undefined,'已经链接过就不重复建');
+  assert.equal((await skills.setAgentLink('alpha','claude-code',false)).removed,true);
+  assert.equal(await fs.lstat(path.join(home,'.claude/skills/alpha')).catch(()=>null),null);
+  // 未知 / 未安装的 Agent、以及不在 canonical 里的技能都要给出可读错误。
+  await assert.rejects(()=>skills.setAgentLink('alpha','nope',true),/未知的 Agent/);
+  await assert.rejects(()=>skills.setAgentLink('alpha','junie',true),/还没有安装/);
+  await assert.rejects(()=>skills.setAgentLink('missing','claude-code',true),/~\/\.agents\/skills/);
+  // 同名内容不覆盖；不是 bobo 建的链接也不删。
+  await write(path.join(home,'.claude/skills/alpha'),'SKILL.md',skillBody('alpha','另一个 alpha'));
+  await assert.rejects(()=>skills.setAgentLink('alpha','claude-code',true),/已有同名内容/);
+  await fs.rm(path.join(home,'.claude/skills/alpha'),{recursive:true});
+  const outside=path.join(home,'elsewhere/alpha');
+  await write(outside,'SKILL.md',skillBody('alpha','外部'));
+  await fs.symlink(outside,path.join(home,'.claude/skills/alpha'));
+  await assert.rejects(()=>skills.setAgentLink('alpha','claude-code',false),/不是 bobo 建的/);
  }finally{await clean(home);}
 });
 
