@@ -1,10 +1,10 @@
-/* bobo · 深色优先的卡片式界面语言（参考现代本机 Agent 管理器的观感）：深底、卡片、蓝色强调、宽松间距。
+/* bobo · 安静的本机界面：中性底色、圆角分组、蓝色强调、清晰的内容层级。
    纯 CSS：只用系统字体，无模糊层、无重阴影；深浅色各一套变量，跟随系统或手动固定（设置 → 外观）。 */
-:root{color-scheme:light dark;--bg:#f6f7f9;--chrome:#fff;--sidebar:#f3f4f6;--panel:#fff;--card:#fff;--line:#e3e6eb;--line-soft:#eef0f3;--text:#171a1f;--text-2:#4b5563;--muted:#7b8494;--accent:#2f6fed;--accent-h:#3f7df5;--accent-press:#2560d0;--sel:rgba(47,111,237,.12);--sel-text:#1d4ed8;--control:#fff;--control-border:#d9dde4;--hover:rgba(17,24,39,.05);--danger:#e5484d;--switch-off:#d6dae0;--shadow:none;--toast-bg:rgba(23,26,31,.96);font:13.5px/1.55 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",sans-serif;color:var(--text);background:var(--bg);-webkit-font-smoothing:antialiased}
-@media(prefers-color-scheme:dark){:root{--bg:#0e1116;--chrome:#121620;--sidebar:#12161d;--panel:#171b23;--card:#171b23;--line:#262c38;--line-soft:#1f242e;--text:#e8ecf2;--text-2:#b3bac6;--muted:#7f8896;--accent:#2f7cf6;--accent-h:#4a8dff;--accent-press:#2568d8;--sel:rgba(47,124,246,.16);--sel-text:#dbe8ff;--control:#1b2029;--control-border:#2c333f;--hover:rgba(255,255,255,.055);--danger:#ff5f57;--switch-off:#39404d;--shadow:none;--toast-bg:rgba(40,46,56,.98)}}
+:root{color-scheme:light dark;--bg:#f4f4f6;--chrome:#f4f4f6;--sidebar:#f4f4f6;--panel:#fff;--card:#fff;--line:#e3e3e8;--line-soft:#ececf0;--text:#1c1c21;--text-2:#4b4b53;--muted:#7c7c86;--accent:#2f6fed;--accent-h:#3f7df5;--accent-press:#2560d0;--sel:rgba(47,111,237,.12);--sel-text:#1d4ed8;--control:#fff;--control-border:#d9dde4;--hover:rgba(17,24,39,.05);--danger:#e5484d;--switch-off:#d6dae0;--shadow:none;--toast-bg:rgba(23,26,31,.96);font:13.5px/1.55 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",sans-serif;color:var(--text);background:var(--bg);-webkit-font-smoothing:antialiased}
+@media(prefers-color-scheme:dark){:root{--bg:#1a1a1e;--chrome:#1a1a1e;--sidebar:#1a1a1e;--panel:#232327;--card:#232327;--line:#333339;--line-soft:#2c2c32;--text:#ededf1;--text-2:#b9b9c1;--muted:#92929c;--accent:#2f7cf6;--accent-h:#4a8dff;--accent-press:#2568d8;--sel:rgba(47,124,246,.16);--sel-text:#dbe8ff;--control:#252529;--control-border:#3b3b43;--hover:rgba(255,255,255,.055);--danger:#ff5f57;--switch-off:#39404d;--shadow:none;--toast-bg:rgba(40,46,56,.98)}}
 /* 手动外观：默认由 prefers-color-scheme 跟随系统；[data-theme] 优先级更高，用来固定浅色或深色（含 color-scheme，让表单、滚动条等原生控件一起切换）。 */
-:root[data-theme=light]{color-scheme:light;--bg:#f6f7f9;--chrome:#fff;--sidebar:#f3f4f6;--panel:#fff;--card:#fff;--line:#e3e6eb;--line-soft:#eef0f3;--text:#171a1f;--text-2:#4b5563;--muted:#7b8494;--accent:#2f6fed;--accent-h:#3f7df5;--accent-press:#2560d0;--sel:rgba(47,111,237,.12);--sel-text:#1d4ed8;--control:#fff;--control-border:#d9dde4;--hover:rgba(17,24,39,.05);--danger:#e5484d;--switch-off:#d6dae0;--shadow:none;--toast-bg:rgba(23,26,31,.96)}
-:root[data-theme=dark]{color-scheme:dark;--bg:#0e1116;--chrome:#121620;--sidebar:#12161d;--panel:#171b23;--card:#171b23;--line:#262c38;--line-soft:#1f242e;--text:#e8ecf2;--text-2:#b3bac6;--muted:#7f8896;--accent:#2f7cf6;--accent-h:#4a8dff;--accent-press:#2568d8;--sel:rgba(47,124,246,.16);--sel-text:#dbe8ff;--control:#1b2029;--control-border:#2c333f;--hover:rgba(255,255,255,.055);--danger:#ff5f57;--switch-off:#39404d;--shadow:none;--toast-bg:rgba(40,46,56,.98)}
+:root[data-theme=light]{color-scheme:light;--bg:#f4f4f6;--chrome:#f4f4f6;--sidebar:#f4f4f6;--panel:#fff;--card:#fff;--line:#e3e3e8;--line-soft:#ececf0;--text:#1c1c21;--text-2:#4b4b53;--muted:#7c7c86;--accent:#2f6fed;--accent-h:#3f7df5;--accent-press:#2560d0;--sel:rgba(47,111,237,.12);--sel-text:#1d4ed8;--control:#fff;--control-border:#d9dde4;--hover:rgba(17,24,39,.05);--danger:#e5484d;--switch-off:#d6dae0;--shadow:none;--toast-bg:rgba(23,26,31,.96)}
+:root[data-theme=dark]{color-scheme:dark;--bg:#1a1a1e;--chrome:#1a1a1e;--sidebar:#1a1a1e;--panel:#232327;--card:#232327;--line:#333339;--line-soft:#2c2c32;--text:#ededf1;--text-2:#b9b9c1;--muted:#92929c;--accent:#2f7cf6;--accent-h:#4a8dff;--accent-press:#2568d8;--sel:rgba(47,124,246,.16);--sel-text:#dbe8ff;--control:#252529;--control-border:#3b3b43;--hover:rgba(255,255,255,.055);--danger:#ff5f57;--switch-off:#39404d;--shadow:none;--toast-bg:rgba(40,46,56,.98)}
 *{box-sizing:border-box}
 [hidden]{display:none!important}
 body{margin:0;height:100dvh;display:flex;flex-direction:column;overflow:hidden;background:var(--bg)}
@@ -32,12 +32,11 @@ input::placeholder{color:var(--muted)}
 ::-webkit-scrollbar-thumb:hover{background:#9a9aa0;background-clip:padding-box;border:3px solid transparent}
 ::-webkit-scrollbar-track{background:transparent}
 
-/* 顶栏即窗口标题栏：应用内上方留 28pt 给红黄绿灯。布局为「左 tab、中 logo + 标题、右操作」，用 grid 的 1fr auto 1fr 让中列真正居中。 */
-header{height:56px;flex-shrink:0;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:14px;padding:0 14px;background:var(--chrome);border-bottom:1px solid var(--line);position:relative;z-index:4}
-body.app header{height:76px;padding-top:28px;user-select:none}
-.brand{display:flex;align-items:center;gap:9px;min-width:0;justify-self:center}
-/* 应用内把图标与应用名提到顶部标题栏，和红黄绿灯同处一条水平线；下面一行留给 tab 与操作按钮。 */
-body.app .brand{position:absolute;top:0;left:50%;height:28px;transform:translateX(-50%)}
+/* 单行顶栏：应用内左侧给原生红黄绿灯留位，图标、导航与操作按钮同处一行。 */
+header{height:52px;flex-shrink:0;display:flex;align-items:center;gap:14px;padding:0 16px;background:var(--chrome);border-bottom:1px solid var(--line);position:relative;z-index:4}
+body.app header{padding-left:96px;user-select:none}
+.brand{display:flex;align-items:center;gap:9px;min-width:0;flex:none}
+body.app .brand strong{display:none}
 .logo{width:24px;height:24px;flex:none;display:block;border-radius:7px;object-fit:cover;box-shadow:var(--shadow)}
 .brand strong{font-size:14px;font-weight:600;letter-spacing:-.2px;white-space:nowrap}
 nav,.actions{display:flex;align-items:center;gap:8px;min-width:0}
@@ -51,18 +50,21 @@ nav{grid-column:3;justify-self:end}
 .glass-group button:active{background:var(--hover)}
 .glass-group button[aria-pressed=true]{background:var(--sel);color:var(--sel-text);font-weight:600}
 .glass-group .danger{color:var(--danger)}
-/* 「技能 / 智能体 / …」用 tab 标签呈现：去掉分段控件的描边与底色，用底部下划线标记当前页。 */
-.view-tabs{grid-column:1;justify-self:start;align-self:stretch;align-items:stretch;gap:0;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none}
-.view-tabs button{position:relative;display:flex;align-items:center;gap:6px;border-radius:0;padding:4px 14px;min-height:0;color:var(--muted);font-weight:500;font-size:13px}
-.view-tabs button:hover{background:transparent;color:var(--text)}
-.view-tabs button[aria-pressed=true]{background:transparent;color:var(--text);font-weight:600}
-.view-tabs button[aria-pressed=true]::after{content:'';position:absolute;left:12px;right:12px;bottom:0;height:2px;border-radius:2px;background:var(--accent)}
+/* 一级导航用白色圆角块标记当前页，图标与文字保持同一条基线。 */
+.view-tabs{flex:none;align-self:center;gap:4px;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none}
+.view-tabs button{display:flex;align-items:center;gap:7px;border:1px solid transparent;border-radius:10px;padding:7px 13px;min-height:36px;color:var(--muted);font-weight:500;font-size:13px}
+.view-tabs button:hover{background:var(--hover);color:var(--text)}
+.view-tabs button[aria-pressed=true]{background:var(--card);border-color:var(--line);color:var(--text);font-weight:600}
 .view-tabs{margin-right:auto}
-/* 顶栏右侧：常驻的 GitHub 入口与当前版本号；有新版本准备中时版本号点亮。 */
-.top-links{grid-column:3;justify-self:end;display:flex;align-items:center;gap:4px;min-width:0}
+/* 顶栏右侧：GitHub、当前版本与设置齿轮；有新版本准备中时版本号点亮。 */
+.top-links{display:flex;align-items:center;gap:6px;min-width:0;flex:none;margin-left:auto}
 .top-links button{display:flex;align-items:center;gap:6px;border:1px solid transparent;border-radius:8px;background:transparent;box-shadow:none;padding:4px 8px;min-height:28px;color:var(--text-2);font-size:12px;font-weight:500;font-variant-numeric:tabular-nums;transition:background .12s,color .12s,border-color .12s}
 .top-links button:hover{background:var(--hover);color:var(--text)}
 .top-links .sf{width:15px;height:15px}
+.top-links #settingsTab{justify-content:center;width:36px;height:36px;padding:0;border-radius:10px;color:var(--muted)}
+.top-links #settingsTab:hover{color:var(--text)}
+.top-links #settingsTab[aria-pressed=true]{background:var(--card);border-color:var(--line);color:var(--text)}
+.top-links #settingsTab .sf{width:19px;height:19px}
 .top-links #appVersion.has-update{color:var(--accent);border-color:var(--line);background:var(--hover)}
 /* 版本按钮兼作更新入口：检查 / 下载中显示进度（is-busy），已就绪时呼吸提示（is-ready），失败变红（is-error）。 */
 .top-links #appVersion.is-busy{color:var(--accent);border-color:var(--line);background:var(--hover)}
@@ -84,20 +86,21 @@ nav{grid-column:3;justify-self:end}
 .menu-panel button:hover{background:var(--hover)}
 .menu-panel .danger{color:var(--danger)}
 .menu-sep{flex:none;height:1px;margin:5px 3px;background:var(--line-soft)}
-/* 「外观」三段式分段控件：放在「设置」页的外观分区，三选一即可覆盖系统深浅色。 */
-.theme-switch{display:flex;gap:2px;margin:0;padding:2px;background:var(--hover);border-radius:9px}
-.theme-switch button{flex:1;text-align:center;padding:5px 6px;min-height:28px;font-size:12px;border:0;border-radius:7px;font-weight:400;background:transparent;box-shadow:none;color:var(--text-2)}
-.theme-switch button:hover{background:var(--hover);color:var(--text)}
-.theme-switch button[aria-pressed=true]{background:var(--sel);color:var(--sel-text);font-weight:600}
+/* 分段控件：「外观」的主题三选一，以及设置行里的小枚举（列表条数、额度查看方式、并排数量、显示位置）共用这一套。 */
+.theme-switch,.segs{display:flex;gap:2px;margin:0;padding:2px;background:var(--hover);border-radius:9px}
+.theme-switch button,.segs button{flex:1;text-align:center;padding:5px 6px;min-height:28px;font-size:12px;border:0;border-radius:7px;font-weight:400;background:transparent;box-shadow:none;color:var(--text-2)}
+.theme-switch button:hover,.segs button:hover{background:var(--hover);color:var(--text)}
+.theme-switch button[aria-pressed=true],.segs button[aria-pressed=true]{background:var(--sel);color:var(--sel-text);font-weight:600}
+.segs button:disabled{opacity:.4;background:transparent}
 
 /* 侧边栏 + 内容区 */
 .workspace{display:flex;flex:1;min-height:0}
-.library{width:266px;flex-shrink:0;display:flex;flex-direction:column;background:var(--sidebar);border-right:1px solid var(--line)}
+.library{width:240px;flex-shrink:0;display:flex;flex-direction:column;background:var(--sidebar);border-right:1px solid var(--line)}
 /* 侧栏底栏（来源说明）钉在左下角：内容再长也不跟着上下移动。 */
 .library>footer{margin-top:auto;flex:none}
 .filters{padding:14px 12px 6px;display:grid;gap:8px}
 /* 侧栏标题（各视图左栏最上面那一行）：与通知岛一致——浅灰小字，右侧的状态值同色、等宽数字。 */
-.list-caption{display:flex;justify-content:space-between;align-items:baseline;padding:16px 14px 8px;color:var(--muted);font-size:12.5px;font-weight:400}
+.list-caption{display:flex;justify-content:space-between;align-items:baseline;padding:14px 18px 8px;color:var(--muted);font-size:11px;font-weight:400}
 .list-caption span:last-child{color:var(--muted);font-weight:400;font-variant-numeric:tabular-nums}
 /* 技能列表上方只显示数量（这里列出的本来就都已安装），靠右对齐。 */
 .list-caption.end{justify-content:flex-end}
@@ -107,6 +110,9 @@ nav{grid-column:3;justify-self:end}
 footer{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 16px;border-top:1px solid var(--line-soft);color:var(--muted);font-size:11px}
 footer>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 main{flex:1;min-width:0;min-height:0;overflow:hidden;display:flex;flex-direction:column;background:var(--bg)}
+/* 当前页的操作固定在内容区右下角，列表与设置内容独立滚动。 */
+.workspace-actions{flex:none;display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:12px 32px;border-top:1px solid var(--line);background:var(--chrome)}
+.workspace-actions button{display:inline-flex;align-items:center;gap:6px}
 
 /* 侧边栏分组与条目：hover 与选中都是整行圆角高亮。选中的行用淡蓝底 + 左侧竖条，文字提亮。 */
 .skill-group{margin:0 0 4px}
@@ -138,22 +144,49 @@ main{flex:1;min-width:0;min-height:0;overflow:hidden;display:flex;flex-direction
 .agent-line{display:flex;align-items:center;gap:7px;min-width:0}
 .agent-line strong{flex:1;min-width:0;font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .agent-dot{width:8px;height:8px;flex:none;border-radius:50%;background:var(--control-border)}
-/* 智能体视图：左侧栏只放「来源」；右侧内容区再分一列（搜索 + 全局配置 / 智能体定义两个区块）与详情。 */
-.agent-main{flex-direction:row}
-/* 来源行：图标一律用真实品牌图标（.sf + 内联 SVG 精灵），没有图标就不放，不做首字母色块占位。 */
-.settings-menu .provider-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.agent-items{width:300px;flex-shrink:0;min-height:0;display:flex;flex-direction:column;border-right:1px solid var(--line);background:var(--bg)}
-/* 区块标题像参考稿一样：标题 + 紧跟的数量，而不是两端对齐。 */
-#agentList .list-caption{justify-content:flex-start;gap:10px;padding:16px 6px 8px}
-/* 中间列的内容以卡片呈现：名字 + 徽标 + 描述，悬停提亮、选中淡蓝底。 */
-.agent-items .skill-item{border:1px solid var(--line);background:var(--card);border-radius:11px;padding:10px 12px;margin:0 0 8px}
-.agent-items .skill-item:hover{background:var(--hover);border-color:var(--control-border)}
-.agent-items .skill-item.selected,.agent-items .skill-item.selected:hover{background:var(--sel);border-color:transparent}
+/* Agents 视图的左栏顶部是「按智能体 / 按技能」切换；两种筛选各占一块（.library-pane），只显示当前那一块。 */
+.mode-switch{margin:14px 12px 4px;display:flex}
+.mode-switch button{flex:1;min-height:28px;padding:4px 8px}
+.library-pane{display:flex;flex-direction:column;flex:1;min-height:0}
+.library-pane>footer{margin-top:auto;flex:none}
+/* Agent 来源 → 内容分类 → 详情：中间列只呈现当前分类，列表共用一个圆角容器。 */
+.agent-items{width:328px;flex-shrink:0;min-height:0;display:flex;flex-direction:column;border-right:1px solid var(--line);background:var(--bg)}
+.agent-context{display:flex;align-items:center;gap:11px;padding:22px 16px 17px;min-height:82px}
+.agent-context-icon{display:flex;align-items:center;justify-content:center;flex:none;width:36px;height:36px;border:1px solid var(--line);border-radius:11px;background:var(--card)}
+.agent-context-icon .sf{width:21px;height:21px}
+.agent-context h2{margin:0;font-size:17px;font-weight:600;letter-spacing:-.25px}
+.agent-context p{margin:2px 0 0;color:var(--muted);font-size:11.5px}
+.agent-content-tabs{margin:0 14px 2px;padding:3px;border:1px solid var(--line);border-radius:10px}
+.agent-content-tabs button{display:flex;align-items:center;justify-content:center;gap:5px;flex:1;min-width:0;min-height:30px;padding:4px 6px}
+.view-switch.agent-content-tabs button[aria-pressed=true]{background:var(--card);color:var(--text);box-shadow:none}
+.agent-content-tabs [data-agent-count]{font-size:10.5px;color:var(--muted);font-weight:400;font-variant-numeric:tabular-nums}
+.agent-items .filters{padding:14px 14px 0}
+.agent-items .filters input{min-height:34px;background-color:var(--card)}
+.agent-list-toolbar{display:flex;align-items:center;gap:8px;min-height:47px;padding:9px 17px 6px;color:var(--muted);font-size:11.5px}
+#agentListCount{font-variant-numeric:tabular-nums}
+.agent-list-toolbar .section-add{margin-left:auto;min-height:26px;padding:3px 9px;font-size:11.5px;color:var(--text-2);border-color:var(--line);background:var(--card);box-shadow:none;border-radius:7px}
+.agent-list-toolbar .section-add:hover{background:var(--hover);color:var(--text)}
+.agent-note{margin:8px 3px;color:var(--muted);font-size:12px;line-height:1.65}
+.agent-items .skill-list{padding:0 14px 16px}
+.agent-section{overflow:hidden;border:1px solid var(--line);border-radius:13px;background:var(--card)}
+.agent-items .skill-item{border:0;border-radius:0;padding:13px 12px;margin:0;background:transparent;white-space:normal}
+.agent-items .skill-item+.skill-item{border-top:1px solid var(--line-soft)}
+.agent-items .skill-item:hover{background:var(--hover)}
+.agent-items .skill-item.selected,.agent-items .skill-item.selected:hover{background:var(--sel)}
 .agent-items .skill-item.selected strong{color:var(--sel-text)}
+.agent-items .agent-line{align-items:flex-start;gap:8px}
+.agent-items .agent-dot{margin-top:6px}
+.agent-items .agent-line strong{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;white-space:normal;overflow-wrap:anywhere;line-height:1.55}
+.agent-items .skill-item small{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;margin-top:5px;line-height:1.6}
+.agent-items .badge{flex:none;margin-top:2px;font-size:10px}
 /* 详情区在窄窗口里要能收缩，操作按钮放不下时换行，避免被右侧裁掉。 */
 #agentDetail{min-width:0}
 #agentDetail .detail-head{flex-wrap:wrap}
 #agentDetail .actions{flex-wrap:wrap;justify-content:flex-end}
+.agent-properties{flex:none}
+.agent-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));margin-top:10px;max-height:min(180px,24vh);overflow:auto;border:1px solid var(--line);border-radius:10px;background:var(--card)}
+#agentFilename{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#agentDetail .editor-bar .view-switch,#agentSave{flex:none}
 /* 技能详情同理：操作栏多了「翻译全文」后，窄窗口里也要能换行，别被裁掉。 */
 #detail .detail-head{flex-wrap:wrap}
 #detail .actions{flex-wrap:wrap;justify-content:flex-end}
@@ -303,7 +336,7 @@ h2{font-size:18px;font-weight:600}
 #consoleHandle{position:fixed;right:16px;bottom:16px;z-index:22;min-height:32px;padding:5px 14px;border-radius:16px;font-size:12px;font-weight:600;color:var(--text-2)}
 #consoleHandle[aria-expanded=true]{color:var(--text);background:var(--hover)}
 /* 任务输出只在技能 / 智能体视图出现，通知岛、用量、设备与设置里收起。 */
-body[data-view=island] #consoleHandle,body[data-view=island] #console,body[data-view=usage] #consoleHandle,body[data-view=usage] #console,body[data-view=device] #consoleHandle,body[data-view=device] #console,body[data-view=settings] #consoleHandle,body[data-view=settings] #console{display:none!important}
+body[data-view=island] #consoleHandle,body[data-view=island] #console,body[data-view=device] #consoleHandle,body[data-view=device] #console,body[data-view=settings] #consoleHandle,body[data-view=settings] #console{display:none!important}
 #console{position:fixed;right:16px;bottom:58px;z-index:22;width:min(640px,calc(100vw - 32px));height:min(320px,52vh);min-height:150px;display:flex;flex-direction:column;gap:8px;padding:12px 16px;border:1px solid var(--line);border-radius:13px;background:var(--panel);box-shadow:0 20px 56px rgba(0,0,0,.34);visibility:hidden;opacity:0;transform:translateY(10px);transition:opacity .16s ease,transform .16s ease,visibility .16s}
 #console.open{visibility:visible;opacity:1;transform:none}
 .console-head{display:flex;gap:12px;align-items:center;font-size:12px}
@@ -342,8 +375,8 @@ label input,label select{margin-top:6px}
 .island-list-head{display:flex;align-items:baseline;justify-content:space-between;margin:20px 0 9px}
 .island-list-head strong{font-size:13px}
 .island-list-head span{color:var(--muted);font-size:11.5px}
-.oc-list{display:grid;gap:8px}
-.oc-item{display:flex;align-items:center;gap:10px;padding:11px 13px;border:1px solid var(--line);border-radius:11px;background:var(--card);transition:background .12s,border-color .12s}
+.oc-list{display:grid;grid-template-columns:minmax(0,1fr);gap:8px;min-width:0;max-width:100%}
+.oc-item{display:flex;align-items:center;gap:10px;min-width:0;max-width:100%;padding:11px 13px;border:1px solid var(--line);border-radius:11px;background:var(--card);transition:background .12s,border-color .12s}
 .oc-item:hover{background:var(--hover);border-color:var(--control-border)}
 .oc-item .notch-dot{background:var(--muted)}
 .oc-item[data-state=working] .notch-dot{background:#0a84ff}
@@ -360,9 +393,9 @@ label input,label select{margin-top:6px}
 .oc-time[hidden]{display:none}
 
 /* 用量 tab：左侧分类导航 + 右侧额度卡片与历史（数据是本机 OpenCode 数据库的估算值）。 */
-/* 「刷新额度」「刷新设备」是右下角的悬浮按钮（与命令行凸起同一位置），只在各自视图出现。 */
-#usageRefresh,#deviceRefresh{display:none;position:fixed;right:16px;bottom:16px;z-index:22;min-height:32px;padding:5px 14px;border-radius:16px;font-size:12px;font-weight:600;color:var(--text-2)}
-body[data-view=usage] #usageRefresh,body[data-view=device] #deviceRefresh{display:flex;align-items:center}
+/* 额度页的右下角操作区只在查看额度时显示，Agent 连接与通知岛设置不占位。 */
+#quotaActions{display:none}
+body[data-view=island][data-island-kind=quota] #quotaActions{display:flex}
 .usage-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;max-width:780px;margin-top:16px}
 .usage-card{display:grid;gap:10px;padding:16px 17px;border:1px solid var(--line);border-radius:13px;background:var(--card)}
 .usage-card-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;color:var(--muted);font-size:12px}
@@ -449,21 +482,26 @@ body[data-view=usage] #usageRefresh,body[data-view=device] #deviceRefresh{displa
 .link-empty{padding:14px 18px;color:var(--muted);font-size:12px}
 .link-foot{padding:7px 16px 10px;color:var(--muted);font-size:10.5px}
 
-/* 设置页：左侧分类导航 + 右侧分区卡片（大标题、分组标题、控件右对齐）。左栏与其它视图同构，不再单独加顶部内边距。 */
-.settings-menu{display:flex;flex-direction:column;align-items:stretch;gap:2px;flex:1;min-height:0;overflow:auto;padding:0 8px}
-.settings-menu button{position:relative;display:flex;align-items:center;gap:9px;border:0;background:transparent;box-shadow:none;border-radius:8px;padding:8px 10px;min-height:34px;color:var(--text-2);font-size:13px;font-weight:500;text-align:left}
-.settings-menu button:hover{background:var(--hover);color:var(--text)}
-.settings-menu button[aria-pressed=true]{background:var(--sel);color:var(--sel-text);font-weight:600}
-.settings-menu button[aria-pressed=true]::before{content:'';position:absolute;left:0;top:50%;width:3px;height:18px;margin-top:-9px;border-radius:0 2px 2px 0;background:var(--accent)}
-.settings-menu .sf{width:15px;height:15px;opacity:.9}
-/* 侧栏分组标题（通知岛视图的「通知岛设置 / Agent 连接」）：所有视图共用同一套——分组之间用一条细线
-   分区、留出呼吸空间；第一个分组紧跟左栏标题，不画细线、也不额外留白。 */
-.menu-group{margin:16px 10px 5px;padding-top:12px;border-top:1px solid var(--line-soft);color:var(--muted);font-size:11px;font-weight:600;letter-spacing:.2px}
-.menu-group:first-child{margin-top:4px;padding-top:0;border-top:0}
+/* 侧栏列表（通知岛 / Agents / 设备）：参考 magpie 的来源行——图标 + 名称，右侧是小圆点 + 一段状态文字；选中行淡蓝底 + 左侧竖条。 */
+.side-nav{display:flex;flex-direction:column;align-items:stretch;gap:2px;flex:1;min-height:0;overflow:auto;padding:0 8px 8px}
+.side-group{display:flex;flex-direction:column;gap:2px}
+.side-nav button,.side-foot button{position:relative;display:flex;align-items:center;gap:10px;width:100%;min-height:36px;padding:0 10px;border:0;background:transparent;box-shadow:none;border-radius:8px;color:var(--text);font-size:13px;font-weight:500;text-align:left}
+.side-nav button:hover,.side-foot button:hover{background:var(--hover)}
+.side-nav button[aria-pressed=true],.side-foot button[aria-pressed=true]{background:var(--sel);color:var(--sel-text);font-weight:600}
+.side-nav button[aria-pressed=true]::before,.side-foot button[aria-pressed=true]::before{content:'';position:absolute;left:0;top:50%;width:3px;height:18px;margin-top:-9px;border-radius:0 2px 2px 0;background:var(--accent)}
+.side-nav .sf,.side-foot .sf{width:16px;height:16px;flex:none;opacity:.9}
+.side-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.side-status{flex:none;display:inline-flex;align-items:center;gap:6px;max-width:116px;color:var(--muted);font-size:11.5px;font-weight:400}
+.side-status b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:400}
+.side-status .notch-dot{width:7px;height:7px}
+.side-foot{display:block;flex:none;padding:8px;border-top:1px solid var(--line-soft);font-size:13px;color:var(--text)}
+/* 侧栏分区只保留一层轻量标签：名称与状态同一行；靠间距与组间细线分区，不重复当前页名。 */
+.menu-group{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin:18px 10px 6px;padding-top:14px;border-top:1px solid var(--line-soft);color:var(--muted);font-size:11px;font-weight:400}
+.menu-group:first-child{margin-top:16px;padding-top:0;border-top:0}
+.menu-group>span:last-child:not(:first-child){font-size:10.5px;font-variant-numeric:tabular-nums;white-space:nowrap}
 /* 用量侧栏：按住拖动调整来源顺序，排在最前的来源显示在刘海胶囊上 */
-#usageWorkspace [data-usage-pane]{cursor:grab}
-#usageWorkspace [data-usage-pane][data-dragging=true]{opacity:.55}
-.usage-order-hint{margin:10px 18px 0;flex:none}
+#quotaNav [data-island-pane]{cursor:grab}
+#quotaNav [data-island-pane][data-dragging=true]{opacity:.55}
 /* 通知岛「内容 → 额度显示顺序」：几枚来源图标，按住拖动排序（与「用量」页共用同一份顺序） */
 .quota-order{display:flex;align-items:center;gap:6px;flex:none}
 .quota-order>span.muted{font-size:11.5px;color:var(--muted)}
@@ -472,19 +510,18 @@ body[data-view=usage] #usageRefresh,body[data-view=device] #deviceRefresh{displa
 .quota-chip[data-state=off],.quota-chip[data-state=disabled]{opacity:.45}
 .quota-chip[data-current=true]{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
 .quota-chip[data-dragging=true]{opacity:.55}
-/* 侧栏条目右侧的状态点（来源安装状态 / 会话状态）。 */
-.settings-menu .notch-dot{margin-left:auto}
-.settings-menu .notch-dot[data-state=working]{background:#0a84ff}
-.settings-menu .notch-dot[data-state=waiting]{background:#ff9f0a}
-.settings-menu .notch-dot[data-state=idle]{background:#30d158}
-.settings-menu .notch-dot[data-state=error]{background:#ff453a}
-.settings-nav footer .settings-brand{font-weight:600;color:var(--text-2)}
-.settings-pane{flex:1;min-height:0;overflow:auto;padding:24px 32px 64px}
+/* 状态点颜色（会话状态色）：侧栏行、会话列表用同一套。 */
+.notch-dot[data-state=working]{background:#0a84ff}
+.notch-dot[data-state=waiting]{background:#ff9f0a}
+.notch-dot[data-state=idle]{background:#30d158}
+.notch-dot[data-state=error]{background:#ff453a}
+.settings-pane{flex:1;min-width:0;min-height:0;overflow:auto;padding:28px 32px 64px}
 .settings-pane h2{margin:0;font-size:24px;font-weight:700;letter-spacing:-.5px}
-.settings-lead{margin:8px 0 0;color:var(--muted);font-size:12.5px;line-height:1.65;max-width:72ch}
+.settings-lead{margin:8px 0 0;color:var(--muted);font-size:13px;line-height:1.75;max-width:72ch}
+.settings-lead+.settings-card{margin-top:14px}
 .settings-pane h3{margin:26px 0 9px;color:var(--text-2);font-size:13px;font-weight:600}
-.settings-card{max-width:780px;border:1px solid var(--line);border-radius:13px;background:var(--card);overflow:hidden}
-.settings-row{display:flex;align-items:center;gap:16px;min-height:52px;padding:10px 18px;font-size:12.5px}
+.settings-card{max-width:780px;border:1px solid var(--line);border-radius:15px;background:var(--card);overflow:hidden}
+.settings-row{display:flex;align-items:center;gap:16px;min-height:58px;padding:12px 18px;font-size:12.5px}
 .settings-row+.settings-row{border-top:1px solid var(--line-soft)}
 /* 标签列自适应占满，控件列贴右：开关也是 <label>，必须排除，否则会被 stretch 到半行、看着靠左。 */
 .settings-row>label:not(.switch),.settings-row>span:first-child{flex:1;min-width:0;margin:0;color:var(--text);font-size:12.5px}
@@ -492,11 +529,20 @@ body[data-view=usage] #usageRefresh,body[data-view=device] #deviceRefresh{displa
 .settings-row small{display:block;margin-top:3px;color:var(--muted);font-size:11.5px;font-weight:400;line-height:1.5}
 .settings-row input,.settings-row select{width:min(330px,52%);flex:none}
 .settings-row .narrow{width:auto;min-width:96px}
-.settings-row .theme-switch{flex:none;width:min(280px,52%);margin:0}
+.settings-row .theme-switch,.settings-row .segs{flex:none;width:min(300px,56%);margin:0}
 .settings-row code{flex:0 1 auto;min-width:0;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--text-2);background:var(--hover);border-radius:6px;padding:4px 8px;overflow-wrap:anywhere;text-align:right}
 .settings-value{flex:none;max-width:60%;text-align:right;color:var(--text-2);font-size:12px}
 .settings-actions{display:flex;justify-content:flex-end;gap:8px;margin:18px 0 0;max-width:780px}
 .settings-pane .hint{margin:11px 0 0;max-width:780px}
+/* 子页签：「设置」与「通知岛设置」共用；选中项是浮起的白底，不用整块淡蓝。 */
+.pane-tabs{flex:none;padding:18px 32px 4px}
+.set-tabs{display:inline-flex;gap:2px;padding:3px;border-radius:10px;background:var(--hover)}
+.set-tabs button{flex:none;min-height:28px;padding:4px 14px;border:0;border-radius:7px;background:transparent;box-shadow:none;color:var(--text-2);font-size:12.5px;font-weight:500}
+.set-tabs button:hover{background:transparent;color:var(--text)}
+.set-tabs button[aria-pressed=true]{background:var(--card);color:var(--text);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.08),0 0 0 .5px var(--line)}
+/* 通知岛设置：子页签固定在顶部，下面的分页各自滚动。 */
+.settings-tabbed{padding:0;overflow:hidden;display:flex;flex-direction:column}
+.settings-page{flex:1;min-height:0;overflow:auto;padding:20px 32px 64px}
 /* 设置 · 关于：应用信息卡片（图标 + 版本 + 作者），下面是更新与开源社区卡片。 */
 .about-hero{display:flex;align-items:center;gap:16px;max-width:780px;margin-top:18px;padding:18px;border:1px solid var(--line);border-radius:13px;background:var(--card)}
 .about-logo{width:56px;height:56px;flex:none;border-radius:14px;object-fit:cover;box-shadow:var(--shadow)}
@@ -515,8 +561,8 @@ body[data-view=usage] #usageRefresh,body[data-view=device] #deviceRefresh{displa
 /* 技能左栏的「＋ 添加技能」占满整行，与搜索框上下排列。 */
 .filters>button{width:100%}
 
-@media(max-width:900px){.library{width:220px}.agent-items{width:230px}.files{width:150px}.editor-foot span:last-child{display:none}}
-@media(max-width:760px){header{gap:8px}.glass-group button{padding:4px 8px;font-size:12px}.library{width:190px}}
+@media(max-width:1000px){.library{width:210px}.agent-items{width:280px}.files{width:150px}.editor-foot span:last-child{display:none}}
+@media(max-width:800px){header{gap:8px;padding-left:12px;padding-right:12px}.view-tabs button{padding:7px 10px;font-size:12px}.library{width:190px}.agent-items{width:250px}.agent-context{padding-left:14px;padding-right:14px}.agent-content-tabs{margin-left:10px;margin-right:10px}.agent-items .filters{padding-left:10px;padding-right:10px}.agent-items .skill-list{padding-left:10px;padding-right:10px}}
 /* WKWebView 隐藏或应用不在前台时，同步暂停 CSS 呼吸；重新使用时从原相位继续。 */
 body.window-inactive *,body.window-inactive *::before,body.window-inactive *::after{animation-play-state:paused!important}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}.is-loading .summary-spark{animation:none}.top-links #appVersion.is-ready{animation:none}}

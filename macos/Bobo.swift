@@ -83,7 +83,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     private var service: Process?
     private let address = URL(string: "http://127.0.0.1:4318")!
     private let appAddress = URL(string: "http://127.0.0.1:4318/?app=1")!
-    private static let titlebarHeight: CGFloat = 28
+    private static let titlebarHeight: CGFloat = 52
     private var attempts = 0
 
     static func main() {
@@ -209,19 +209,25 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         webView = WKWebView(frame: .zero)
         webView.uiDelegate = self
         webView.navigationDelegate = self
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1140, height: 760), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        let size = NSSize(width: 960, height: 760)
+        window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "bobo"
         // 隐藏原生标题栏：页面顶栏与红黄绿灯融为一体，界面完全由网页绘制。
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
+        // 与 magpie 的 hidden-inset 窗口一致：透明空工具栏让系统红黄绿按钮居中到单行顶栏。
+        let toolbar = NSToolbar(identifier: "bobo.titlebar")
+        window.toolbar = toolbar
+        window.titlebarSeparatorStyle = .none
         window.minSize = NSSize(width: 760, height: 500)
-        // 用容器把网页与顶部拖拽条分层：红黄绿灯所在的 28pt 区域只负责拖动窗口，不遮挡网页。
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 1140, height: 760))
+        // 单行顶栏：原生拖拽层只接收空白处，网页上报按钮范围，点击透传给 WKWebView。
+        let container = NSView(frame: NSRect(origin: .zero, size: size))
         webView.frame = container.bounds
         webView.autoresizingMask = [.width, .height]
         container.addSubview(webView)
-        let drag = TitlebarDragView(frame: NSRect(x: 0, y: 760 - Self.titlebarHeight, width: 1140, height: Self.titlebarHeight))
+        let drag = TitlebarDragView(frame: NSRect(x: 0, y: size.height - Self.titlebarHeight, width: size.width, height: Self.titlebarHeight))
         drag.autoresizingMask = [.width, .minYMargin]
+        webView.configuration.userContentController.add(drag, name: "boboTitlebar")
         container.addSubview(drag)
         window.contentView = container
         // 关窗只隐藏窗口：不释放窗口对象，也不终止应用（应用继续驻留状态栏）。
@@ -1495,15 +1501,50 @@ private struct HoverReporter: NSViewRepresentable {
     func updateNSView(_ view: HoverTrackingView, context: Context) { view.onHoverChange = onChange }
 }
 
-// 覆盖红黄绿灯所在的顶部区域：拖动窗口，双击缩放；其它事件（滚动等）透传给网页。
-private final class TitlebarDragView: NSView {
+// 顶栏命中范围（网页坐标，左上角为原点）。数据未就绪或宽度已变化时透传，避免挡住按钮。
+struct TitlebarHitMap {
+    let width: CGFloat
+    let height: CGFloat
+    let controls: [NSRect]
+
+    init?(payload: Any) {
+        guard let data = payload as? [String: Any], let width = data["width"] as? Double,
+              let height = data["height"] as? Double, let rows = data["controls"] as? [[Double]],
+              width.isFinite, height.isFinite, width > 0, height > 0, height <= 80, rows.count <= 32 else { return nil }
+        var controls: [NSRect] = []
+        for row in rows {
+            guard row.count == 4, row.allSatisfy({ $0.isFinite }), row[2] > 0, row[3] > 0 else { return nil }
+            controls.append(NSRect(x: row[0], y: row[1], width: row[2], height: row[3]))
+        }
+        self.width = CGFloat(width)
+        self.height = CGFloat(height)
+        self.controls = controls
+    }
+
+    func canDrag(at point: NSPoint, size: NSSize) -> Bool {
+        guard abs(width - size.width) < 1, abs(height - size.height) < 1,
+              point.x >= 88, point.y >= 0, point.x < width, point.y < height else { return false }
+        return !controls.contains { $0.contains(point) }
+    }
+}
+
+// 原生拖动与双击缩放；按钮范围、红黄绿按钮及其它事件交还网页 / 系统处理。
+private final class TitlebarDragView: NSView, WKScriptMessageHandler {
+    private var hitMap: TitlebarHitMap?
+    override var isFlipped: Bool { true }
     override var mouseDownCanMoveWindow: Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard NSApp.currentEvent?.type == .leftMouseDown else { return nil }
+        guard NSApp.currentEvent?.type == .leftMouseDown,
+              hitMap?.canDrag(at: convert(point, from: superview), size: bounds.size) == true else { return nil }
         return super.hitTest(point)
     }
     override func mouseDown(with event: NSEvent) {
         if event.clickCount == 2 { window?.performZoom(nil) } else { window?.performDrag(with: event) }
+    }
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.frameInfo.isMainFrame, let url = message.frameInfo.request.url,
+              url.host == "127.0.0.1", url.port == 4318 else { return }
+        hitMap = TitlebarHitMap(payload: message.body)
     }
 }
 
@@ -1929,10 +1970,10 @@ enum IslandMetrics {
         source == "codex" ? "codex" : source == "omp" ? "omp" : source == "claude" ? "claude" : source == "dsh" ? "dsh" : source == "agy" ? "agy" : "opencode-go"
     }
     // 点刘海上的会话头像要定位到的通知岛分栏（与 index.html 的 data-island-pane 一致）：
-    // 认不出的来源、以及没有活跃会话时的置灰 bobo（source 为 nil）都落回第一项「通知岛设置」。
+    // 认不出的来源、以及没有活跃会话时的置灰 bobo（source 为 nil）都落回左栏底部的「通知岛设置」。
     static func islandPane(forSource source: String?) -> String {
         let panes = ["opencode", "codex", "omp", "claude", "dsh", "agy"]
-        guard let source, panes.contains(source) else { return "general" }
+        guard let source, panes.contains(source) else { return "settings" }
         return source
     }
     // 圆环拖动排序后的完整顺序：把「并排显示的这几家」按新顺序回填进完整 providers 顺序，

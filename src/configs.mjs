@@ -8,20 +8,22 @@ import { pruneBackups } from './backups.mjs';
 // （opencode / codex / null，没有就是纯配置文件）。新增 Agent 只需在这里加一项。
 // 只收录「通知岛」已接入的 harness（OpenCode / Codex / Claude Code / omp / dsh / agy），保持两边一致；
 // 其它 Agent 等接入通知岛后再取消注释，不要提前开放。
+// skillAgent 是这个 Agent 在技能目录表（skill-agents.mjs）里的 id，用来在「Agents」视图里按 Agent 筛出它能看到的技能；
+// 没有对应项（omp、dsh 不读 ~/.agents/skills）就不写。
 // 安全约定：只认白名单里的路径，绝不扫描目录，避免把 auth.json / *.credentials.json 之类的凭据暴露出来。
 // icon 必须是真实品牌图标（index.html 的内联 SVG 精灵），没有就不放图标，不做首字母占位。
 export const GLOBAL_CONFIGS={
- opencode:{label:'OpenCode',icon:'provider-opencode',agents:'opencode',dir:({home})=>path.join(home,'.config','opencode'),files:[
+ opencode:{label:'OpenCode',icon:'provider-opencode',agents:'opencode',skillAgent:'opencode',dir:({home})=>path.join(home,'.config','opencode'),files:[
   {file:'AGENTS.md',label:'全局规则',format:'markdown',description:'每次会话都会附加的全局个性化提示词（Markdown）'},
   {file:'opencode.json',label:'主配置',format:'json',description:'模型、权限、MCP、插件等全局配置（JSON）'},
   {file:'opencode.jsonc',label:'主配置（JSONC）',format:'jsonc',description:'带注释的全局配置，与 opencode.json 同时存在时会合并'},
   {file:'cli.json',label:'终端偏好',format:'json',description:'TUI 的主题、快捷键等终端设置（JSON）'},
  ]},
- codex:{label:'Codex',icon:'provider-codex',agents:'codex',dir:({home,env})=>env.CODEX_HOME||path.join(home,'.codex'),files:[
+ codex:{label:'Codex',icon:'provider-codex',agents:'codex',skillAgent:'codex',dir:({home,env})=>env.CODEX_HOME||path.join(home,'.codex'),files:[
   {file:'AGENTS.md',label:'全局规则',format:'markdown',description:'每次会话都会读取的全局个性化指令（Markdown）'},
   {file:'config.toml',label:'主配置',format:'toml',description:'模型、审批、沙箱、MCP 等全局配置（TOML）'},
  ]},
- claude:{label:'Claude Code',icon:'provider-claude',dir:({home,env})=>env.CLAUDE_CONFIG_DIR||path.join(home,'.claude'),files:[
+ claude:{label:'Claude Code',icon:'provider-claude',skillAgent:'claude-code',dir:({home,env})=>env.CLAUDE_CONFIG_DIR||path.join(home,'.claude'),files:[
   {file:'CLAUDE.md',label:'全局指令',format:'markdown',description:'每次会话都会加载的用户级指令（Markdown）'},
   {file:'settings.json',label:'主配置',format:'json',description:'模型、权限、环境变量、hooks 等用户级设置（JSON）'},
   {file:'keybindings.json',label:'快捷键',format:'json',description:'键盘快捷键覆盖（JSON）'},
@@ -34,7 +36,7 @@ export const GLOBAL_CONFIGS={
  dsh:{label:'DeepSeek',icon:'provider-dsh',dir:({home,env})=>env.DSH_HOME||path.join(home,'.dsh'),files:[
   {file:'settings.yaml',label:'主配置',format:'yaml',description:'模型、预设、界面与语言等全局设置（YAML）'},
  ]},
- agy:{label:'Antigravity',icon:'provider-agy',dir:({home,env})=>env.ANTIGRAVITY_CONFIG_DIR||path.join(home,'.gemini'),files:[
+ agy:{label:'Antigravity',icon:'provider-agy',skillAgent:'antigravity-cli',dir:({home,env})=>env.ANTIGRAVITY_CONFIG_DIR||path.join(home,'.gemini'),files:[
   {file:'GEMINI.md',label:'全局指令',format:'markdown',description:'每次会话都会加载的全局个性化提示词（Markdown）'},
   {file:'settings.json',label:'主配置',format:'json',description:'模型、安全、MCP、Hooks 等用户级设置（JSON）'},
   {file:'antigravity-cli/settings.json',label:'CLI 偏好',format:'json',description:'命令行环境权限、工作区信任等设置（JSON）'},
@@ -127,7 +129,7 @@ export function createConfigs({home,env={},fail}){
    const dir=spec.dir(ctx);
    let installed=false;
    if(await fs.lstat(dir).catch(()=>null))for(const f of spec.files){if(await fs.lstat(path.join(dir,f.file)).catch(()=>null)){installed=true;break;}}
-   out.push({id,label:spec.label,icon:spec.icon||null,agents:spec.agents||null,dir,installed});
+   out.push({id,label:spec.label,icon:spec.icon||null,agents:spec.agents||null,skillAgent:spec.skillAgent||null,dir,installed});
   }
   return {providers:out};
  }

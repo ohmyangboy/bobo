@@ -23,6 +23,23 @@ async function swiftSlice(start, end) {
  return source.slice(from,to);
 }
 
+test('单行顶栏：按钮与红黄绿区域透传，只有同尺寸的顶栏空白可以拖动', {skip:process.platform!=='darwin'}, async()=>{
+ await checkSwift(await swiftSlice('struct TitlebarHitMap {','// 原生拖动与双击缩放'),`
+let size = NSSize(width: 760, height: 52)
+let payload: [String: Any] = ["width": 760.0, "height": 52.0, "controls": [[134.0, 8.0, 90.0, 36.0], [712.0, 8.0, 36.0, 36.0]]]
+let map = TitlebarHitMap(payload: payload)!
+precondition(map.canDrag(at: NSPoint(x: 500, y: 26), size: size))
+precondition(!map.canDrag(at: NSPoint(x: 180, y: 26), size: size), "导航按钮不能变成拖动窗口")
+precondition(!map.canDrag(at: NSPoint(x: 730, y: 26), size: size), "设置按钮必须透传")
+precondition(!map.canDrag(at: NSPoint(x: 60, y: 26), size: size), "红黄绿区域交给系统")
+precondition(!map.canDrag(at: NSPoint(x: 500, y: 60), size: size), "正文不能拖动窗口")
+precondition(!map.canDrag(at: NSPoint(x: 500, y: 26), size: NSSize(width: 900, height: 52)), "缩放期间旧范围不能挡按钮")
+precondition(TitlebarHitMap(payload: [:]) == nil)
+precondition(TitlebarHitMap(payload: ["width": Double.nan, "height": 52.0, "controls": [[Double]]()]) == nil)
+precondition(TitlebarHitMap(payload: ["width": 760.0, "height": 52.0, "controls": [[134.0, 8.0, -90.0, 36.0]]]) == nil)
+`);
+});
+
 test('通知岛省电：折叠常驻静态，只有可见展开态允许呼吸', {skip:process.platform!=='darwin'}, async()=>{
  const declarations=await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {');
  const model=await swiftSlice('enum IslandDetailKind:','// 通知岛面板：黑色卡片贴住刘海');
@@ -290,14 +307,14 @@ test('通知岛让位：菜单栏触发的左右安全区', {skip:process.platfo
 // 提交给服务端前的「完整顺序」怎么合并：只动并排显示的那几家，未显示的保持原位。
 test('通知岛跳转：头像分栏与额度排序的合并顺序', {skip:process.platform!=='darwin'}, async()=>{
  await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {'),`
- precondition(IslandMetrics.islandPane(forSource: nil) == "general")
+ precondition(IslandMetrics.islandPane(forSource: nil) == "settings")
  precondition(IslandMetrics.islandPane(forSource: "opencode") == "opencode")
  precondition(IslandMetrics.islandPane(forSource: "codex") == "codex")
  precondition(IslandMetrics.islandPane(forSource: "omp") == "omp")
  precondition(IslandMetrics.islandPane(forSource: "claude") == "claude")
  precondition(IslandMetrics.islandPane(forSource: "dsh") == "dsh")
  precondition(IslandMetrics.islandPane(forSource: "agy") == "agy")
- precondition(IslandMetrics.islandPane(forSource: "认不出的来源") == "general")
+ precondition(IslandMetrics.islandPane(forSource: "认不出的来源") == "settings")
  // 顺序没变、整个翻转、以及夹杂未显示来源的三种合并。
  precondition(IslandMetrics.mergedQuotaOrder(full: ["a","b","c","d"], shown: ["a","b"]) == ["a","b","c","d"])
  precondition(IslandMetrics.mergedQuotaOrder(full: ["a","b","c","d"], shown: ["b","a"]) == ["b","a","c","d"])

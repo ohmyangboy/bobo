@@ -2,15 +2,43 @@ import {responseLines} from './stream.js';
 import {splitMarkdown,renderBlock,renderMarkdown} from './markdown.js';
 if(new URLSearchParams(location.search).has('app'))document.body.classList.add('app');
 const $=s=>document.querySelector(s), token=$('meta[name=token]').content;
+// 单行原生顶栏：只把可见按钮的范围交给拖拽层，按钮点击仍由 WKWebView 处理。
+// 没有原生桥时（普通浏览器）直接跳过；尺寸或显示状态变化时按帧合并，不轮询。
+function initTitlebar(){
+ const bridge=window.webkit?.messageHandlers?.boboTitlebar,header=$('header');
+ if(!bridge||!document.body.classList.contains('app')||!header)return;
+ let scheduled=false,last='';
+ function schedule(){
+  if(scheduled)return;scheduled=true;
+  requestAnimationFrame(()=>{
+   scheduled=false;
+   const bounds=header.getBoundingClientRect();
+   const controls=[...header.querySelectorAll('button,a,input,select,summary')].map(el=>el.getBoundingClientRect()).filter(r=>r.width>0&&r.height>0).map(r=>[r.x-bounds.x,r.y-bounds.y,r.width,r.height]);
+   const payload={width:bounds.width,height:bounds.height,controls},key=JSON.stringify(payload);
+   if(key!==last){last=key;bridge.postMessage(payload);}
+  });
+ }
+ const sizes=new ResizeObserver(schedule);sizes.observe(header);for(const el of header.children)sizes.observe(el);
+ new MutationObserver(schedule).observe(header,{subtree:true,attributes:true,childList:true,characterData:true});
+ new MutationObserver(schedule).observe(document.body,{attributes:true,attributeFilter:['class','data-view','data-island-kind']});
+ window.addEventListener('resize',schedule);document.fonts?.ready.then(schedule);schedule();
+}
+initTitlebar();
 // 外观：默认跟随系统（prefers-color-scheme 随系统即时切换），也可固定浅色 / 深色；手动选择保存在本机，不改动系统设置。
 const themeKey='bobo-theme',legacyThemeKey='skills-theme',themes=['system','light','dark'];
 let theme='system';try{const stored=localStorage.getItem(themeKey)??localStorage.getItem(legacyThemeKey);if(themes.includes(stored))theme=stored;}catch{}
 function applyTheme(){document.documentElement.dataset.theme=theme==='system'?'':theme;for(const b of document.querySelectorAll('[data-theme-value]'))b.setAttribute('aria-pressed',String(b.dataset.themeValue===theme));}
 for(const b of document.querySelectorAll('[data-theme-value]'))b.onclick=()=>{theme=b.dataset.themeValue;try{localStorage.setItem(themeKey,theme);}catch{}applyTheme();};
 applyTheme();
-// 当前一级视图：默认进通知岛（顶栏第一个 tab），另有技能 / 智能体 / 用量 / 设备 / 设置。顶栏全局操作按它收敛（见 style.css）。
+// 当前一级视图：默认进通知岛（顶栏第一个 tab），另有 Agents / 设备 / 设置（额度已并入通知岛）。当前页操作区按它显示（见 style.css）。
 document.body.dataset.view='island';
 let skills=[],selected=null,current=null,original='',version=null,loading=false,selectionRun=0,folder=null,mineRoots=[];
+// Agents 视图：左栏切换「Agent 视图」或「技能视图」；右侧详情区（技能 / 智能体共用）同一时间只显示一种内容。
+let agentsMode='agent',rightPane='agentEmpty';
+const rightPaneIds={skillEmpty:'#empty',folder:'#folder',skill:'#detail',agentEmpty:'#agentEmpty',agent:'#agentDetail'};
+function showPane(name){rightPane=name;for(const [key,id] of Object.entries(rightPaneIds))$(id).hidden=key!==name;syncBackLink();}
+function syncBackLink(){$('#backToFolder').hidden=agentsMode!=='skill'||rightPane!=='skill';}
+const emptyPane=()=>agentsMode==='agent'?'agentEmpty':'skillEmpty';
 async function api(url,data){const r=await fetch('/api/'+url,{method:data?'POST':'GET',headers:{'x-bobo-token':token,'Content-Type':'application/json'},body:data?JSON.stringify(data):undefined});const b=await r.json();if(!r.ok)throw Error(b.error);return b;}
 let toastTimer;function toast(s){$('#toast').textContent=s;$('#toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').hidden=true,5000);}
 function dirty(){return current&&$('#editor').value!==original;}
@@ -136,13 +164,13 @@ function folderInfo(){
  return mine?{key:folder,label:'我的 · '+mine.name,mine}:{key:folder,label:folder};
 }
 function folderMine(){return folderInfo().mine||null;}
-function showFolderView(){$('#empty').hidden=true;$('#detail').hidden=true;$('#folder').hidden=false;}
-function showDetailView(){$('#empty').hidden=true;$('#folder').hidden=true;$('#detail').hidden=false;}
+function showFolderView(){showPane('folder');}
+function showDetailView(){showPane('skill');}
 function markFolder(key){for(const el of document.querySelectorAll('#skills .skill-group'))el.classList.toggle('folder-active',el.dataset.group===key);}
 // 选中某个分组并显示它的文件夹视图；open 决定选中后该分组是展开还是收起（点已展开的分组就收起来）。
 function openFolder(key,open=true){
  if(!leave())return;
- folder=key;selected=null;current=null;selectionRun++;
+ folder=key;selected=null;current=null;selectionRun++;dropAgentSelection();
  groupState.set(key,open);showFolderView();render();renderFolder();
 }
 function updateFolderActions(){
@@ -191,8 +219,10 @@ function renderFolder(){
  }
  if(!rows.length){const p=document.createElement('p');p.textContent='此文件夹下没有技能';p.className='muted';$('#folderSkills').append(p);}
 }
-async function refresh(force=false,initial=false){try{const snapshot=initial?await api('startup'):null;skills=snapshot?snapshot.skills:await api('skills'+(force?'?refresh=1':''));try{mineRoots=await api('sources/roots');}catch{}if(!agentInfo)await loadAgentInfo();if(snapshot?.cached)setTimeout(()=>guard(()=>refresh(true))(),0);render();if(selected&&!skills.some(s=>s.id===selected.id)){selected=null;current=null;if(!(folder&&!$('#folder').hidden)){$('#detail').hidden=true;$('#empty').hidden=false;}}else if(selected){selected=skills.find(s=>s.id===selected.id);}if(folder&&!$('#folder').hidden)renderFolder();}catch(e){$('#count').textContent='加载失败';throw e;}}
-async function choose(s){if(!leave())return;const run=++selectionRun;selected=s;folder=skillGroup(s).key;showDetailView();markFolder(folder);$('#backToFolder').hidden=false;$('#backToFolder').textContent='← 返回 '+folderInfo().label;$('#reader').scrollTop=0;groupState.set(folder,true);current=null;$('#name').textContent=s.name;$('#originText').textContent=s.mine?('我的技能 · '+(s.mine.repo||'未同步 GitHub')):(s.source||'本地技能');$('#description').textContent=s.description||'此技能暂未提供描述。';$('#location').textContent=s.mine?s.mine.root+'（'+linkLabel(s)+'）':s.path;renderAgentLinks(s);$('#updateOne').disabled=!s.source||!!s.mine;const address=addressOf(s);$('#sourceLink').hidden=!address;$('#sourceLink').textContent=address.includes('github.com')?'在 GitHub 打开 ↗':'打开来源 ↗';readerData=null;readerSkill=s.id;readerFile=null;bilingual=false;summaryExpanded=false;$('#summaryStatus').hidden=true;setView('read');render();try{const files=await api('tree?id='+s.id);if(run!==selectionRun)return;renderTree(files,true);}catch(e){if(run!==selectionRun)return;renderTree([],true,e.message);}await openFile('SKILL.md',true);}
+async function refresh(force=false,initial=false){try{const snapshot=initial?await api('startup'):null;skills=snapshot?snapshot.skills:await api('skills'+(force?'?refresh=1':''));try{mineRoots=await api('sources/roots');}catch{}if(!agentInfo)await loadAgentInfo();if(snapshot?.cached)setTimeout(()=>guard(()=>refresh(true))(),0);render();renderAgentList();if(selected&&!skills.some(s=>s.id===selected.id)){selected=null;current=null;if(rightPane==='skill')showPane(emptyPane());}else if(selected){selected=skills.find(s=>s.id===selected.id);}if(rightPane==='folder')renderFolder();}catch(e){$('#count').textContent='加载失败';throw e;}}
+// 点击技能（两种筛选共用）：离开前先处理两边未保存的修改；openSkill 只负责显示，轮询 / 删文件后的刷新直接调它。
+async function choose(s){if(!leave()||!agentLeave())return;await openSkill(s);}
+async function openSkill(s){const run=++selectionRun;dropAgentSelection();selected=s;folder=skillGroup(s).key;showDetailView();markFolder(folder);$('#backToFolder').textContent='← 返回 '+folderInfo().label;$('#reader').scrollTop=0;groupState.set(folder,true);current=null;$('#name').textContent=s.name;$('#originText').textContent=s.mine?('我的技能 · '+(s.mine.repo||'未同步 GitHub')):(s.source||'本地技能');$('#description').textContent=s.description||'此技能暂未提供描述。';$('#location').textContent=s.mine?s.mine.root+'（'+linkLabel(s)+'）':s.path;renderAgentLinks(s);$('#updateOne').disabled=!s.source||!!s.mine;const address=addressOf(s);$('#sourceLink').hidden=!address;$('#sourceLink').textContent=address.includes('github.com')?'在 GitHub 打开 ↗':'打开来源 ↗';readerData=null;readerSkill=s.id;readerFile=null;bilingual=false;summaryExpanded=false;$('#summaryStatus').hidden=true;setView('read');render();renderAgentList();try{const files=await api('tree?id='+s.id);if(run!==selectionRun)return;renderTree(files,true);}catch(e){if(run!==selectionRun)return;renderTree([],true,e.message);}await openFile('SKILL.md',true);}
 // 文件树：把平铺路径还原成目录层级，文件夹行可点击展开/折叠。默认全部收起，只自动展开当前文件所在的目录。
 const openDirs=new Set();
 function buildTree(files){
@@ -239,7 +269,7 @@ $('#editor').oninput=()=>{$('#save').disabled=!dirty();$('#dirty').textContent=d
 $('#save').onclick=guard(async()=>{if(!current)return;const content=$('#editor').value;const r=await api('file',{id:selected.id,path:current,content,version});original=content;version=r.version;$('#editor').oninput();await loadReader(selected.id,current,true);toast('已保存，原文件已备份');});
 $('#search').oninput=render;$('#finder').onclick=guard(()=>api('open',{id:selected.id}));$('#sourceLink').onclick=guard(()=>{const u=addressOf(selected);if(u)return api('open',{url:u});});
 $('#backToFolder').onclick=()=>{if(folder)openFolder(folder);};
-$('#folderRefresh').onclick=guard(async()=>{await refresh(true);if(folder&&!$('#folder').hidden){renderFolder();markFolder(folder);}});
+$('#folderRefresh').onclick=guard(async()=>{await refresh(true);if(rightPane==='folder'){renderFolder();markFolder(folder);}});
 $('#folderFinder').onclick=guard(()=>{const mine=folderMine();return mine?api('open',{dir:mine.root}):api('open',{group:folder});});
 $('#folderRelink').onclick=guard(async()=>{const mine=folderMine();if(!mine)return;const rep=await api('sources/link',{path:mine.root});await refresh(true);toast(rep.linked.length||rep.removed.length?'已链接 '+rep.linked.length+' 个、清理 '+rep.removed.length+' 个':'链接已是最新');});
 $('#folderSync').onclick=guard(async()=>{const mine=folderMine();if(!mine)return;await openSync(mine.root);});
@@ -250,7 +280,7 @@ $('#folderRemove').onclick=guard(async()=>{
  if(mine){
   if(!confirm('确定删除「'+folderInfo().label+'」下的全部 '+rows.length+' 个技能？源目录里的文件将被永久删除。\n\n'+rows.map(s=>s.name).join('、')))return;
   for(const s of rows)await api('sources/delete',{path:mine.root,name:s.name});
-  folder=null;selected=null;current=null;$('#empty').hidden=false;$('#detail').hidden=true;$('#folder').hidden=true;await refresh(true);render();toast('已删除 '+rows.length+' 个技能');
+  folder=null;selected=null;current=null;showPane(emptyPane());await refresh(true);render();toast('已删除 '+rows.length+' 个技能');
   return;
  }
  if(!confirm('确定删除「'+folderInfo().label+'」下的全部 '+rows.length+' 个技能？此操作直接删除、不进行备份。\n\n'+rows.map(s=>s.name).join('、')))return;
@@ -274,14 +304,14 @@ document.addEventListener('click',e=>closeMenus(e.target.closest?.('details.menu
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeMenus();});
 function busyUI(value){loading=value;for(const id of ['updateOne','remove','submitAdd','folderRemove','folderUpdate','folderFinder','folderRefresh','folderRelink','folderSync','folderNew'])$('#'+id).disabled=value;}
 async function execute(args,group){if(loading)throw Error('请等待当前操作完成');if(!leave())return;showConsole();await api('command',{args,group});busyUI(true);await poll();}
-async function poll(){try{const j=await api('job');if(!j)return;$('#output').textContent=j.output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'');$('#output').scrollTop=$('#output').scrollHeight;$('#jobStatus').textContent=j.running?'运行中…':j.code===0?'完成':'失败';busyUI(j.running);if(j.running)setTimeout(poll,650);else{await refresh(true);if(selected&&!dirty())await choose(selected);toast(j.code===0?'操作完成':'操作失败，请查看任务输出');if(consoleAuto)consoleTimer=setTimeout(()=>setConsole(false),2000);}}catch(e){busyUI(false);toast(e.message);}}
+async function poll(){try{const j=await api('job');if(!j)return;$('#output').textContent=j.output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g,'');$('#output').scrollTop=$('#output').scrollHeight;$('#jobStatus').textContent=j.running?'运行中…':j.code===0?'完成':'失败';busyUI(j.running);if(j.running)setTimeout(poll,650);else{await refresh(true);if(selected&&!dirty())await openSkill(selected);toast(j.code===0?'操作完成':'操作失败，请查看任务输出');if(consoleAuto)consoleTimer=setTimeout(()=>setConsole(false),2000);}}catch(e){busyUI(false);toast(e.message);}}
 $('#updateOne').onclick=guard(()=>{if(confirm('更新 '+selected.name+'？本地修改会先备份。'))return execute(['update',selected.name,'-g']);});
 async function deleteMineSkill(s){
  if(!confirm('确定删除技能 '+s.name+'？源目录与 ~/.agents/skills 里的链接都会被永久删除。\n\n'+s.mine.root))return;
  await api('sources/delete',{path:s.mine.root,name:s.name});
  await refresh(true);
- if(folder&&folderRows().length)openFolder(folder);
- else{folder=null;selected=null;current=null;$('#detail').hidden=true;$('#folder').hidden=true;$('#empty').hidden=false;render();}
+ if(agentsMode==='skill'&&folder&&folderRows().length)openFolder(folder);
+ else{folder=null;selected=null;current=null;showPane(emptyPane());render();}
  toast('已删除 '+s.name);
 }
 $('#remove').onclick=guard(()=>{if(selected.mine)return deleteMineSkill(selected);if(confirm('确定直接删除技能 '+selected.name+' 及其全部文件与 Agent 链接？此操作不进行备份。'))return execute(['remove',selected.name,'-g']);});
@@ -289,8 +319,9 @@ $('#add').onclick=()=>$('#addDialog').showModal();$('#cancelAdd').onclick=()=>$(
 $('#addMode').onchange=()=>{const mode=$('#addMode').value;$('#skillField').hidden=mode!=='add';$('#addHint').hidden=mode!=='add';$('#package').placeholder=mode==='init'?'my-skill':'mattpocock/skills@code-review';};
 $('#addForm').onsubmit=guard(async e=>{e.preventDefault();const mode=$('#addMode').value,value=$('#package').value.trim();if(!value)return;const args=[mode,value];if(mode==='add'&&$('#skillName').value.trim())args.push('--skill',$('#skillName').value.trim());$('#addDialog').close();await execute(args);});
 $('#newFile').onclick=guard(async()=>{if(!leave())return;const file=prompt('新文件路径，例如 references/notes.md');if(!file)return;await api('file',{id:selected.id,path:file,content:'',create:true});expandDirs(file);renderTree(await api('tree?id='+selected.id));await openFile(file,true);setView('edit');toast('文件已创建');});
-$('#deleteFile').onclick=guard(async()=>{if(!current||!confirm('删除文件 '+current+'？原文件会备份。'))return;await api('file',{id:selected.id,path:current,version,delete:true});current=null;await choose(selected);toast('文件已删除');});
-window.addEventListener('beforeunload',e=>{if(dirty()||agentDirty()){e.preventDefault();e.returnValue='';}});window.addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='s'){e.preventDefault();if(agentActive){if(agentDirty())$('#agentSave').click();}else if(dirty())$('#save').click();}});
+$('#deleteFile').onclick=guard(async()=>{if(!current||!confirm('删除文件 '+current+'？原文件会备份。'))return;await api('file',{id:selected.id,path:current,version,delete:true});current=null;await openSkill(selected);toast('文件已删除');});
+window.addEventListener('beforeunload',e=>{if(dirty()||agentDirty()){e.preventDefault();e.returnValue='';}});window.addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='s'){e.preventDefault();if(agentDirty())$('#agentSave').click();else if(dirty())$('#save').click();}});
+window.addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key===','){e.preventDefault();guard(()=>switchView('settings'))();}});
 
 
 let readerData=null,readerSkill=null,readerFile=null,readerRun=0,view='read',bilingual=false,summaryExpanded=false,contentRenderKey='',summaryRenderKey='',resumeTimer;
@@ -319,6 +350,7 @@ function showSettingsPane(name){
  const next=settingsPanes.includes(name)?name:settingsPanes[0];
  for(const p of document.querySelectorAll('#settingsWorkspace [data-pane]'))p.hidden=p.dataset.pane!==next;
  for(const b of document.querySelectorAll('#settingsWorkspace [data-settings-pane]'))b.setAttribute('aria-pressed',String(b.dataset.settingsPane===next));
+ $('#settingsActions').hidden=next!=='ai';
 }
 for(const b of document.querySelectorAll('#settingsWorkspace [data-settings-pane]'))b.onclick=()=>showSettingsPane(b.dataset.settingsPane);
 
@@ -613,16 +645,17 @@ $('#syncForm').onsubmit=guard(async e=>{
  }finally{submit.disabled=false;}
 });
 
-// 智能体：管理 ~/.config/opencode/agents 里的 OpenCode agent 定义（Markdown 文件），与「技能」互相独立。
+// 智能体（Agents 的「Agent 视图」）：管理 ~/.config/opencode/agents 里的 OpenCode agent 定义（Markdown 文件）；技能与它共用右侧详情区，见 setAgentsMode。
 // 文件即配置：ID 就是文件名，frontmatter 是配置，正文是系统提示词；保存、重命名、删除前都会备份。
-let agentActive=false,agentItems=[],agentLoaded=false,agentConfigs=null,agentConfigLoaded=false,agentSel=null,agentOriginal='',agentVersion='',agentRun=0,agentProvider='opencode',agentDetailKind='agent',agentFilter='',agentProviders=null;
+let agentItems=[],agentLoaded=false,agentConfigs=null,agentConfigLoaded=false,agentSel=null,agentOriginal='',agentVersion='',agentRun=0,agentProvider='opencode',agentDetailKind='agent',agentFilter='',agentProviders=null,agentSection='config';
 const agentMeta=()=>(agentProviders||[]).find(p=>p.id===agentProvider)||null;
 // 来源 meta 的 agents 字段是子智能体定义的后端（opencode / codex / null）：null 表示这个 Agent 只管理全局配置。
 const agentBackend=()=>agentMeta()?.agents||null;
 const agentCodex=()=>agentBackend()==='codex';
 const agentHasDefs=()=>!!agentBackend();
-// 内容区同时展示「全局配置」与「智能体定义」两个区块；agentDetailKind 记录当前详情属于哪一类。
+// 内容分类决定中间列显示哪一种列表；agentDetailKind 记录当前打开的详情类型。
 const agentIsConfig=()=>agentDetailKind==='config';
+const agentSectionOK=section=>section==='config'||section==='agent'&&agentHasDefs()||section==='skill'&&!!agentMeta()?.skillAgent;
 const agentRoute=s=>agentCodex()?'codex/agents'+s:'agents'+s;
 const agentConfigRoute=s=>'configs'+s;
 function agentDirty(){return !!(agentSel&&$('#agentEditor').value!==agentOriginal);}
@@ -633,10 +666,20 @@ function refreshAgentChrome(){
  const codex=agentCodex();
  // 详情里的管理按钮只对智能体定义有意义：全局配置是固定文件，不改名、不删除、不复制 ID。
  applyAgentDetailChrome();
- $('#agentNew').hidden=!agentHasDefs();
+ if(!agentSectionOK(agentSection))agentSection='config';
+ $('#agentNew').hidden=agentSection!=='agent'||!agentHasDefs();
  $('#agentNew').title=codex?'在 ~/.codex/agents 下新建 Codex 自定义智能体':'在 ~/.config/opencode/agents 下新建智能体定义';
- $('#agentNew').textContent=codex?'＋ 新建 Codex 智能体':'＋ 新建智能体';
- $('#agentSearch').placeholder='搜索智能体与全局配置…';
+ $('#agentSkillAdd').hidden=agentSection!=='skill'||!agentMeta()?.skillAgent;
+ const labels={config:'配置',agent:'智能体',skill:'技能'},hints={config:'模型、权限与全局规则',agent:'角色定义与系统提示词',skill:'这个 Agent 可使用的技能'};
+ const meta=agentMeta(),glyph=meta&&providerGlyph(meta);
+ $('#agentContextIcon').replaceChildren(...[glyph].filter(Boolean));$('#agentContextIcon').hidden=!glyph;
+ $('#agentContextName').textContent=meta?.label||'OpenCode';$('#agentContextHint').textContent=hints[agentSection];
+ $('#agentContentTabs').hidden=!!meta&&!meta.agents&&!meta.skillAgent;
+ for(const b of document.querySelectorAll('[data-agent-section]')){b.hidden=!agentSectionOK(b.dataset.agentSection);b.setAttribute('aria-pressed',String(b.dataset.agentSection===agentSection));}
+ $('#agentSearch').placeholder='搜索'+labels[agentSection]+'…';$('#agentSearch').setAttribute('aria-label','搜索'+labels[agentSection]);
+ $('#agentListLabel').textContent={config:'配置文件',agent:'智能体定义',skill:'可用技能'}[agentSection];
+ $('#agentEmptyTitle').textContent={config:'选择一份配置',agent:'选择一个智能体',skill:'选择一个技能'}[agentSection];
+ $('#agentEmptyText').textContent={config:'查看或编辑 '+(meta?.label||'Agent')+' 的全局设置。未创建的配置可在保存时创建。',agent:'查看角色与系统提示词，或新建一个智能体。',skill:'查看技能说明与文件，管理它在各个 Agent 中的安装。'}[agentSection];
  $('#agentDialogTitle').textContent=codex?'新建 Codex 智能体':'新建智能体';
  $('#agentDialogHint').textContent=codex?'在 ~/.codex/agents 下创建一个 Codex 自定义智能体（TOML：name / description / developer_instructions）。Codex 以 name 字段识别它，建议两者一致。':'在 ~/.config/opencode/agents 下创建一个 OpenCode 智能体定义（Markdown + frontmatter）。OpenCode 会自动加载新文件，无需重启。';
  $('#agentModeLabel').hidden=codex;$('#agentColorLabel').hidden=codex;
@@ -647,8 +690,15 @@ function refreshAgentChrome(){
 // 详情里的管理按钮只对智能体定义有意义：全局配置是固定文件，不改名、不删除、不复制 ID。
 function applyAgentDetailChrome(){
  const config=agentIsConfig();
+ $('#agentReadingActions').hidden=config&&!agentSel?.exists;
+ $('#agentManage').hidden=config;
  $('#agentRename').hidden=config;$('#agentDelete').hidden=config;$('#agentCopy').hidden=config;
  $('#agentToggle').hidden=config||agentCodex();
+ $('#agentPropertiesLabel').textContent=config?'配置与文件位置':'智能体属性与文件位置';
+ $('#agentReader').setAttribute('aria-label',config?'配置正文':'智能体正文');
+ $('#agentEditor').setAttribute('aria-label',config?'配置内容':'智能体内容');
+ $('#agentTranslate').title=config?'翻译当前配置':'翻译当前智能体定义';
+ $('#agentFinder').title=config?'在 Finder 中打开配置目录':'在 Finder 中打开智能体目录';
 }
 // 来源清单由服务端下发（GET /api/configs/providers），已安装且存在配置（installed）的排在前面。
 async function loadAgentProviders(){
@@ -676,28 +726,39 @@ function renderAgentSources(){
   if(!b){b=document.createElement('button');b.type='button';b.dataset.agentProvider=p.id;b.onclick=guard(()=>setAgentProvider(p.id));}
   b.setAttribute('aria-pressed',String(p.id===agentProvider));
   b.title=(p.agents?'管理该来源的智能体与全局配置：':'查看与调节该来源的全局配置：')+p.dir;
-  const name=document.createElement('span');name.className='provider-name';name.textContent=p.label;
+  const name=document.createElement('span');name.className='side-name';name.textContent=p.label;
+  const status=document.createElement('span');status.className='side-status';
   const dot=document.createElement('span');dot.className='notch-dot';dot.dataset.state=p.installed?'idle':'off';
-  b.replaceChildren(...[providerGlyph(p),name,dot].filter(Boolean));
+  const text=document.createElement('b');text.textContent=p.installed?'已安装':'未安装';status.append(dot,text);
+  b.replaceChildren(...[providerGlyph(p),name,status].filter(Boolean));
   nav.append(b);
  }
  nav.scrollTop=scrollTop;
 }
 function setAgentProvider(id){
  if(!id||id===agentProvider||!agentProviders?.some(p=>p.id===id))return;
- if(!agentLeave())return;
- agentProvider=id;agentLoaded=false;agentConfigLoaded=false;agentItems=[];agentConfigs=null;agentSel=null;agentOriginal='';agentVersion='';agentDetailKind='agent';agentFilter='';
+ if(!agentLeave()||!leave())return;
+ agentProvider=id;agentLoaded=false;agentConfigLoaded=false;agentItems=[];agentConfigs=null;agentSel=null;agentOriginal='';agentVersion='';agentRun++;agentDetailKind='agent';agentFilter='';
+ dropSkillSelection();
  $('#agentSearch').value='';
- $('#agentDetail').hidden=true;$('#agentEmpty').hidden=false;
+ showPane('agentEmpty');
  $('#agentList').scrollTop=0;
- renderAgentSources();refreshAgentChrome();
+ renderAgentSources();refreshAgentChrome();renderAgentList();
  loadAgentAll().catch(e=>toast(e.message));
+}
+function setAgentSection(section){
+ if(section===agentSection||!agentSectionOK(section)||!agentLeave()||!leave())return;
+ dropSkillSelection();dropAgentSelection();
+ agentSection=section;agentFilter='';$('#agentSearch').value='';
+ showPane('agentEmpty');refreshAgentChrome();renderAgentList();$('#agentList').scrollTop=0;
 }
 // 一次加载当前来源的两块内容：全局配置（固定清单）与智能体定义（目录扫描，只有支持定义文件的来源才有）。
 async function loadAgentAll(){
- const reqs=[api(agentConfigRoute('?provider='+encodeURIComponent(agentProvider)))];
+ const provider=agentProvider;
+ const reqs=[api(agentConfigRoute('?provider='+encodeURIComponent(provider)))];
  if(agentHasDefs())reqs.push(api(agentRoute('')));
  const [configsRes,agentsRes]=await Promise.all(reqs);
+ if(provider!==agentProvider)return;
  agentItems=agentsRes?agentsRes.agents:[];agentLoaded=true;
  agentConfigs={...configsRes,files:configsRes.files.map(f=>({...f,id:f.key}))};agentConfigLoaded=true;
  $('#agentRoot').textContent=(configsRes.label||agentProvider)+' · '+configsRes.dir;
@@ -705,26 +766,16 @@ async function loadAgentAll(){
  if(agentSel){
   const found=agentDetailKind==='config'?agentConfigs.files.find(x=>x.key===agentSel.id):agentItems.find(x=>x.id===agentSel.id);
   if(found){agentSel=found;applyAgentDetailChrome();renderAgentFacts(found);}
-  else{agentSel=null;$('#agentDetail').hidden=true;$('#agentEmpty').hidden=false;}
+  else{agentSel=null;showPane('agentEmpty');}
  }
 }
-// 内容区：一个搜索框过滤两个区块，全局配置在前、智能体定义在后。
-function agentSection(title,count,rows){
- const frag=document.createDocumentFragment();
- const head=document.createElement('div');head.className='list-caption';
- const label=document.createElement('span');label.textContent=title;
- const total=document.createElement('span');total.textContent=String(count);
- head.append(label,total);
- const box=document.createElement('div');box.className='agent-section';
- for(const row of rows)box.append(row);
- frag.append(head,box);return frag;
-}
+// 配置、智能体和技能各有独立列表与搜索，不再混在一条长列表中。
 function agentConfigRow(f){
  const b=button('',`skill-item ${agentIsConfig()&&agentSel?.id===f.id?'selected':''}`,()=>openConfig(f));
  const line=document.createElement('span');line.className='agent-line';
  const dot=document.createElement('i');dot.className='agent-dot'+(f.exists?'':' pending');
  const strong=document.createElement('strong');strong.textContent=f.name||f.file;line.append(dot,strong);
- const tag=document.createElement('span');tag.className='badge'+(f.exists?'':' conflict');tag.textContent=f.exists?(f.link?'符号链接':f.format.toUpperCase()):'未创建';line.append(tag);
+ const tag=document.createElement('span');tag.className='badge';tag.textContent=f.exists?(f.link?'只读':f.format==='markdown'?'MD':f.format.toUpperCase()):'未创建';line.append(tag);
  const small=document.createElement('small');small.textContent=f.label;b.title=f.path+' · '+f.description;
  b.append(line,small);return b;
 }
@@ -742,15 +793,31 @@ function agentRow(a){
  const small=document.createElement('small');small.textContent=a.description||'（未填写 description）';
  b.append(line,small);return b;
 }
+// 技能行（Agent 视图的中间列）：点击与技能视图一样进入技能详情。
+function agentSkillRow(s){
+ const b=button('',`skill-item ${selected?.id===s.id?'selected':''}`,()=>choose(s));
+ b.title=s.description||s.name;
+ const line=document.createElement('span');line.className='agent-line';
+ const strong=document.createElement('strong');strong.textContent=s.name;line.append(strong);
+ const small=document.createElement('small');small.textContent=s.description||s.source||'本地技能';
+ b.append(line,small);return b;
+}
 function renderAgentList(){
  const list=$('#agentList');list.replaceChildren();
- if(!agentLoaded&&!agentConfigLoaded){const p=document.createElement('p');p.className='muted';p.textContent='加载中…';list.append(p);return;}
+ if(!agentLoaded&&!agentConfigLoaded){$('#agentListCount').textContent='';for(const el of document.querySelectorAll('[data-agent-count]'))el.textContent='';const p=document.createElement('p');p.className='agent-note';p.textContent='加载中…';list.append(p);return;}
  const q=agentFilter;
- const configs=(agentConfigs?.files||[]).filter(f=>[f.file,f.label,f.description,f.format].filter(Boolean).join(' ').toLowerCase().includes(q));
+ const files=agentConfigs?.files||[];
+ const configs=files.filter(f=>[f.file,f.label,f.description,f.format].filter(Boolean).join(' ').toLowerCase().includes(q));
  const agents=agentItems.filter(a=>[a.id,a.name,a.description,a.mode,a.model,a.effort,a.sandbox].filter(Boolean).join(' ').toLowerCase().includes(q));
- list.append(agentSection('全局配置',configs.length,configs.map(agentConfigRow)));
- if(agentHasDefs())list.append(agentSection('智能体定义',agents.length,agents.map(agentRow)));
- if(!configs.length&&!agents.length){const p=document.createElement('p');p.className='muted';p.textContent=agentFilter?'没有匹配的内容':(agentHasDefs()?'还没有内容，点「＋ 新建智能体」创建一个。':'这个来源暂无可管理的配置文件。');list.append(p);}
+ const skillAgent=agentMeta()?.skillAgent||null;
+ const visibleSkills=skillAgent?skills.filter(s=>(s.agentLinks||[]).some(x=>x.id===skillAgent)):[];
+ const skillRows=visibleSkills.filter(s=>[s.name,s.description,s.source].filter(Boolean).join(' ').toLowerCase().includes(q)).sort((a,b)=>a.name.localeCompare(b.name));
+ const totals={config:files.length,agent:agentItems.length,skill:visibleSkills.length};
+ for(const el of document.querySelectorAll('[data-agent-count]'))el.textContent=String(totals[el.dataset.agentCount]);
+ const rows={config:configs,agent:agents,skill:skillRows}[agentSection],row={config:agentConfigRow,agent:agentRow,skill:agentSkillRow}[agentSection];
+ $('#agentListCount').textContent=q?rows.length+' / '+totals[agentSection]:totals[agentSection]+' 项';
+ if(rows.length){const box=document.createElement('div');box.className='agent-section';for(const item of rows)box.append(row(item));list.append(box);}
+ else{const p=document.createElement('p');p.className='agent-note';p.textContent=q?'没有匹配的'+{config:'配置',agent:'智能体',skill:'技能'}[agentSection]:{config:'这个来源暂无可管理的配置文件。',agent:'还没有智能体，点「＋ 新建」创建一个。',skill:'还没有可用技能，点「＋ 添加」安装一个。'}[agentSection];list.append(p);}
 }
 function fact(k,v,cls=''){
  if(v===undefined||v===null||v==='')return null;
@@ -781,13 +848,14 @@ function renderAgentReading(){
  if(!agentSel)return;
  // 全局配置尚未创建时没有可总结 / 翻译的内容，隐藏这两处入口。
  const configMissing=agentIsConfig()&&!agentSel.exists;
- $('#agentSummaryCard').hidden=configMissing;$('#agentTranslate').hidden=configMissing;
+ $('#agentReadingActions').hidden=configMissing;
+ $('#agentSummaryCard').hidden=configMissing;$('#agentSummarize').hidden=configMissing;$('#agentTranslate').hidden=configMissing;
  const id=agentSel.id,loaded=!!(agentAIData&&agentAIFile===id);
  const blocks=loaded?agentAIData.blocks:splitMarkdown($('#agentEditor').value);
  const summary=loaded?agentAIData.summary:null,translation=loaded?agentAIData.translation:null;
  const pending=activeAI.get(agentAIKey(id))||(loaded?agentAIData.pending:null);
  $('#agentSummaryToggle').setAttribute('aria-expanded',String(agentAISummaryExpanded));$('#agentSummaryCopy').hidden=!summary;
- $('#agentSummaryHint').textContent=pending==='summary'?'正在总结…':summary?'已保存 · 点击'+(agentAISummaryExpanded?'收起':'展开'):'点击生成，快速了解这个智能体';
+ $('#agentSummaryHint').textContent=pending==='summary'?'正在总结…':summary?'已保存 · 点击'+(agentAISummaryExpanded?'收起':'展开'):'点击生成，快速了解'+(agentIsConfig()?'这份配置':'这个智能体');
  $('#agentSummaryBody').hidden=!agentAISummaryExpanded||!summary;
  if(summary&&agentAISummaryKey!==summary.text){renderMarkdown($('#agentSummaryBody'),summary.text);agentAISummaryKey=summary.text;}
  $('#agentSummaryCard').classList.toggle('is-loading',pending==='summary');
@@ -796,7 +864,7 @@ function renderAgentReading(){
  $('#agentTranslationStatus').textContent=translation?.complete?'上下对照 · 已缓存':pending==='translate'?`正在翻译 · ${translation?.done||0} / ${translation?.total??blocks.filter(b=>!['code','rule'].includes(b.type)).length} 段`:'上下对照 · '+(translation?.done?'已保留 '+translation.done+' 段':'等待生成');
  $('#agentTranslationCopy').hidden=!translation?.done;$('#agentTranslationRetry').hidden=!!pending||!!translation?.complete;
  const content=$('#agentReading'),scroller=$('#agentReader'),oldTop=scroller.scrollTop,metadataOpen=content.querySelector('.frontmatter')?.open;
- content.replaceChildren(renderPairs(blocks,translation,pending,agentAIBilingual,'定义声明',metadataOpen));
+ content.replaceChildren(renderPairs(blocks,translation,pending,agentAIBilingual,agentIsConfig()?'配置声明':'定义声明',metadataOpen));
  scroller.scrollTop=oldTop;
 }
 async function loadAgentAI(id,reset=false){
@@ -849,10 +917,11 @@ async function startAgentAI(mode){
  }finally{activeAI.delete(key);if(agentSel?.id===id&&agentAIData){agentAIData.pending=null;renderAgentReading();}}
 }
 async function openAgent(a){
- if(!agentLeave())return;
+ if(!agentLeave()||!leave())return;
+ dropSkillSelection();
  agentDetailKind='agent';agentSel=a;applyAgentDetailChrome();renderAgentList();
  const run=++agentRun;
- $('#agentEmpty').hidden=true;$('#agentDetail').hidden=false;
+ showPane('agent');
  $('#agentName').textContent=agentCodex()?(a.name||a.id):a.id;
  $('#agentDescription').textContent=a.description||'此智能体暂未填写 description。';
  $('#agentMeta').textContent=(agentCodex()?[a.id,a.model,a.effort,a.sandbox,a.link?'符号链接':null]:[a.mode||'未设置模式',a.model||null,a.hidden?'已隐藏':null,a.link?'符号链接':null]).filter(Boolean).join(' · ');
@@ -860,6 +929,7 @@ async function openAgent(a){
  const problems=$('#agentProblems');
  problems.hidden=!a.problems.length;problems.textContent=a.problems.length?'需要检查：'+a.problems.join('；'):'';
  $('#agentFilename').textContent=a.file;
+ $('#agentFilename').title=a.path||a.file;
  try{
   const f=await api(agentRoute('/file?id='+encodeURIComponent(a.id)));
   if(run!==agentRun)return;
@@ -873,10 +943,11 @@ async function openAgent(a){
 }
 // 打开一份全局配置文件：读取真实内容（可能是空文件 / 未创建），复用智能体的阅读、编辑与 AI 能力。
 async function openConfig(f){
- if(!agentLeave())return;
+ if(!agentLeave()||!leave())return;
+ dropSkillSelection();
  agentDetailKind='config';agentSel=f;applyAgentDetailChrome();renderAgentList();
  const run=++agentRun;
- $('#agentEmpty').hidden=true;$('#agentDetail').hidden=false;
+ showPane('agent');
  $('#agentName').textContent=f.name||f.file;
  $('#agentMeta').textContent=[agentConfigs?.label||agentProvider,f.label,f.format&&f.format.toUpperCase()].filter(Boolean).join(' · ');
  $('#agentDescription').textContent=f.description||'';
@@ -884,7 +955,7 @@ async function openConfig(f){
  const problems=$('#agentProblems');
  problems.hidden=!!f.exists&&!f.link;
  problems.textContent=f.link?'这是符号链接，只读，不能编辑。':f.exists?'':'文件尚未创建，编辑正文并保存后会新建。';
- $('#agentFilename').textContent=f.path||f.file;
+ $('#agentFilename').textContent=f.file||f.name;$('#agentFilename').title=f.path||f.file;
  try{
   const r=await api(agentConfigRoute('/file?provider='+encodeURIComponent(agentProvider)+'&key='+encodeURIComponent(f.key)));
   if(run!==agentRun)return;
@@ -893,7 +964,7 @@ async function openConfig(f){
   $('#agentEditor').value=r.content;
   $('#agentFileInfo').textContent=r.exists?r.content.split('\n').length+' 行':'尚未创建';
   $('#agentReader').scrollTop=0;
-  setAgentView('read');agentDirtyUI();
+  setAgentView(r.exists?'read':'edit');agentDirtyUI();
   renderAgentFacts(r);
   if(r.exists)await loadAgentAI(f.key,true);
   else{agentAIData=null;agentAIFile=null;renderAgentReading();}
@@ -905,23 +976,46 @@ function setAgentView(next){
  $('#agentSave').hidden=next!=='edit';$('#agentSave').disabled=!agentDirty();
  if(next==='read')renderAgentReading();
 }
-// 六个一级视图：技能 / 智能体 / 通知岛 / 用量 / 设备 / 设置。切换前先处理未保存的编辑。
+// Agents 的两种视图（左栏顶部切换）。「Agent 视图」：左栏是来源，中间列按配置 / 智能体 / 技能切换；
+// 「技能视图」：左栏是技能分组，右侧文件夹视图列出技能。右侧详情区共用，同一时间只显示一种内容（rightPane）。
+function applyAgentsMode(){
+ for(const el of document.querySelectorAll('#agentsWorkspace [data-agents-pane]'))el.hidden=el.dataset.agentsPane!==agentsMode;
+ for(const b of document.querySelectorAll('#agentsWorkspace [data-agents-mode]'))b.setAttribute('aria-pressed',String(b.dataset.agentsMode===agentsMode));
+ syncBackLink();
+}
+function setAgentsMode(mode){
+ if(mode===agentsMode||!leave()||!agentLeave())return;
+ agentsMode=mode;
+ if(mode==='skill'){
+  if(rightPane==='agent'||rightPane==='agentEmpty'){
+   dropAgentSelection();
+   const first=$('#skills .skill-group');
+   if(first)openFolder(first.dataset.group);else showPane('skillEmpty');
+  }
+ }else{
+  if(rightPane==='skill'){
+   if(agentMeta()?.skillAgent&&(selected?.agentLinks||[]).some(x=>x.id===agentMeta().skillAgent))agentSection='skill';
+   else{dropSkillSelection();showPane('agentEmpty');}
+  }else if(rightPane==='folder'||rightPane==='skillEmpty')showPane('agentEmpty');
+  refreshAgentChrome();
+ }
+ applyAgentsMode();render();renderAgentList();
+}
+function dropSkillSelection(){if(!selected&&!current)return;selected=null;current=null;selectionRun++;}
+function dropAgentSelection(){if(!agentSel)return;agentSel=null;agentOriginal='';agentVersion='';agentRun++;$('#agentEditor').value='';renderAgentList();}
+// 四个一级视图：Agents / 通知岛（会话、额度与通知岛设置）/ 设备 / 设置。切换前先处理未保存的编辑。
 async function switchView(next){
  if(next===islandView)return;
- if(islandView==='skills'&&!leave())return;
- if(islandView==='agents'&&!agentLeave())return;
- islandView=next;agentActive=next==='agents';
+ if(islandView==='agents'&&(!leave()||!agentLeave()))return;
+ islandView=next;
  document.body.dataset.view=next;
- $('#skillsWorkspace').hidden=next!=='skills';
  $('#agentsWorkspace').hidden=next!=='agents';
  $('#islandWorkspace').hidden=next!=='island';
- $('#usageWorkspace').hidden=next!=='usage';
  $('#deviceWorkspace').hidden=next!=='device';
  $('#settingsWorkspace').hidden=next!=='settings';
- for(const [id,name] of [['#skillsTab','skills'],['#agentsTab','agents'],['#islandTab','island'],['#usageTab','usage'],['#deviceTab','device'],['#settingsTab','settings']])$(id).setAttribute('aria-pressed',String(next===name));
+ for(const [id,name] of [['#agentsTab','agents'],['#islandTab','island'],['#deviceTab','device'],['#settingsTab','settings']])$(id).setAttribute('aria-pressed',String(next===name));
  if(next==='agents'){await loadAgentProviders();if(!agentLoaded||!agentConfigLoaded)await loadAgentAll();else renderAgentList();}
- if(next==='island')openIsland();else islandClose();
- if(next==='usage')openUsage();else usageClose();
+ if(next==='island'){openIsland();openUsage();}else{islandClose();usageClose();}
  if(next==='device')openDevice();else deviceClose();
  if(next==='settings')await loadAISettings();
 }
@@ -973,18 +1067,20 @@ async function deleteAgent(){
  if(!confirm('删除智能体 '+label+'？定义文件会先备份到 ~/.bobo/backups。'))return;
  await api(agentRoute('/delete'),{id:agentSel.id});
  agentSel=null;agentOriginal='';agentVersion='';
- $('#agentEditor').value='';$('#agentDetail').hidden=true;$('#agentEmpty').hidden=false;
+ $('#agentEditor').value='';showPane('agentEmpty');
  await loadAgentAll();
  toast('已删除');
 }
-$('#skillsTab').onclick=guard(()=>switchView('skills'));
+for(const b of document.querySelectorAll('#agentsWorkspace [data-agents-mode]'))b.onclick=guard(()=>setAgentsMode(b.dataset.agentsMode));
+for(const b of document.querySelectorAll('[data-agent-section]'))b.onclick=guard(()=>setAgentSection(b.dataset.agentSection));
+$('#agentSkillAdd').onclick=()=>$('#addDialog').showModal();
 $('#agentsTab').onclick=guard(()=>switchView('agents'));
 $('#islandTab').onclick=guard(()=>switchView('island'));
-$('#usageTab').onclick=guard(()=>switchView('usage'));
 $('#deviceTab').onclick=guard(()=>switchView('device'));
 $('#settingsTab').onclick=guard(()=>switchView('settings'));
 $('#agentSearch').oninput=()=>{agentFilter=$('#agentSearch').value.trim().toLowerCase();renderAgentList();};
 refreshAgentChrome();
+showPane(emptyPane());applyAgentsMode();
 $('#agentFinder').onclick=guard(()=>api('open',agentIsConfig()?{config:agentProvider}:agentCodex()?{codexAgent:true}:{agent:true}));
 $('#agentCopy').onclick=guard(async()=>{if(!agentSel)return;const v=agentCodex()?(agentSel.name||agentSel.id):agentSel.id;await navigator.clipboard.writeText(v);toast('已复制 '+(agentCodex()?'name':'ID'));});
 $('#agentSave').onclick=guard(saveAgent);
@@ -1098,13 +1194,13 @@ function renderIsland(){
  islandRenderKey=key;
  // 服务端把六个 Agent 的会话合并进 sessions，并按 source 区分；这里分栏展示。
  const oc=sessions.filter(s=>!['codex','omp','claude','dsh','agy'].includes(s.source)),cx=sessions.filter(s=>s.source==='codex'),op=sessions.filter(s=>s.source==='omp'),cl=sessions.filter(s=>s.source==='claude'),ds=sessions.filter(s=>s.source==='dsh'),ag=sessions.filter(s=>s.source==='agy');
- $('#islandNavDot').dataset.state=connected?(oc[0]?.state||'idle'):'';
+ const [ocState,ocText]=connected?sessionSide(oc):['','未运行'];setSideStatus('opencode',ocState,ocText);
  $('#islandService').textContent=connected?'事件流已连接，OpenCode 换端口会自动重连':'未检测到正在运行的 OpenCode 服务，启动后会自动连上';
- $('#islandCodexDot').dataset.state=cx[0]?.state||'';
- $('#islandOmpDot').dataset.state=op[0]?.state||'';
- $('#islandClaudeDot').dataset.state=cl[0]?.state||'';
- $('#islandDshDot').dataset.state=ds[0]?.state||'';
- $('#islandAgyDot').dataset.state=ag[0]?.state||'';
+ setSideStatus('codex',...sessionSide(cx));
+ setSideStatus('omp',...sessionSide(op));
+ setSideStatus('claude',...sessionSide(cl));
+ setSideStatus('dsh',...sessionSide(ds));
+ setSideStatus('agy',...sessionSide(ag));const waiting=sessions.filter(s=>s.state==='waiting').length,working=sessions.filter(s=>s.state==='working').length;$('#islandSummary').textContent=waiting?waiting+' 个等你回答':working?working+' 个运行中':'无活跃会话';
  // 顺序照搬服务端：最近发生状态变更的会话排在最上面（见各来源的 *.mjs），这里不再按状态分组。
  renderSessionList($('#islandList'),$('#islandCount'),oc,'还没有会话记录');
  renderSessionList($('#codexList'),$('#codexCount'),cx,'最近没有 Codex 会话；Codex 运行时会自动出现在这里');
@@ -1115,14 +1211,29 @@ function renderIsland(){
  renderQuotaOrder(islandState.usage);
  if(!islandReady){islandReady=true;renderIslandSettings();}
 }
-// 通知岛左侧分类：通知岛设置（提醒 / 刘海面板 / 菜单栏与位置合并为一个分栏）与 Agent 连接（OpenCode / Codex / omp / Claude Code / dsh / agy，含各自会话列表）。
-const islandPanes=['general','opencode','codex','omp','claude','dsh','agy'];
+// 通知岛左侧分类（参考 magpie 的来源列表）：Agent 连接（会话）与额度来源两组，底部固定「通知岛设置」。
+// 行右侧是「圆点 + 状态文字」；分栏按 data-island-pane 切换，设置页内再用子页签（data-island-settings）切四个分页。
+const islandPanes=['opencode','codex','omp','claude','dsh','agy','quota-codex','quota-claude','quota-opencode','quota-agy','settings'];
 function showIslandPane(name){
  const next=islandPanes.includes(name)?name:islandPanes[0];
  for(const p of document.querySelectorAll('#islandWorkspace [data-island-pane-content]'))p.hidden=p.dataset.islandPaneContent!==next;
  for(const b of document.querySelectorAll('#islandWorkspace [data-island-pane]'))b.setAttribute('aria-pressed',String(b.dataset.islandPane===next));
+ // 右下角的「刷新额度」只在额度分栏出现（CSS 按 data-island-kind 显示）。
+ document.body.dataset.islandKind=next.startsWith('quota-')?'quota':next==='settings'?'settings':'session';
 }
 for(const b of document.querySelectorAll('#islandWorkspace [data-island-pane]'))b.onclick=()=>showIslandPane(b.dataset.islandPane);
+const islandSettingsPanes=['notch','notify','quota','menubar'];
+function showIslandSettings(name){
+ const next=islandSettingsPanes.includes(name)?name:islandSettingsPanes[0];
+ for(const p of document.querySelectorAll('[data-island-settings-content]'))p.hidden=p.dataset.islandSettingsContent!==next;
+ for(const b of document.querySelectorAll('[data-island-settings]'))b.setAttribute('aria-pressed',String(b.dataset.islandSettings===next));
+}
+for(const b of document.querySelectorAll('[data-island-settings]'))b.onclick=()=>showIslandSettings(b.dataset.islandSettings);
+// 侧栏行右侧的状态：小圆点（颜色沿用会话状态色）+ 一段文字，参考 magpie 的「● Connected」。
+function setSideStatus(key,state,text){const el=document.querySelector(`[data-side-status="${key}"]`);if(!el)return;el.querySelector('.notch-dot').dataset.state=state;el.querySelector('b').textContent=text;}
+// 会话来源的状态取最近一条（与原来的圆点同口径）；没有会话时是灰点 + 「无会话」。
+function sessionSide(rows){return rows.length?[rows[0].state,ocLabels[rows[0].state]||'']:['','无会话'];}
+
 // 开关沿用与技能启停同一套 switch 控件；每次提交完整设置，后端整体校验。
 function islandSwitch(row,key,label,on){
  const cell=$(row);cell.querySelector('.switch')?.remove();
@@ -1131,8 +1242,8 @@ function islandSwitch(row,key,label,on){
  }));
 }
 // 「内容 → 额度显示顺序」：几枚来源图标按住拖动排序。写的是同一份 order（usage.json 的 order），
-// 所以通知岛里的这个顺序、「用量」页的来源顺序、刘海面板上圆环的顺序始终一致。
-const quotaSymbols={codex:'provider-codex','opencode-go':'provider-opencode',agy:'provider-agy'};
+// 所以通知岛里的这个顺序、左栏「额度来源」的顺序、刘海面板上圆环的顺序始终一致。
+const quotaSymbols={codex:'provider-codex',claude:'provider-claude','opencode-go':'provider-opencode',agy:'provider-agy'};
 let quotaOrderIds='';
 function renderQuotaOrder(usage){
  const box=$('#quotaOrderList');if(!box)return;
@@ -1193,9 +1304,13 @@ if(quotaOrderBox){
   next.splice(next.indexOf(chip.dataset.provider)+(after?1:0),0,quotaDragId);
   islandState.usage=await api('usage/order',{ids:next});
   renderQuotaOrder(islandState.usage);
+  renderQuotaSide(islandState.usage);
   toast('额度显示顺序已更新');
  }));
 }
+// 设置里的小枚举用分段控件（样式同「外观」）：按钮带 data-value，选中态是 aria-pressed；点击即先切换显示，再写入设置。
+function setSeg(id,value){for(const b of document.querySelectorAll(`#${id} button`))b.setAttribute('aria-pressed',String(b.dataset.value===String(value)));}
+function bindSeg(id,onChange){for(const b of document.querySelectorAll(`#${id} button`))b.onclick=guard(async()=>{setSeg(id,b.dataset.value);await onChange(b.dataset.value,b.textContent);});}
 function renderIslandSettings(){
  const s=islandState.settings;
  islandSwitch('#rowNotify','notify','系统通知',s.notify!==false);
@@ -1203,29 +1318,19 @@ function renderIslandSettings(){
  islandSwitch('#rowNotch','notch','显示刘海面板',s.notch!==false);
  islandSwitch('#rowAutoExpand','autoExpand','需要回答或结束时自动展开',s.autoExpand!==false);
  islandSwitch('#rowHideWhenIdle','hideWhenIdle','没有活跃会话时隐藏',s.hideWhenIdle===true);
+ setSeg('islandRows',String(s.rows||3));
  // 刘海面板在哪块屏：默认跟随当前使用的应用（由原生判定），也可以固定到内置刘海屏或主屏。
- const modes=['auto','builtin','main'],select=$('#displaySelect');
- select.value=modes.includes(s.display)?s.display:'auto';
- select.onchange=guard(async()=>{
-  islandState.settings=await api('opencode/settings',{...islandState.settings,display:select.value});
-  toast('刘海面板显示位置：'+select.selectedOptions[0].textContent);
- });
+ const displays=['auto','builtin','main'];
+ setSeg('displaySegs',displays.includes(s.display)?s.display:'auto');
  islandSwitch('#rowMenubar','menubar','显示状态栏图标',s.menubar===true);
  islandSwitch('#rowMovable','movable','刘海面板可移动',s.movable===true);
- $('#islandRows').value=String(s.rows||3);
  // 额度查看方式：默认「展开并排」——面板展开时把各来源的额度并排显示；「点击切换」是原来的单圆环切换。
- const quotaViews=['expand','cycle'],quotaView=$('#quotaViewSelect');
- quotaView.value=quotaViews.includes(s.quotaView)?s.quotaView:'expand';
- quotaView.onchange=guard(async()=>{
-  islandState.settings=await api('opencode/settings',{...islandState.settings,quotaView:quotaView.value});
-  renderIslandSettings();
-  toast('额度查看方式：'+quotaView.selectedOptions[0].textContent);
- });
+ const quotaViews=['expand','cycle'],quotaView=quotaViews.includes(s.quotaView)?s.quotaView:'expand';
+ setSeg('quotaViewSegs',quotaView);
  // 并排显示数量：3 / 5 / 7 / 自适应（0，按屏幕剩余空间算）；只在「展开并排」时生效。
- const quotaCount=$('#quotaCountSelect'),quotaCounts=['0','3','5','7'];
- quotaCount.value=quotaCounts.includes(String(s.quotaCount??0))?String(s.quotaCount??0):'0';
- quotaCount.disabled=quotaView.value!=='expand';
- quotaCount.onchange=guard(async()=>{islandState.settings=await api('opencode/settings',{...islandState.settings,quotaCount:Number(quotaCount.value)});});
+ const quotaCounts=['0','3','5','7'],quotaCount=String(s.quotaCount??0);
+ setSeg('quotaCountSegs',quotaCounts.includes(quotaCount)?quotaCount:'0');
+ for(const b of document.querySelectorAll('#quotaCountSegs button'))b.disabled=quotaView!=='expand';
 }
 async function islandLoop(run){
  while(islandStream&&run===islandRun){
@@ -1259,8 +1364,7 @@ function setWindowActive(active){
  windowActive=active;
  if(!active){islandClose();usageClose();deviceClose();stopAppPolling();syncProcessPolling();return;}
  startAppPolling();
- if(islandView==='island')openIsland();
- if(islandView==='usage')openUsage();
+ if(islandView==='island'){openIsland();openUsage();}
  if(islandView==='device')openDevice();
 }
 window.__boboSetWindowActive=active=>{nativeWindowActive=active;setWindowActive(active&&!document.hidden);};
@@ -1270,13 +1374,15 @@ function watchTerminals(){api('terminals/watch',{}).catch(()=>{});}
 async function focusSession(s){
  try{await api('opencode/focus',{id:s.id,title:s.title||'',directory:s.directory||'',source:s.source||'opencode'});}catch(e){toast(e.message);}
 }
-$('#islandRows').onchange=guard(async()=>{islandState.settings=await api('opencode/settings',{...islandState.settings,rows:Number($('#islandRows').value)});});
+bindSeg('islandRows',async v=>{islandState.settings=await api('opencode/settings',{...islandState.settings,rows:Number(v)});});
+bindSeg('displaySegs',async(v,label)=>{islandState.settings=await api('opencode/settings',{...islandState.settings,display:v});toast('刘海面板显示位置：'+label);});
+bindSeg('quotaViewSegs',async(v,label)=>{islandState.settings=await api('opencode/settings',{...islandState.settings,quotaView:v});renderIslandSettings();toast('额度查看方式：'+label);});
+bindSeg('quotaCountSegs',async v=>{islandState.settings=await api('opencode/settings',{...islandState.settings,quotaCount:Number(v)});});
 
-// 用量：Codex（chatgpt.com 的订阅额度）、OpenCode Go（官方用量接口，退回本机估算）与 Antigravity（本地语言服务 / agy CLI）三家，服务端把结果挂进状态流。
+// 额度（原「用量」视图，已并入通知岛）：Codex（chatgpt.com 的订阅额度）、OpenCode Go（官方用量接口，退回本机估算）与 Antigravity（本地语言服务 / agy CLI）三家，服务端把结果挂进状态流。
 // 打开视图时拉一次最新值，之后每分钟刷新一次；关闭视图就停掉定时器。点击左侧来源会同时切到该分栏，
 // 并把刘海胶囊的额度指示也切到这家（POST /api/usage/provider）。
 let usageData=null,usageTimer=null;
-const usagePanes=['codex','claude','opencode','agy'];
 const usageProviderId=pane=>pane==='opencode'?'opencode-go':pane;
 const usagePaneFor=id=>id==='opencode-go'?'opencode':id;
 // 侧栏来源顺序（拖动排序用）：记录上一次应用过的顺序，避免状态流每次推送都重排 DOM。
@@ -1292,40 +1398,48 @@ function resetText(seconds){
  if(seconds<86400)return Math.floor(seconds/3600)+' 小时 '+Math.round(seconds%3600/60)+' 分后重置';
  return Math.floor(seconds/86400)+' 天后重置';
 }
-function showUsagePane(name){
- const next=usagePanes.includes(name)?name:usagePanes[0];
- for(const p of document.querySelectorAll('#usageWorkspace [data-usage-pane-content]'))p.hidden=p.dataset.usagePaneContent!==next;
- for(const b of document.querySelectorAll('#usageWorkspace [data-usage-pane]'))b.setAttribute('aria-pressed',String(b.dataset.usagePane===next));
-}
-for(const b of document.querySelectorAll('#usageWorkspace [data-usage-pane]'))b.onclick=()=>showUsagePane(b.dataset.usagePane);
-// 按住拖动调整来源顺序：顺序写在 usage.json 的 order 里，排在最前的来源显示在刘海胶囊上
-// （不可用或关掉的会自动让给下一家）。拖动松手后立刻把新顺序发给服务端并重画侧栏。
+// 额度来源（原「用量」视图，已并入通知岛）：左栏 #quotaNav 每一项对应一个分栏 data-island-pane="quota-<来源>"。
+// 顺序与状态由 renderQuotaSide 按服务端数据刷新；拖动排序写的是 usage.json 的 order，排在最前的来源显示在刘海胶囊上。
 let usageDragPane=null;
-for(const b of document.querySelectorAll('#usageWorkspace [data-usage-pane]')){
+for(const b of document.querySelectorAll('#quotaNav [data-island-pane]')){
  b.addEventListener('dragstart',e=>{
-  usageDragPane=b.dataset.usagePane;b.dataset.dragging='true';
+  usageDragPane=b.dataset.islandPane;b.dataset.dragging='true';
   if(e.dataTransfer){e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',usageDragPane);}
  });
  b.addEventListener('dragend',()=>{delete b.dataset.dragging;usageDragPane=null;});
  b.addEventListener('dragover',e=>{
-  if(!usageDragPane||usageDragPane===b.dataset.usagePane)return;
+  if(!usageDragPane||usageDragPane===b.dataset.islandPane)return;
   e.preventDefault();
   if(e.dataTransfer)e.dataTransfer.dropEffect='move';
  });
  b.addEventListener('drop',guard(async e=>{
   e.preventDefault();
-  if(!usageDragPane||usageDragPane===b.dataset.usagePane)return;
-  const panes=[...document.querySelectorAll('#usageWorkspace [data-usage-pane]')].map(x=>x.dataset.usagePane);
-  const from=panes.indexOf(usageDragPane),to=panes.indexOf(b.dataset.usagePane);
+  if(!usageDragPane||usageDragPane===b.dataset.islandPane)return;
+  const panes=[...document.querySelectorAll('#quotaNav [data-island-pane]')].map(x=>x.dataset.islandPane);
+  const from=panes.indexOf(usageDragPane),to=panes.indexOf(b.dataset.islandPane);
   if(from<0||to<0)return;
   // 鼠标落在目标项上半 → 插到它前面；下半 → 插到它后面。
   const rect=b.getBoundingClientRect(),after=e.clientY>rect.top+rect.height/2;
   const next=panes.filter(p=>p!==usageDragPane);
-  next.splice(next.indexOf(b.dataset.usagePane)+(after?1:0),0,usageDragPane);
-  usageData=await api('usage/order',{ids:next.map(usageProviderId)});
+  next.splice(next.indexOf(b.dataset.islandPane)+(after?1:0),0,usageDragPane);
+  usageData=await api('usage/order',{ids:next.map(p=>usageProviderId(p.slice('quota-'.length)))});
   renderUsage();
   toast('来源顺序已更新：'+(usageData?.providers?.[0]?.name||'')+' 显示在刘海胶囊上');
  }));
+}
+// 额度来源侧栏：顺序跟服务端一致（拖动排序后立刻反映）；右侧状态 = 圆点 + 文字（已连接 / 已关闭 / 未连接）。
+function renderQuotaSide(snapshot){
+ const list=snapshot?.providers||[],nav=$('#quotaNav');
+ if(!nav||!list.length)return;
+ const order=list.map(p=>usagePaneFor(p.id)).join(',');
+ if(order!==usageSidebarOrder){
+  usageSidebarOrder=order;
+  for(const p of list){const b=nav.querySelector(`[data-island-pane="quota-${usagePaneFor(p.id)}"]`);if(b)nav.append(b);}
+ }
+ for(const p of list){
+  const on=p.available&&p.enabled!==false;
+  setSideStatus('quota-'+usagePaneFor(p.id),on?'idle':'off',!p.available?'未连接':on?'已连接':'已关闭');
+ }
 }
 function usageCard(w){
  const card=document.createElement('div');card.className='usage-card';card.dataset.level=usageLevel(w.remainingPercent);
@@ -1370,20 +1484,8 @@ function renderUsage(){
  const data=usageData;
  const byId=id=>data?.providers?.find(p=>p.id===id)||null;
  const codex=byId('codex'),claude=byId('claude'),local=byId('opencode-go'),agy=byId('agy');
- // 侧栏按服务端返回的顺序排列（拖动排序后立刻反映出来）：只在顺序变化时 append 移动已有节点，不重建。
- const sidebarIds=(data?.providers||[]).map(p=>usagePaneFor(p.id));
- const sidebarOrder=sidebarIds.join(',');
- if(sidebarOrder!==usageSidebarOrder){
-  usageSidebarOrder=sidebarOrder;
-  const nav=document.querySelector('#usageWorkspace .settings-menu');
-  for(const pane of sidebarIds){const button=nav.querySelector('[data-usage-pane="'+pane+'"]');if(button)nav.append(button);}
- }
- $('#usageState').textContent=!data?'读取中':data.available?'已连接':'暂不可用';
+ renderQuotaSide(data);
  $('#usageUpdated').textContent=data?.updatedAt?'更新于 '+new Date(data.updatedAt).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'每分钟刷新';
- $('#usageDotCodex').dataset.state=codex?.available?'idle':'';
- $('#usageDotClaude').dataset.state=claude?.available?'idle':'';
- $('#usageDotOpencode').dataset.state=local?.available?'idle':'';
- $('#usageDotAgy').dataset.state=agy?.available?'idle':'';
  usageSwitch('#rowUsageCodex','刘海胶囊可切换到此来源',codex?.enabled!==false,'codex');
  usageSwitch('#rowUsageClaude','刘海胶囊可切换到此来源',claude?.enabled!==false,'claude');
  usageSwitch('#rowUsageOpencode','刘海胶囊可切换到此来源',local?.enabled!==false,'opencode-go');
@@ -1451,7 +1553,6 @@ function renderUsage(){
 async function loadUsage(){
  try{
   usageData=await api('usage?refresh=1');
-  showUsagePane(usagePaneFor(usageData.selected));
   renderUsage();
  }catch(e){toast(e.message);}
 }
@@ -1464,7 +1565,7 @@ $('#usageRefresh').onclick=guard(async()=>{
  try{
   let data=await api('usage?refresh=1');
   if(data?.providers.find(p=>p.id==='claude')?.needsDirectConfirm&&claudeDirectAsk())data=await api('usage?refresh=1&direct=1');
-  usageData=data;showUsagePane(usagePaneFor(data.selected));renderUsage();
+  usageData=data;renderUsage();
   toast('已刷新额度');
  }finally{button.disabled=false;}
 });
@@ -1816,11 +1917,11 @@ async function loadDevice(force=false){
 }
 function openDevice(){if(!windowActive||deviceTimer)return;loadDevice();deviceTimer=setInterval(loadDevice,3000);syncProcessPolling();syncLinksPolling();}
 function deviceClose(){if(deviceTimer){clearInterval(deviceTimer);deviceTimer=null;}syncProcessPolling();syncLinksPolling();}
-// 右下角的悬浮「刷新设备」：强制服务端立刻全量采一次（磁盘常驻采样约 60 秒一轮、网络延迟约 6 秒一轮，等不起）。
+// 右下角的「刷新设备」：强制服务端立刻全量采一次（磁盘常驻采样约 60 秒一轮、网络延迟约 6 秒一轮，等不起）。
 $('#deviceRefresh').onclick=guard(async()=>{$('#deviceRefresh').disabled=true;try{await loadDevice(true);toast('已刷新设备信息');}finally{$('#deviceRefresh').disabled=false;}});
 
-guard(async()=>{await refresh(false,true);const first=$('#skills .skill-group');if(first)openFolder(first.dataset.group);const j=await api('job');if(j?.running){showConsole();await poll();}})();
+guard(async()=>{await refresh(false,true);const j=await api('job');if(j?.running){showConsole();await poll();}})();
 guard(startAppPolling)();
 // 首页默认选中第一个 tab（通知岛）：静态 HTML 已经把视图/按钮状态摆好，这里补上订阅与终端归属续期
-// （switchView 只在切换视图时调 openIsland，首屏不走那条路径）。
-if(islandView==='island')openIsland();
+// （switchView 只在切换视图时调 openIsland / openUsage，首屏不走那条路径）。
+if(islandView==='island'){openIsland();openUsage();}
