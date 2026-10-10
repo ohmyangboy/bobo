@@ -1,0 +1,420 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><script>(()=>{try{const v=localStorage.getItem('paper-theme');if(v==='light'||v==='dark'){document.documentElement.dataset.theme=v}}catch(_e){}})();</script><script>(() => {
+  const settings = {"key": "paper-language:/bobo", "auto": false, "links": [{"choice": "default", "language": "zh-CN", "href": "/bobo/"}, {"choice": "en", "language": "en", "href": "/bobo/en/"}]};
+  window.paperLanguageSettings = settings;
+  const choices = new Map(settings.links.map(link => [link.choice, link]));
+  const explicit = new URLSearchParams(location.search).get('lang');
+  let preferred = choices.has(explicit) ? explicit : null;
+  try {
+    if (preferred) localStorage.setItem(settings.key, preferred);
+    else preferred = localStorage.getItem(settings.key);
+  } catch (_error) {}
+  if (!settings.auto) return;
+  const normalize = tag => String(tag).replace(/_/g, '-').toLowerCase();
+  const available = settings.links.filter(link => link.language);
+  const locale = tag => {
+    try { return new Intl.Locale(tag).maximize(); } catch (_error) {
+      const parts = normalize(tag).split('-');
+      const script = parts[0] === 'zh' ? (parts.some(p => ['hant', 'tw', 'hk', 'mo'].includes(p)) ? 'Hant' : 'Hans') : '';
+      return {language: parts[0], script, region: ''};
+    }
+  };
+  const match = tag => {
+    const normalized = normalize(tag);
+    let exact = available.find(link => normalize(link.language) === normalized);
+    if (exact) return exact;
+    const wanted = locale(normalized);
+    const candidates = available.filter(link => {
+      const candidate = locale(link.language);
+      return candidate.language === wanted.language && (!wanted.script || !candidate.script || candidate.script === wanted.script);
+    });
+    let parent = normalized;
+    while (parent.includes('-')) {
+      parent = parent.slice(0, parent.lastIndexOf('-'));
+      exact = candidates.find(link => normalize(link.language) === parent);
+      if (exact) return exact;
+    }
+    return candidates.find(link => wanted.region && locale(link.language).region === wanted.region) || candidates[0];
+  };
+  let target = choices.get(preferred);
+  if (!target) {
+    const languages = navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language || ''];
+    for (const language of languages) {
+      target = match(language);
+      if (target) break;
+    }
+  }
+  if (target && target.choice !== 'default') {
+    const url = new URL(target.href, location.href);
+    url.search = location.search;
+    url.hash = location.hash;
+    location.replace(url.href);
+  }
+})();</script><meta name="referrer" content="strict-origin-when-cross-origin"><meta name="theme-color" content="#2563EB"><link rel="icon" href="/bobo/assets/app-icon.png"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous"><title>功能与支持范围 | bobo</title><meta name="description" content="bobo 的通知岛、额度、设备、技能与智能体管理，以及各个 Agent 的支持范围。"><meta property="og:title" content="功能与支持范围"><meta property="og:site_name" content="bobo"><meta property="og:description" content="bobo 的通知岛、额度、设备、技能与智能体管理，以及各个 Agent 的支持范围。"><meta property="og:type" content="article"><meta property="og:locale" content="zh_CN"><meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="功能与支持范围"><meta name="twitter:description" content="bobo 的通知岛、额度、设备、技能与智能体管理，以及各个 Agent 的支持范围。"><meta property="og:url" content="https://ohmyangboy.github.io/bobo/posts/features/"><meta property="og:image" content="https://ohmyangboy.github.io/bobo/assets/og/7ca8e9bf7b1f9cf40eff.png"><meta property="og:image:alt" content="功能与支持范围"><meta name="twitter:image" content="https://ohmyangboy.github.io/bobo/assets/og/7ca8e9bf7b1f9cf40eff.png"><meta name="twitter:image:alt" content="功能与支持范围"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630"><meta property="og:image:type" content="image/png"><link rel="canonical" href="https://ohmyangboy.github.io/bobo/posts/features/"><style>
+:root {
+  --primary: #2563EB;
+  --bg: #ffffff;
+  --text: #111827;
+  --subtext: #6b7280;
+  --link: #111827;
+  --link-underline: #374151;
+  --border: #e5e7eb;
+  --code-bg: #f9fafb;
+  --image-radius: 8px;
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --bg: #09090b;
+  --text: #e4e4e7;
+  --subtext: #71717a;
+  --link: #e4e4e7;
+  --link-underline: #d1d5db;
+  --border: #27272a;
+  --code-bg: #18181b;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --bg: #09090b;
+    --text: #e4e4e7;
+    --subtext: #71717a;
+    --link: #e4e4e7;
+    --link-underline: #d1d5db;
+    --border: #27272a;
+    --code-bg: #18181b;
+    color-scheme: dark;
+  }
+}
+/* 只在切换主题的那一瞬间挂上 .theme-transition，避免影响 hover 等既有过渡。 */
+:root.theme-transition *, :root.theme-transition *::before, :root.theme-transition *::after { transition: background-color 0.4s ease-in-out, color 0.4s ease-in-out, border-color 0.4s ease-in-out, fill 0.4s ease-in-out, stroke 0.4s ease-in-out !important; }
+@media (prefers-reduced-motion: reduce) { :root.theme-transition *, :root.theme-transition *::before, :root.theme-transition *::after { transition: none !important; } }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background-color: var(--bg);
+  color: var(--text);
+  line-height: 1.7;
+  letter-spacing: 0.02em;
+  padding: 4rem 2rem;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  -webkit-font-smoothing: antialiased;
+}
+.container { flex: 1; max-width: 60ch; margin: 0 auto; width: 100%; }
+header { margin-bottom: 2.25rem; }
+h1 { font-size: 1.5rem; font-weight: 500; letter-spacing: -0.02em; margin-bottom: 1.25rem; color: var(--text); line-height: 1.3; position: relative; }
+h2 { font-size: 0.875rem; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; margin-top: 2.25rem; margin-bottom: 1rem; color: var(--subtext); }
+h3 { font-size: 1.1rem; font-weight: 500; margin-top: 1.75rem; margin-bottom: 0.75rem; color: var(--text); }
+p { margin-top: 1.25rem; margin-bottom: 1.25rem; color: var(--text); }
+a { color: var(--text); cursor: pointer; text-decoration: underline; text-decoration-color: var(--link-underline); text-underline-offset: 3px; transition: color 0.15s ease, text-decoration-color 0.15s ease; }
+a:hover { color: var(--primary); text-decoration-color: var(--primary); }
+ul, ol { margin-left: 1.25rem; margin-top: 1rem; margin-bottom: 1.25rem; }
+li { margin-bottom: 0.4rem; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 0.875em; padding: 0.2em 0.4em; border-radius: 4px; background-color: var(--code-bg); }
+pre { background-color: var(--code-bg); padding: 1rem; border-radius: 6px; overflow-x: auto; margin-top: 1.25rem; margin-bottom: 1.25rem; border: 1px solid var(--border); }
+pre code { padding: 0; background-color: transparent; }
+blockquote { border-left: 2px solid var(--primary); padding-left: 1rem; color: var(--subtext); font-style: italic; margin-top: 1.25rem; margin-bottom: 1.25rem; }
+.post-list { display: flex; flex-direction: column; gap: 0.6rem; }
+.post-item { display: flex; justify-content: space-between; align-items: baseline; }
+.post-title { font-weight: 500; text-decoration: none; }
+.post-item .post-date { font-size: 0.875rem; color: var(--subtext); font-variant-numeric: tabular-nums; margin-left: 1rem; }
+.post-date { font-size: 0.875rem; color: var(--subtext); font-variant-numeric: tabular-nums; }
+.writing-header { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+footer { margin-top: 4rem; text-align: center; }
+.footer-brand { font-family: Georgia, Cambria, Baskerville, "Times New Roman", serif; font-style: italic; font-size: 0.725rem; letter-spacing: 0.04em; color: var(--text); text-decoration: none; opacity: 0.12; transition: opacity 0.2s ease, color 0.2s ease; }
+.footer-brand:hover { opacity: 0.5; color: var(--primary); }
+.footer-row { display: inline-flex; align-items: center; justify-content: center; gap: 0.55rem; }
+.footer-theme { display: inline-flex; align-items: center; justify-content: center; width: 1.5rem; height: 1.5rem; padding: 0; border: 0; border-radius: 999px; background: none; color: var(--text); opacity: 0.12; cursor: pointer; transition: opacity 0.2s ease, color 0.2s ease; }
+.footer-theme:hover { opacity: 0.5; color: var(--primary); }
+.footer-theme:focus-visible { opacity: 0.6; outline: 2px solid var(--primary); outline-offset: 2px; }
+.footer-theme svg { display: none; width: 0.8rem; height: 0.8rem; }
+.footer-theme .theme-icon-auto { display: block; }
+:root[data-theme="light"] .footer-theme .theme-icon-auto, :root[data-theme="dark"] .footer-theme .theme-icon-auto { display: none; }
+:root[data-theme="light"] .footer-theme .theme-icon-light { display: block; }
+:root[data-theme="dark"] .footer-theme .theme-icon-dark { display: block; }
+.back-icon { position: absolute; left: -2rem; top: 0.41rem; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; color: var(--subtext); text-decoration: none; }
+.back-icon:hover { color: var(--primary); }
+
+/* Markdown Profile additions: syntax support without changing the site shell. */
+.markdown { font-size: 1rem; line-height: 1.5; }
+.markdown > * + * { margin-top: 1.25rem; }
+.markdown > .markdown-blank-line { height: 1.5em; margin-top: 0; }
+.markdown > .markdown-blank-line + * { margin-top: 0; }
+.markdown h1, .markdown h2, .markdown h3, .markdown h4, .markdown h5, .markdown h6 { font-weight: 650; line-height: 1.35; letter-spacing: -0.02em; color: var(--text); text-transform: none; }
+.markdown h1 { font-size: 1.75rem; margin-top: 2.5rem; }
+.markdown h2 { font-size: 1.375rem; margin-top: 2.75rem; }
+.markdown h3 { font-size: 1.125rem; margin-top: 2rem; }
+.markdown h4 { font-size: 1rem; font-weight: 600; }
+.markdown h1:first-child, .markdown h2:first-child, .markdown h3:first-child, .markdown h4:first-child { margin-top: 0; }
+.markdown p { margin: 0; }
+.markdown strong { font-weight: 650; }
+.markdown ul, .markdown ol { margin-top: 0; margin-bottom: 0; padding-left: 0.25rem; }
+.markdown li { margin: 0.25rem 0; }
+.markdown li > p { margin: 0; }
+.markdown li > ul, .markdown li > ol { margin-top: 0.25rem; }
+.markdown a { text-underline-offset: 0.2em; text-decoration-thickness: 1px; }
+.markdown pre { position: relative; margin: 0; font-size: 0.875em; line-height: 1.7; }
+.markdown pre code { display: block; padding: 0; background-color: transparent; font-size: inherit; }
+.markdown blockquote { margin: 0; }
+.markdown blockquote blockquote { border-left-color: var(--border); }
+.markdown table { width: 100%; border-collapse: collapse; border: 1px solid var(--border); font-size: 0.875rem; }
+.markdown th, .markdown td { border: 1px solid var(--border); padding: 0.5rem 0.75rem; text-align: left; vertical-align: top; }
+.markdown th { background-color: var(--code-bg); font-weight: 600; color: var(--text); }
+.markdown tbody tr:nth-child(even) td { background-color: var(--code-bg); }
+.markdown hr { border: 0; border-top: 1px solid var(--border); margin: 2.5rem 0; }
+.markdown :not(pre) > code { white-space: nowrap; }
+.markdown img { display: block; max-width: 100%; height: auto; margin-inline: auto; border: 0; border-radius: var(--image-radius, 8px); cursor: zoom-in; }
+.markdown .paper-iframe { display: block; width: 100%; max-width: 100%; aspect-ratio: 16 / 9; border: 0; margin-inline: auto; }
+.markdown img[data-align="left"], .markdown img.align-left { margin-left: 0; margin-right: auto; }
+.markdown img[data-align="right"], .markdown img.align-right { margin-left: auto; margin-right: 0; }
+.markdown img[data-align="center"], .markdown img.align-center { margin-inline: auto; }
+.markdown .missing-image { display: inline-block; padding: 0.5rem 0.75rem; border: 1px dashed var(--border); border-radius: 6px; color: var(--subtext); background: var(--code-bg); font-size: 0.875rem; }
+.markdown .image-group { display: flex; flex-direction: row; flex-wrap: wrap; justify-content: center; align-items: center; gap: 1rem; width: 120%; max-width: 120%; margin-left: -10%; margin-right: -10%; margin-top: 1.5rem; margin-bottom: 1.5rem; box-sizing: border-box; }
+.markdown .image-group img { display: block; max-width: 100%; height: auto; margin: 0; flex: 0 1 auto; }
+.markdown .image-group img:not([width]) { flex: 1 1 0; min-width: min(200px, 100%); max-width: 100%; }
+.markdown .image-group a { display: inline-flex; justify-content: center; align-items: center; text-decoration: none; }
+.markdown .image-group a img { margin: 0; }
+.markdown .image-group .missing-image { margin: 0; flex: 0 1 auto; }
+.image-lightbox { width: 100vw; max-width: none; height: 100vh; max-height: none; padding: 3rem; border: 0; background: transparent; overflow: hidden; }
+.image-lightbox::backdrop { background: rgba(0, 0, 0, 0.82); backdrop-filter: blur(6px); }
+.image-lightbox img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.image-lightbox-close { position: fixed; top: 1rem; right: 1rem; width: 2.5rem; height: 2.5rem; border: 0; border-radius: 999px; background: rgba(0, 0, 0, 0.62); color: white; font-size: 1.5rem; line-height: 1; cursor: pointer; }
+.task-list-item { list-style: none; margin-left: -1.25rem; }
+.task-list-item input { margin-right: 0.4rem; accent-color: var(--primary); }
+.math-block { overflow-x: auto; overflow-y: hidden; text-align: center; margin: 1.5rem 0; padding: 0.5rem 0; }
+.katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.5rem 0; margin: 1.5rem 0 !important; }
+.math-inline { font-family: inherit; }
+@media (max-width: 640px) { body { padding: 2.5rem 1.5rem; } .post-item { align-items: flex-start; gap: 0.5rem; } .back-icon { left: -1.5rem; } .markdown .image-group { width: 100%; max-width: 100%; margin-left: 0; margin-right: 0; gap: 0.75rem; } }
+@media (min-width: 48rem) { .home-container { margin-top: 4rem; } }
+
+pre { line-height: 125%; }
+td.linenos .normal { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+span.linenos { color: inherit; background-color: transparent; padding-left: 5px; padding-right: 5px; }
+td.linenos .special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 5px; padding-right: 5px; }
+.syntax-highlight .hll { background-color: #ffffcc }
+.syntax-highlight { background: #f8f8f8; }
+.syntax-highlight .c { color: #3D7B7B; font-style: italic } /* Comment */
+.syntax-highlight .err { border: 1px solid #F00 } /* Error */
+.syntax-highlight .k { color: #008000; font-weight: bold } /* Keyword */
+.syntax-highlight .o { color: #666 } /* Operator */
+.syntax-highlight .ch { color: #3D7B7B; font-style: italic } /* Comment.Hashbang */
+.syntax-highlight .cm { color: #3D7B7B; font-style: italic } /* Comment.Multiline */
+.syntax-highlight .cp { color: #9C6500 } /* Comment.Preproc */
+.syntax-highlight .cpf { color: #3D7B7B; font-style: italic } /* Comment.PreprocFile */
+.syntax-highlight .c1 { color: #3D7B7B; font-style: italic } /* Comment.Single */
+.syntax-highlight .cs { color: #3D7B7B; font-style: italic } /* Comment.Special */
+.syntax-highlight .gd { color: #A00000 } /* Generic.Deleted */
+.syntax-highlight .ge { font-style: italic } /* Generic.Emph */
+.syntax-highlight .ges { font-weight: bold; font-style: italic } /* Generic.EmphStrong */
+.syntax-highlight .gr { color: #E40000 } /* Generic.Error */
+.syntax-highlight .gh { color: #000080; font-weight: bold } /* Generic.Heading */
+.syntax-highlight .gi { color: #008400 } /* Generic.Inserted */
+.syntax-highlight .go { color: #717171 } /* Generic.Output */
+.syntax-highlight .gp { color: #000080; font-weight: bold } /* Generic.Prompt */
+.syntax-highlight .gs { font-weight: bold } /* Generic.Strong */
+.syntax-highlight .gu { color: #800080; font-weight: bold } /* Generic.Subheading */
+.syntax-highlight .gt { color: #04D } /* Generic.Traceback */
+.syntax-highlight .kc { color: #008000; font-weight: bold } /* Keyword.Constant */
+.syntax-highlight .kd { color: #008000; font-weight: bold } /* Keyword.Declaration */
+.syntax-highlight .kn { color: #008000; font-weight: bold } /* Keyword.Namespace */
+.syntax-highlight .kp { color: #008000 } /* Keyword.Pseudo */
+.syntax-highlight .kr { color: #008000; font-weight: bold } /* Keyword.Reserved */
+.syntax-highlight .kt { color: #B00040 } /* Keyword.Type */
+.syntax-highlight .m { color: #666 } /* Literal.Number */
+.syntax-highlight .s { color: #BA2121 } /* Literal.String */
+.syntax-highlight .na { color: #687822 } /* Name.Attribute */
+.syntax-highlight .nb { color: #008000 } /* Name.Builtin */
+.syntax-highlight .nc { color: #00F; font-weight: bold } /* Name.Class */
+.syntax-highlight .no { color: #800 } /* Name.Constant */
+.syntax-highlight .nd { color: #A2F } /* Name.Decorator */
+.syntax-highlight .ni { color: #717171; font-weight: bold } /* Name.Entity */
+.syntax-highlight .ne { color: #CB3F38; font-weight: bold } /* Name.Exception */
+.syntax-highlight .nf { color: #00F } /* Name.Function */
+.syntax-highlight .nl { color: #767600 } /* Name.Label */
+.syntax-highlight .nn { color: #00F; font-weight: bold } /* Name.Namespace */
+.syntax-highlight .nt { color: #008000; font-weight: bold } /* Name.Tag */
+.syntax-highlight .nv { color: #19177C } /* Name.Variable */
+.syntax-highlight .ow { color: #A2F; font-weight: bold } /* Operator.Word */
+.syntax-highlight .w { color: #BBB } /* Text.Whitespace */
+.syntax-highlight .mb { color: #666 } /* Literal.Number.Bin */
+.syntax-highlight .mf { color: #666 } /* Literal.Number.Float */
+.syntax-highlight .mh { color: #666 } /* Literal.Number.Hex */
+.syntax-highlight .mi { color: #666 } /* Literal.Number.Integer */
+.syntax-highlight .mo { color: #666 } /* Literal.Number.Oct */
+.syntax-highlight .sa { color: #BA2121 } /* Literal.String.Affix */
+.syntax-highlight .sb { color: #BA2121 } /* Literal.String.Backtick */
+.syntax-highlight .sc { color: #BA2121 } /* Literal.String.Char */
+.syntax-highlight .dl { color: #BA2121 } /* Literal.String.Delimiter */
+.syntax-highlight .sd { color: #BA2121; font-style: italic } /* Literal.String.Doc */
+.syntax-highlight .s2 { color: #BA2121 } /* Literal.String.Double */
+.syntax-highlight .se { color: #AA5D1F; font-weight: bold } /* Literal.String.Escape */
+.syntax-highlight .sh { color: #BA2121 } /* Literal.String.Heredoc */
+.syntax-highlight .si { color: #A45A77; font-weight: bold } /* Literal.String.Interpol */
+.syntax-highlight .sx { color: #008000 } /* Literal.String.Other */
+.syntax-highlight .sr { color: #A45A77 } /* Literal.String.Regex */
+.syntax-highlight .s1 { color: #BA2121 } /* Literal.String.Single */
+.syntax-highlight .ss { color: #19177C } /* Literal.String.Symbol */
+.syntax-highlight .bp { color: #008000 } /* Name.Builtin.Pseudo */
+.syntax-highlight .fm { color: #00F } /* Name.Function.Magic */
+.syntax-highlight .vc { color: #19177C } /* Name.Variable.Class */
+.syntax-highlight .vg { color: #19177C } /* Name.Variable.Global */
+.syntax-highlight .vi { color: #19177C } /* Name.Variable.Instance */
+.syntax-highlight .vm { color: #19177C } /* Name.Variable.Magic */
+.syntax-highlight .il { color: #666 } /* Literal.Number.Integer.Long */
+.syntax-highlight { background: transparent !important; }
+.paper-video { position: relative; display: block; width: 130%; max-width: calc(100vw - 3rem); aspect-ratio: var(--video-ratio, 16 / 9); margin-left: 50%; transform: translateX(-50%); overflow: hidden; isolation: isolate; border: 0; outline: 0; box-shadow: none; border-radius: var(--video-radius, 0px); background: var(--code-bg, #eee); color: #fff; }
+.paper-video[data-align="left"] { margin-left: 0; transform: none; }
+.paper-video[data-align="right"] { margin-left: 100%; transform: translateX(-100%); }
+.paper-video video, .paper-video iframe { display: block; width: 100%; height: 100%; object-fit: contain; border: 0; }
+.paper-video iframe { position: absolute; top: -1px; left: -1px; width: calc(100% + 2px); height: calc(100% + 2px); }
+.paper-video .video-start, .paper-video .video-controls, .paper-video .video-status, .paper-video .video-fallback { display: none; }
+.paper-video button { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #fff; cursor: pointer; }
+.paper-video button:hover { background: rgba(255,255,255,.16); }
+.paper-video button:focus-visible, .paper-video input:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+.paper-video .video-icon { width: 20px; height: 20px; }
+.paper-video .video-icon-pause, .paper-video .video-icon-sound { display: none; }
+.paper-video[data-playing="true"] .video-toggle .video-icon-play, .paper-video[data-muted="false"] .video-icon-muted { display: none; }
+.paper-video[data-playing="true"] .video-toggle .video-icon-pause, .paper-video[data-muted="false"] .video-icon-sound { display: block; }
+.paper-video[data-enhanced] .video-controls { display: flex; position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); align-items: center; gap: 8px; width: calc(100% - 32px); max-width: 460px; padding: 6px 10px; border: 1px solid rgba(255,255,255,.16); border-radius: 999px; background: rgba(25,25,28,.78); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); box-shadow: 0 4px 24px rgba(0,0,0,.16); opacity: 0; pointer-events: none; transition: opacity .2s; }
+.paper-video[data-enhanced] .video-start { display: inline-flex; position: absolute; inset: 0; margin: auto; width: 64px; height: 64px; background: rgba(25,25,28,.65); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,.2); opacity: 0; pointer-events: none; transition: opacity .2s; }
+.paper-video .video-start .video-icon { width: 28px; height: 28px; }
+.paper-video[data-playing="true"] .video-start { display: none; }
+@media (hover: hover) { .paper-video:hover .video-controls, .paper-video:hover .video-start { opacity: 1; pointer-events: auto; } }
+.paper-video:has(:focus-visible) .video-controls, .paper-video:focus-visible .video-controls, .paper-video:has(:focus-visible) .video-start, .paper-video:focus-visible .video-start { opacity: 1; pointer-events: auto; }
+@media (hover: none) { .paper-video[data-recent] .video-controls, .paper-video:not([data-playing="true"]) .video-start { opacity: 1; pointer-events: auto; } }
+.paper-video .video-time { flex-shrink: 0; font-size: 11px; font-variant-numeric: tabular-nums; color: #f4f4f5; }
+.paper-video .video-seek { flex: 1; min-width: 24px; width: 100%; height: 24px; margin: 0; accent-color: #fff; cursor: pointer; }
+.paper-video[data-error] .video-status, .paper-video[data-loading] .video-status { display: block; position: absolute; top: 35%; left: 12px; right: 12px; padding: 8px 12px; border-radius: 8px; background: rgba(25,25,28,.9); color: #fff; text-align: center; font-size: .875rem; }
+.paper-video[data-error] .video-start, .paper-video[data-error] .video-controls { display: none; }
+.paper-video[data-error] .video-fallback { display: block; position: absolute; top: 55%; left: 50%; transform: translateX(-50%); width: max-content; max-width: calc(100% - 24px); padding: 8px 12px; border-radius: 8px; background: rgba(25,25,28,.9); text-align: center; color: #fff; font-size: .875rem; }
+.missing-video { display: inline-block; padding: .5rem .75rem; border: 1px dashed var(--border); border-radius: 6px; color: var(--subtext); background: var(--code-bg); }
+.paper-video:fullscreen { width: 100%; max-width: none; height: 100%; margin: 0; transform: none; border-radius: 0; aspect-ratio: auto; background: #111; }
+body.paper-video-expanded { overflow: hidden; }
+.paper-video[data-expanded] { position: fixed; inset: 0; z-index: 1000; width: 100vw !important; max-width: none; height: 100dvh; margin: 0; transform: none; border-radius: 0; aspect-ratio: auto; background: #111; }
+@media (max-width: 640px) { .paper-video { width: 100%; max-width: 100%; } }
+@media (max-width: 480px) { .paper-video[data-enhanced] .video-controls { bottom: 8px; gap: 4px; width: calc(100% - 16px); padding: 4px 6px; } .paper-video button { width: 32px; height: 32px; } .paper-video .video-time { font-size: 10px; } .paper-video[data-enhanced] .video-start { width: 48px; height: 48px; } }
+@media (prefers-reduced-motion: reduce) { .paper-video .video-controls { transition: none; } }
+
+.footer-language { position: relative; text-align: start; }
+.footer-language-toggle { display: flex; align-items: center; justify-content: center; width: 1.5rem; height: 1.5rem; border-radius: 999px; color: var(--text); opacity: 0.45; cursor: pointer; list-style: none; transition: opacity 0.2s ease, color 0.2s ease; }
+.footer-language-toggle::-webkit-details-marker { display: none; }
+.footer-language-toggle svg { width: 0.9rem; height: 0.9rem; }
+.footer-language-toggle:hover, .footer-language[open] .footer-language-toggle { opacity: 0.8; color: var(--primary); }
+.footer-language-toggle:focus-visible { opacity: 0.8; outline: 2px solid var(--primary); outline-offset: 2px; }
+.footer-language-menu { position: absolute; bottom: calc(100% + 0.65rem); right: 0; z-index: 10; min-width: 10rem; max-width: min(18rem, calc(100vw - 4rem)); max-height: min(22rem, 60vh); overflow-y: auto; padding: 0.35rem; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); box-shadow: 0 4px 18px #0001; }
+.footer-language-menu a { display: block; padding: 0.5rem 0.65rem; border-radius: 4px; font-size: 0.8rem; text-decoration: none; white-space: nowrap; }
+.footer-language-menu a:hover, .footer-language-menu a:focus-visible { background: var(--code-bg); color: var(--primary); }
+.footer-language-menu a[aria-current="page"] { color: var(--primary); background: var(--code-bg); }
+</style></head><body><div class="container"><main><article><h1><a href="/bobo/" class="back-icon" title="返回首页" aria-label="返回首页"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg></a>功能与支持范围</h1><p class="post-date">2026-10-10</p><div class="markdown"><h2>通知岛</h2>
+<div class="markdown-blank-line" aria-hidden="true"></div>
+<p>将多个 Agent 的会话合并到一处，显示运行中、等你回答、已结束与已终止。悬停展开，点击会话跳转；已结束并查看过的会话会收起。</p>
+<div class="markdown-blank-line" aria-hidden="true"></div>
+<p>支持的来源是 OpenCode、Codex、Claude Code、omp、DeepSeek Harness 与 Antigravity。状态来自各工具提供的本机事件或记录，识别能力有所不同：dsh 的审批与 <code>ask_user</code>、Antigravity 的审批等待目前没有可用信号，会继续显示运行中。</p>
+<div class="markdown-blank-line" aria-hidden="true"></div>
+<p>Codex 会话优先尝试对应的桌面线程入口；dsh 网页服务运行时优先回到已有浏览器标签页，其余按终端标题与目录匹配。能否成功跳转取决于工具、终端和窗口是否仍然存在。</p>
+<div class="markdown-blank-line" aria-hidden="true"></div>
+<h2>支持的 Agent</h2>
+<div class="markdown-blank-line" aria-hidden="true"></div>
+<table>
+<thead>
+<tr>
+<th>Agent</th>
+<th>会话通知</th>
+<th>额度</th>
+<th>自定义智能体</th>
+<th>全局配置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>OpenCode</td>
+<td>支持</td>
+<td>OpenCode Go</td>
+<td>支持</td>
+<td>支持</td>
+</tr>
+<tr>
+<td>Codex</td>
+<td>支持</td>
+<td>支持</td>
+<td>支持</td>
+<td>支持</td>
+</tr>
+<tr>
+<td>Claude Code</td>
+<td>支持</td>
+<td>支持</td>
+<td>—</td>
+<td>支持</td>
+</tr>
+<tr>
+<td>omp（Oh My Pi）</td>
+<td>支持</td>
+<td>—</td>
+<td>—</td>
+<td>支持</td>
+</tr>
+<tr>
+<td>DeepSeek Harness（dsh）</td>
+<td>支持</td>
+<td>—</td>
+<td>—</td>
+<td>支持</td>
+</tr>
+<tr>
+<td>Antigravity（agy）</td>
+<td>支持</td>
+<td>支持</td>
+<td>—</td>
+<td>支持</td>
+</tr>
+</tbody>
+</table>
+<div class="markdown-blank-line" aria-hidden="true"></div>
+<h2>额度与设备</h2>
+<div class="markdown-blank-line" aria-hidden="true"></div>
+<p>额度视图按来源展示用量窗口与重置时间；刘海上可以显示多家的额度圆环。</p>
+<div class="markdown-blank-line" aria-hidden="true"></div>
+<p>设备视图提供 CPU、内存、磁盘、Top 进程、网络延迟及下载 / 上传速率。服务线路展示 Codex、Claude Code、OpenCode Go、DeepSeek 与 Antigravity 的延迟、出口 IP 类型及风控值。</p>
+<div class="markdown-blank-line" aria-hidden="true"></div>
+<p>本机网速统计读取网卡计数器；服务线路检测会请求第三方 IP 信息服务，两者用途不同。</p>
+<div class="markdown-blank-line" aria-hidden="true"></div>
+<h2>技能与智能体</h2>
+<div class="markdown-blank-line" aria-hidden="true"></div>
+<p>技能直接使用 Agent Skills 生态的目录约定：技能真身位于 <code>~/.agents/skills</code>，其它 Agent 通过符号链接使用它。bobo 可以读取本机技能、编辑文件、从 Git 仓库安装 / 更新，并查看每个 Agent 的链接状态。</p>
+<div class="markdown-blank-line" aria-hidden="true"></div>
+<p>「我的 Skill」可以接入任意本地技能目录、启停单个技能，并使用本机 Git / GitHub 工具同步。移除目录配置会保留源文件；删除技能会删除技能文件，请留意操作提示。</p>
+<div class="markdown-blank-line" aria-hidden="true"></div>
+<p>Agents 视图管理 OpenCode 的 Markdown 智能体、Codex 的 TOML 智能体，以及已接入 harness 的白名单配置文件。编辑带版本校验，写入前的备份共用最近 3 份的保留额度。</p>
+<div class="markdown-blank-line" aria-hidden="true"></div>
+<h2>AI 阅读</h2>
+<div class="markdown-blank-line" aria-hidden="true"></div>
+<p>使用你配置的 OpenAI 兼容接口，生成能力总结或按段落翻译技能、智能体与配置。使用这些操作时，相关内容会发送到所配置的接口。</p>
+<div class="markdown-blank-line" aria-hidden="true"></div>
+<h2>项目与许可</h2>
+<div class="markdown-blank-line" aria-hidden="true"></div>
+<p>bobo 是一个持续迭代的个人工具，兼容范围主要覆盖作者实际使用的工具。欢迎 fork、Issue 与 PR。</p>
+<div class="markdown-blank-line" aria-hidden="true"></div>
+<p>项目以 <a href="https://github.com/ohmyangboy/bobo/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT 许可</a>开放。通知岛、额度、系统状态与技能管理分别参考了 <a href="https://github.com/wxtsky/CodeIsland" target="_blank" rel="noopener noreferrer">CodeIsland</a>、<a href="https://github.com/steipete/CodexBar" target="_blank" rel="noopener noreferrer">CodexBar</a>、<a href="https://github.com/exelban/stats" target="_blank" rel="noopener noreferrer">stats</a> 和 <a href="https://github.com/vercel-labs/skills" target="_blank" rel="noopener noreferrer">skills</a>。</p>
+<div class="markdown-blank-line" aria-hidden="true"></div>
+<p><a href="https://github.com/ohmyangboy/bobo/blob/main/docs/features.md" target="_blank" rel="noopener noreferrer">完整文档</a> · <a href="https://github.com/ohmyangboy/bobo/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer">贡献指南</a> · <a href="https://github.com/ohmyangboy/bobo/blob/main/THIRD_PARTY_NOTICES.md" target="_blank" rel="noopener noreferrer">第三方资源与致谢</a></p>
+</div></article></main></div><footer><span class="footer-row"><a href="https://ohmyangboy.github.io/paper-blog/" target="_blank" rel="noopener noreferrer" class="footer-brand">Paper Blog</a><details class="footer-language"><summary class="footer-language-toggle" title="切换语言 / Language" aria-label="切换语言 / Language"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a18 18 0 0 1 0 18 18 18 0 0 1 0-18Z"/></svg></summary><nav class="footer-language-menu" aria-label="切换语言 / Language"><a href="/bobo/?lang=default" data-paper-language="default" lang="zh-CN" hreflang="zh-CN">简体中文 · 默认首页</a><a href="/bobo/en/" data-paper-language="en" lang="en" hreflang="en">English</a></nav></details><button type="button" class="footer-theme" aria-label="跟随系统主题" title="跟随系统主题" data-label-light="浅色主题" data-label-dark="深色主题" data-label-auto="跟随系统主题"><svg class="theme-icon theme-icon-light" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="M4.9 4.9l1.4 1.4"/><path d="M17.7 17.7l1.4 1.4"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="M4.9 19.1l1.4-1.4"/><path d="M17.7 6.3l1.4-1.4"/></svg><svg class="theme-icon theme-icon-dark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 14.8A8.5 8.5 0 1 1 9.2 3.5a7 7 0 0 0 11.3 11.3z"/></svg><svg class="theme-icon theme-icon-auto" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="19" height="13" rx="2.5"/><path d="M8.5 20.5h7"/></svg></button></span></footer><dialog class="image-lightbox" aria-label="图片大图预览"><button class="image-lightbox-close" type="button" aria-label="关闭大图">×</button><img alt=""></dialog><script>(()=>{const d=document.querySelector('.image-lightbox');const v=d.querySelector('img');document.addEventListener('click',e=>{const i=e.target.closest?.('.markdown img');if(!i||i.closest('a'))return;const s=i.currentSrc||i.src;if(typeof d.showModal!=='function'){window.open(s,'_blank','noopener');return}v.src=s;v.alt=i.alt||'';d.showModal()});d.querySelector('.image-lightbox-close').addEventListener('click',()=>d.close());d.addEventListener('click',e=>{if(e.target===d)d.close()});d.addEventListener('close',()=>{v.removeAttribute('src')})})();</script><script>(()=>{const b=document.querySelector('.footer-theme');if(!b)return;const root=document.documentElement;const order=['light','dark','auto'];let current='auto',timer=0;try{const stored=localStorage.getItem('paper-theme');if(stored==='light'||stored==='dark')current=stored}catch(_e){}const apply=()=>{if(current==='auto'){root.removeAttribute('data-theme')}else{root.dataset.theme=current}const label=b.dataset['label'+current[0].toUpperCase()+current.slice(1)]||b.dataset.labelAuto;b.setAttribute('aria-label',label);b.setAttribute('title',label)};const paint=()=>{if(matchMedia('(prefers-reduced-motion: reduce)').matches){apply();return}clearTimeout(timer);root.classList.add('theme-transition');apply();timer=setTimeout(()=>root.classList.remove('theme-transition'),420)};b.addEventListener('click',()=>{current=order[(order.indexOf(current)+1)%order.length];try{localStorage.setItem('paper-theme',current)}catch(_e){}paint()});const media=matchMedia('(prefers-color-scheme: dark)');if(media.addEventListener)media.addEventListener('change',()=>{if(current==='auto')paint()});apply()})();</script><script>(() => {
+  const menu = document.querySelector('.footer-language');
+  const settings = window.paperLanguageSettings;
+  if (!menu || !settings) return;
+  menu.querySelectorAll('[data-paper-language]').forEach(link => {
+    link.addEventListener('click', () => {
+      try { localStorage.setItem(settings.key, link.dataset.paperLanguage); } catch (_error) {}
+      menu.open = false;
+    });
+  });
+  document.addEventListener('click', event => { if (!menu.contains(event.target)) menu.open = false; });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && menu.open) {
+      menu.open = false;
+      menu.querySelector('summary').focus();
+    }
+  });
+})();</script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script><script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" crossorigin="anonymous" onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false},{left:'\\[',right:'\\]',display:true}],throwOnError:false});"></script></body></html>
