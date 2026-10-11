@@ -94,6 +94,15 @@ test('标签页匹配：titleOnly 只认标题',()=>{
  assert.equal(matchTab([{id:'t3',title:'proj — zsh',cwd:'/tmp/proj'}],{title:'',directory:'/tmp/proj',name:'proj',source:'codex'},{titleOnly:true}),null);
 });
 // 「看过了」只认严格命中：目录精确相等或标题里真的带会话标题，避免同名目录误判。
+test('管家原会话跳转：完整标题唯一匹配，不按目录或标题片段猜测',()=>{
+ const original={id:'original',title:'⠇ 实现管家 | bobo',cwd:'/tmp/bobo'},other={id:'other',title:'⠇ 实现管家头像 | bobo',cwd:'/tmp/bobo'},opts={title:'实现管家',directory:'/tmp/bobo',source:'codex'};
+ assert.equal(matchTab([other,original],opts,{sessionOnly:true})?.id,'original');
+ assert.equal(matchTab([other],opts,{sessionOnly:true}),null);
+ assert.equal(matchTab([original,{...original,id:'duplicate'}],opts,{sessionOnly:true}),null);
+ assert.equal(matchTab([{...original,cwd:'/tmp/other'}],opts,{sessionOnly:true}),null);
+ assert.equal(matchTab([original],{...opts,title:''},{sessionOnly:true}),null);
+ assert.equal(matchTab([{id:'claude',title:'✳ 修复导出'}],{title:'修复导出',source:'claude'},{sessionOnly:true})?.id,'claude');
+});
 test('看过终端：strict 匹配',()=>{
  const sessions=[{id:'s1',title:'任务一',directory:'/tmp/a'},{id:'s2',title:'任务二',directory:'/tmp/b'}];
  assert.deepEqual(viewedIds(sessions,[{title:'OC | 任务二',cwd:'/tmp/b'}]),['s2']);

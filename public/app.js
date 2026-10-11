@@ -335,7 +335,42 @@ async function loadAISettings(){
  $('#aiClearKey').disabled=!c.hasSavedKey;
  $('#aiKeyStatus').textContent=(c.keyAvailable?'可用：':'未就绪：')+c.source;
  updateKeyField();
+ await loadAIUsage();
 }
+async function loadAIUsage(){
+ const data=await api('ai/usage'),number=v=>Number(v||0).toLocaleString('zh-CN');
+ const money=v=>v>0&&v<0.0001?'< ¥0.0001':'¥'+Number(v||0).toLocaleString('zh-CN',{minimumFractionDigits:4,maximumFractionDigits:4});
+ const cost=value=>!value.requests?'¥0.0000':!value.pricedRequests?'—':Math.abs(value.costCnyMax-value.costCnyMin)<1e-10?money(value.costCnyMin):money(value.costCnyMin)+'–'+money(value.costCnyMax);
+ const note=(cell,text)=>{const small=document.createElement('small');small.textContent=text;cell.append(small);};
+ const row=(label,value)=>{
+  const tr=document.createElement('tr'),th=document.createElement('th');th.scope='row';th.textContent=label;tr.append(th);
+  for(const key of ['input','output','total']){
+   const td=document.createElement('td');td.textContent=value.unmeasured&&!value.measured?'—':number(value[key]);
+   if(key==='input'){
+    note(td,value.cacheRate===null?'缓存命中 —':'缓存命中 '+number(value.cachedInput));
+    note(td,'累计命中率 '+(value.cacheRate===null?'—':(value.cachePartial?'≥':'')+(value.cacheRate*100).toFixed(1)+'%'));
+   }
+   tr.append(td);
+  }
+  const td=document.createElement('td');td.textContent=cost(value);if(value.unpricedRequests)note(td,value.unpricedRequests+' 次未估算');tr.append(td);return tr;
+ };
+ $('#aiUsageRows').replaceChildren(...data.features.filter(f=>['butler','skill:summary','skill:translate'].includes(f.id)||f.requests).map(f=>{
+  const tr=row(f.label,f),note=document.createElement('small');note.textContent=f.requests?f.measured+' 次已计量'+(f.unmeasured?' · '+f.unmeasured+' 次未提供用量':''):'尚无请求';tr.firstChild.append(note);return tr;
+ }));
+ $('#aiUsageTotals').replaceChildren(row('今日合计',data.today),row('累计合计',data.total));
+ const latest=data.features.filter(f=>f.requests).map(f=>{
+  const p=document.createElement('p');p.className='hint';const value=f.lastRequest;
+  if(!value){p.textContent=f.label+'最近一次：旧记录无单次明细，下次调用后更新。';return p;}
+  const fee=value.costCnyMin===null?'—':Math.abs(value.costCnyMax-value.costCnyMin)<1e-10?money(value.costCnyMin):money(value.costCnyMin)+'–'+money(value.costCnyMax);
+  p.textContent=f.label+'最近一次：输入 '+(value.input===null?'—':number(value.input))+'，输出 '+(value.output===null?'—':number(value.output))+'；缓存命中 '+(value.cachedInput===null?'—':number(value.cachedInput))+'（'+(value.cacheRate===null?'—':(value.cacheRate*100).toFixed(1)+'%')+'）；估算 '+fee+'。';return p;
+ });
+ $('#aiUsageLatest').replaceChildren(...latest);
+ $('#aiUsageNote').textContent='自 '+new Date(data.since).toLocaleDateString('zh-CN')+' 起，统计通过 bobo 发出的实际用量；命中本地缓存不增加用量。';
+ const explanation=(data.error?data.error+'。':'')+(data.total.unmeasured?'另有 '+data.total.unmeasured+' 次请求未提供用量，未计入 token 合计。':'用量依据接口返回的 usage。')+' 命中率按已计量输入统计，缓存信息不完整时显示下限。输出含思考 '+number(data.total.reasoning)+' tokens。费用仅估算已识别的 DeepSeek 请求；旧记录与其他接口未计入。';
+ const source=document.createElement('a');source.href=data.pricing.source;source.target='_blank';source.rel='noopener noreferrer';source.textContent='DeepSeek 官方价格';
+ $('#aiUsageDetail').replaceChildren(document.createTextNode(explanation+' 按 '+data.pricing.updatedAt+' 的 '),source,document.createTextNode(' 计算；高峰或缓存信息不明时显示区间，实际扣费以平台账单为准。'));
+}
+$('#aiUsageRefresh').onclick=guard(loadAIUsage);
 $('#aiKeySource').onchange=updateKeyField;
 async function saveAISettings(clearKey=false){
  const c=await api('ai/settings',{baseUrl:$('#aiBaseUrl').value,model:$('#aiModel').value,keySource:$('#aiKeySource').value,apiKey:$('#aiKey').value,clearKey});
@@ -351,6 +386,7 @@ function showSettingsPane(name){
  for(const p of document.querySelectorAll('#settingsWorkspace [data-pane]'))p.hidden=p.dataset.pane!==next;
  for(const b of document.querySelectorAll('#settingsWorkspace [data-settings-pane]'))b.setAttribute('aria-pressed',String(b.dataset.settingsPane===next));
  $('#settingsActions').hidden=next!=='ai';
+ if(next==='ai')loadAIUsage().catch(e=>$('#aiUsageDetail').textContent=e.message);
 }
 for(const b of document.querySelectorAll('#settingsWorkspace [data-settings-pane]'))b.onclick=()=>showSettingsPane(b.dataset.settingsPane);
 
@@ -1112,6 +1148,94 @@ $('#agentForm').onsubmit=guard(async e=>{
 
 // 通知岛：打开视图时订阅状态流，离开时断开；设置项写回 ~/.bobo/opencode.json。首页默认就在这个视图。
 let islandView='island',islandStream=null,islandReady=false,islandWatch=null,islandClock=null,islandController=null,islandReader=null,islandRun=0,islandRenderKey='',islandState={sessions:[],settings:{},connected:false};
+let butlerData=null,butlerLoading=null,butlerProjectsKey='';
+let butlerReplyTo=null,butlerChosenTarget=null,butlerReplyRequest=null,butlerSending=false,butlerUnknown=false,butlerUnread=0;
+let butlerVisibleCount=20,butlerKnownIds=new Set();
+const butlerMessageNodes=new Map();
+const butlerLabels={codex:'Codex',claude:'Claude Code',opencode:'OpenCode',omp:'omp',dsh:'DeepSeek',agy:'Antigravity'};
+const butlerNode=(tag,cls,text)=>{const el=document.createElement(tag);el.className=cls;if(text!==undefined)el.textContent=text;return el;};
+function setButlerQuote(message,quote){
+ butlerReplyTo=message?{id:message.id,text:quote||message.text,name:message.name,source:message.source}:null;
+ butlerChosenTarget=null;butlerReplyRequest=null;butlerUnknown=false;$('#butlerRetry').hidden=true;$('#butlerCopyOpen').hidden=true;$('#butlerTargets').hidden=true;
+ $('#butlerQuote').hidden=!message;
+ if(message){$('#butlerQuoteTarget').textContent=message.name+' · '+(butlerLabels[message.source]||message.source);$('#butlerQuoteText').textContent=butlerReplyTo.text;}
+ $('#butlerSendStatus').textContent=message?'将发回这条消息对应的原会话。':'直接发送会先判断目标会话。';
+ $('#butlerSend').disabled=butlerSending||!butlerData?.enabled;
+}
+window.__boboReplyToMessage=async(id,quote)=>{
+ try{await loadButler();const message=butlerData.messages?.find(m=>m.id===id&&m.role==='butler');if(!message)throw Error('这条消息已过期，请重新选择');setButlerQuote(message,quote);$('#butlerReplyText').focus();}catch(e){toast(e.message);}
+};
+async function focusButlerMessage(id){const result=await api('butler/focus',{id});if(!result.ok)toast(result.reason||'请打开原 Agent 会话');}
+function butlerMessageRow(){
+ const row=butlerNode('article','butler-message'),avatar=butlerNode('button','butler-avatar'),image=butlerNode('img',''),body=butlerNode('div','butler-bubble'),heading=butlerNode('div','butler-message-heading'),badge=butlerNode('span','butler-project-badge'),time=butlerNode('time',''),original=butlerNode('blockquote','butler-original-request'),quoted=butlerNode('blockquote','butler-inline-quote'),brief=butlerNode('p','butler-brief'),meta=butlerNode('p','butler-meta');
+ avatar.type='button';image.src='/bobo-avatar.png';image.alt='bobo';avatar.append(image);heading.append(badge,time);body.append(heading,original,quoted,brief,meta);row.append(avatar,body);
+ avatar.onclick=guard(()=>focusButlerMessage(row.__message.id));
+ const quote=()=>{const m=row.__message;if(m.role!=='butler')return;const selection=window.getSelection(),selected=selection&&!selection.isCollapsed&&[brief,original].some(node=>node.contains(selection.anchorNode)&&node.contains(selection.focusNode))?selection.toString().trim():'';setButlerQuote(m,selected||m.text);$('#butlerReplyText').focus();};
+ body.onclick=quote;body.onkeydown=e=>{if((e.key==='Enter'||e.key===' ')&&row.__message.role==='butler'){e.preventDefault();quote();}};
+ return {row,avatar,image,body,badge,time,original,quoted,brief,meta};
+}
+function renderButler(data){
+ butlerData=data;$('#butlerEnabled').checked=data.enabled;$('#butlerRefresh').disabled=!data.enabled||data.status==='checking';
+ $('#butlerStatus').textContent=data.message;$('#butlerBudget').textContent=data.budget.count+' 项 · 不限额';
+ $('#butlerCount').textContent=(data.messages?.length||0)+' 条消息 · '+data.projects.length+' 个项目';
+ $('#butlerSourceNote').textContent=Object.entries(data.sourceErrors||{}).map(([key,value])=>(butlerLabels[key]||key)+'：'+value).join('；');
+ $('#butlerSourceNote').hidden=!$('#butlerSourceNote').textContent;
+ $('#butlerSend').disabled=!data.enabled||butlerSending||butlerUnknown;$('#butlerReplyText').disabled=!data.enabled;
+ const messages=data.messages||[],feed=$('#butlerProjects'),atBottom=feed.scrollHeight-feed.scrollTop-feed.clientHeight<48;
+ const butlerKnownIdsBefore=butlerKnownIds,added=messages.filter(m=>!butlerKnownIdsBefore.has(m.id)).length;
+ if(!atBottom&&butlerKnownIds.size)butlerVisibleCount=Math.min(80,butlerVisibleCount+added);
+ const key=JSON.stringify([messages,butlerVisibleCount]);if(key===butlerProjectsKey)return;butlerProjectsKey=key;
+ butlerKnownIds=new Set(messages.map(m=>m.id));const visible=messages.slice(-butlerVisibleCount),visibleIds=new Set(visible.map(m=>m.id));
+ const cards=visible.map(m=>{
+  let e=butlerMessageNodes.get(m.id);if(!e){e=butlerMessageRow();butlerMessageNodes.set(m.id,e);}
+  e.row.__message=m;e.row.dataset.role=m.role;e.row.dataset.delivery=m.delivery||'';e.row.dataset.messageId=m.id;
+  e.badge.textContent=m.name;e.time.dateTime=new Date(m.at).toISOString();e.time.textContent=new Date(m.at).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});
+  e.original.hidden=m.role!=='butler'||!m.request;if(e.original.textContent!==(m.request||''))e.original.textContent=m.request||'';e.original.setAttribute('aria-label','原对话中的用户指令');
+  if(e.brief.textContent!==m.text)e.brief.textContent=m.text;e.quoted.hidden=!m.quote;if(e.quoted.textContent!==(m.quote||''))e.quoted.textContent=m.quote||'';
+  e.meta.textContent=m.role==='user'?({sending:'正在发送',sent:'已发送到原会话',failed:(m.retryable?'未送达：':'送达待确认：')+(m.deliveryError||'请打开原会话确认')}[m.delivery]||'送达状态待确认'):(butlerLabels[m.source]||m.source||'')+(m.summaryAt?' · 点击引用回复':' · 本机摘录 · 点击引用回复');
+  e.avatar.hidden=m.role==='user';e.avatar.title='打开 '+m.name+' 的原对话';e.avatar.setAttribute('aria-label',e.avatar.title);
+  e.body.tabIndex=m.role==='butler'?0:-1;if(m.role==='butler'){e.body.setAttribute('role','button');e.body.setAttribute('aria-label','引用 '+m.name+' 的消息：'+m.text);}else{e.body.removeAttribute('role');e.body.removeAttribute('aria-label');}
+  return e.row;
+ });
+ for(const id of butlerMessageNodes.keys())if(!visibleIds.has(id))butlerMessageNodes.delete(id);
+ const earlier=messages.length-visible.length;
+ if(earlier){const more=button('查看更早的消息（'+earlier+' 条）','butler-earlier',()=>{const before=feed.scrollHeight,top=feed.scrollTop;butlerVisibleCount=Math.min(80,butlerVisibleCount+20);renderButler(butlerData);feed.scrollTop=feed.scrollHeight-before+top;});cards.unshift(more);}
+ feed.replaceChildren(...(cards.length?cards:[butlerNode('p','butler-empty',data.enabled?'有新的进展时，bobo 会发来消息。':'开启管家后，bobo 会把新的进展发到这里。')]));
+ if(atBottom||(messages.at(-1)?.role==='user'&&!butlerKnownIdsBefore.has(messages.at(-1).id))){feed.scrollTop=feed.scrollHeight;butlerUnread=0;}else butlerUnread+=added;
+ $('#butlerNewMessages').hidden=!butlerUnread;$('#butlerNewMessages').textContent=butlerUnread+' 条新消息 ↓';
+}
+async function loadButler(){
+ if(butlerLoading)return butlerLoading;
+ butlerLoading=api('butler').then(renderButler).finally(()=>{butlerLoading=null;});return butlerLoading;
+}
+$('#butlerEnabled').onchange=async()=>{const input=$('#butlerEnabled');input.disabled=true;try{renderButler(await api('butler/settings',{enabled:input.checked}));}catch(e){input.checked=!input.checked;toast(e.message);}finally{input.disabled=false;}};
+$('#butlerRefresh').onclick=guard(async()=>{renderButler(await api('butler/refresh',{}));toast('已检查最新进展；没有变化不调用 AI');});
+$('#butlerAISettings').onclick=guard(async()=>{await switchView('settings');showSettingsPane('ai');});
+$('#butlerQuoteCancel').onclick=()=>setButlerQuote(null);
+$('#butlerReplyText').oninput=()=>{butlerReplyRequest=null;butlerChosenTarget=null;butlerUnknown=false;$('#butlerRetry').hidden=true;$('#butlerTargets').hidden=true;$('#butlerSend').disabled=butlerSending||!butlerData?.enabled;};
+$('#butlerReplyText').onkeydown=e=>{if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)){e.preventDefault();if(!$('#butlerSend').disabled)$('#butlerComposer').requestSubmit();}};
+$('#butlerNewMessages').onclick=()=>{const feed=$('#butlerProjects');feed.scrollTop=feed.scrollHeight;butlerUnread=0;$('#butlerNewMessages').hidden=true;};
+$('#butlerProjects').onscroll=()=>{const feed=$('#butlerProjects');if(feed.scrollHeight-feed.scrollTop-feed.clientHeight<48){butlerUnread=0;$('#butlerNewMessages').hidden=true;}};
+$('#butlerRetry').onclick=()=>{butlerReplyRequest=null;butlerUnknown=false;$('#butlerRetry').hidden=true;$('#butlerComposer').requestSubmit();};
+$('#butlerCopyOpen').onclick=guard(async()=>{
+ const quote=butlerReplyTo?.text,text=$('#butlerReplyText').value;await navigator.clipboard.writeText(quote?'以下是 bobo 的进展摘录，仅作为背景：\n> '+quote+'\n\n我的新指令：\n'+text:text);
+ if(butlerReplyTo)await focusButlerMessage(butlerReplyTo.id);toast('已复制指令，草稿保留');
+});
+$('#butlerComposer').onsubmit=async e=>{
+ e.preventDefault();if(butlerSending||butlerUnknown)return;const text=$('#butlerReplyText').value.trim();if(!text)return;
+ butlerReplyRequest??=crypto.randomUUID();butlerSending=true;$('#butlerSend').disabled=true;$('#butlerSendStatus').textContent='正在定位并发送到原会话…';$('#butlerCopyOpen').hidden=true;
+ try{
+  const result=await api('butler/reply',{requestId:butlerReplyRequest,text,replyTo:butlerReplyTo?.id,quote:butlerReplyTo?.text,targetId:butlerChosenTarget});
+  if(result.status==='choose'){
+   $('#butlerSendStatus').textContent=result.candidates.length?result.reason:'暂无可发送的会话；请先在 Agent 中开始一个任务。';
+   $('#butlerTargets').replaceChildren(...result.candidates.map(t=>button(t.name+' · '+(butlerLabels[t.source]||t.source)+' · '+(t.title||'未命名会话'),'',()=>{butlerChosenTarget=t.id;$('#butlerSendStatus').textContent='将发送到 '+t.name+' · '+(t.title||butlerLabels[t.source]);$('#butlerTargets').hidden=true;})));$('#butlerTargets').hidden=!result.candidates.length;return;
+  }
+  if(result.status==='sent'){$('#butlerReplyText').value='';setButlerQuote(null);$('#butlerSendStatus').textContent='已发送到 '+result.target.name+' · '+(butlerLabels[result.target.source]||result.target.source)+' 原会话。';}
+  else{butlerUnknown=!result.retryable;$('#butlerSendStatus').textContent=result.reason||'送达状态待确认，请打开原会话查看。';$('#butlerCopyOpen').hidden=false;$('#butlerRetry').hidden=!butlerUnknown;}
+  await loadButler();
+ }catch(error){$('#butlerSendStatus').textContent=error.message;$('#butlerCopyOpen').hidden=false;}
+ finally{butlerSending=false;$('#butlerSend').disabled=butlerUnknown||!butlerData?.enabled;}
+};
 const ocLabels={working:'运行中',waiting:'等你回答',idle:'已结束',error:'已终止'};
 // 会话来源的显示名（与 Bobo.swift 的 IslandRow 保持一致）。
 const sourceLabels={opencode:'OpenCode',codex:'Codex',omp:'omp',claude:'Claude Code',dsh:'DeepSeek',agy:'Antigravity'};
@@ -1189,7 +1313,7 @@ function renderSessionList(listEl,countEl,rows,emptyText){
 function renderIsland(){
  const {sessions=[],settings={},connected=false}=islandState;
  // 设备 / 网络的读数也挂在同一份流里，但通知岛网页只使用会话、设置与额度形状；无可见变化时不重排 DOM。
- const key=JSON.stringify([connected,sessions.map(s=>[s.id,s.state,s.title,s.terminal,s.name,s.detail,s.directory,s.source,s.order,s.acked]),settings,islandState.usage?.providers?.map(p=>[p.id,p.available,p.enabled,p.range])]);
+ const key=JSON.stringify([connected,sessions.map(s=>[s.id,s.state,s.title,s.terminal,s.name,s.detail,s.directory,s.source,s.order,s.acked]),settings,islandState.usage?.providers?.map(p=>[p.id,p.available,p.enabled,p.range]),islandState.butler]);
  if(key===islandRenderKey)return;
  islandRenderKey=key;
  // 服务端把六个 Agent 的会话合并进 sessions，并按 source 区分；这里分栏展示。
@@ -1209,17 +1333,21 @@ function renderIsland(){
  renderSessionList($('#dshList'),$('#dshCount'),ds,'最近没有 DeepSeek Harness 会话；dsh 运行时会自动出现在这里');
  renderSessionList($('#agyList'),$('#agyCount'),ag,islandState.agy?.reason||'最近没有 Antigravity 会话；agy 运行时会自动出现在这里');
  renderQuotaOrder(islandState.usage);
+ const butler=islandState.butler;setSideStatus('butler',butler?.status==='checking'?'working':butler?.status==='error'?'error':butler?.enabled?'idle':'',butler?.enabled?'已开启':'未开启');
+ if(document.body.dataset.islandPane==='butler'&&butler?.revision!==butlerData?.revision)loadButler().catch(e=>$('#butlerStatus').textContent=e.message);
  if(!islandReady){islandReady=true;renderIslandSettings();}
 }
 // 通知岛左侧分类（参考 magpie 的来源列表）：Agent 连接（会话）与额度来源两组，底部固定「通知岛设置」。
 // 行右侧是「圆点 + 状态文字」；分栏按 data-island-pane 切换，设置页内再用子页签（data-island-settings）切四个分页。
-const islandPanes=['opencode','codex','omp','claude','dsh','agy','quota-codex','quota-claude','quota-opencode','quota-agy','settings'];
+const islandPanes=['opencode','codex','omp','claude','dsh','agy','butler','quota-codex','quota-claude','quota-opencode','quota-agy','settings'];
 function showIslandPane(name){
  const next=islandPanes.includes(name)?name:islandPanes[0];
  for(const p of document.querySelectorAll('#islandWorkspace [data-island-pane-content]'))p.hidden=p.dataset.islandPaneContent!==next;
  for(const b of document.querySelectorAll('#islandWorkspace [data-island-pane]'))b.setAttribute('aria-pressed',String(b.dataset.islandPane===next));
  // 右下角的「刷新额度」只在额度分栏出现（CSS 按 data-island-kind 显示）。
  document.body.dataset.islandKind=next.startsWith('quota-')?'quota':next==='settings'?'settings':'session';
+ document.body.dataset.islandPane=next;
+ if(next==='butler')loadButler().catch(e=>$('#butlerStatus').textContent=e.message);
 }
 for(const b of document.querySelectorAll('#islandWorkspace [data-island-pane]'))b.onclick=()=>showIslandPane(b.dataset.islandPane);
 const islandSettingsPanes=['notch','notify','quota','menubar'];

@@ -17,6 +17,8 @@
   "scripts": {
     "start": "node src/server.mjs",
     "test": "node --test test/*.test.mjs",
+    "site:build": "paper -l build",
+    "site:preview": "paper -l serve",
     "build:app": "bash scripts/build-app.sh",
     "package": "node scripts/package-release.mjs"
   },

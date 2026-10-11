@@ -10,7 +10,7 @@
   [![Platform](https://img.shields.io/badge/platform-macOS%2013.0%2B-f7f5ef?style=flat-square&logo=apple&logoColor=000000)](https://github.com/ohmyangboy/bobo)
   [![License](https://img.shields.io/badge/license-MIT-c92a2a?style=flat-square)](LICENSE)
 
-  [Releases](https://github.com/ohmyangboy/bobo/releases) · [问题反馈](https://github.com/ohmyangboy/bobo/issues)
+  [官网](https://ohmyangboy.github.io/bobo/) · [Releases](https://github.com/ohmyangboy/bobo/releases) · [问题反馈](https://github.com/ohmyangboy/bobo/issues)
 
 </div>
 
@@ -92,7 +92,7 @@ npm start                  # 或只跑本地服务 → http://127.0.0.1:4318
 - **智能体**：管理 OpenCode 与 Codex CLI 的自定义智能体定义，阅读并调节六家 harness 的全局配置。
 - **AI**：按段落翻译全文、生成能力总结（OpenAI 兼容接口，可用 DeepSeek）。
 
-详细功能与实现说明见 [docs/features.md](docs/features.md)，一页速览见 [docs/intro.md](docs/intro.md)。
+详细功能与实现说明见 [docs/features.md](docs/features.md)，一页速览见 [docs/intro.md](docs/intro.md)。官网内容与 Paper 构建方式见 [docs/website.md](docs/website.md)。
 
 ## 开发
 

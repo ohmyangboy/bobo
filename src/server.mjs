@@ -1,6 +1,9 @@
 import http from 'node:http';
 import {createSkillReader,createAgentReader,createCodexAgentReader,createConfigReader} from './reader-ai.mjs';
 import { createAI } from './ai.mjs';
+import { createButler } from './butler.mjs';
+import { createButlerSources } from './butler-sources.mjs';
+import {createButlerDelivery,routeInstruction,validateInstruction} from './butler-delivery.mjs';
 import { createSources } from './sources.mjs';
 import { createSkills, parseSkill } from './skills.mjs';
 import { createAgents } from './agents.mjs';
@@ -73,6 +76,9 @@ dsh.start();
 // Google Antigravity（agy）读 ~/.gemini/antigravity-cli/conversation_summaries.db；提醒同样走通知岛通道。
 const agy=createAgy({home,remind:(kind,title,message)=>opencode.remind(kind,title,message)});
 agy.start();
+const butlerSources=createButlerSources({home,env:process.env.BOBO_HOME?{}:process.env});
+const butler=createButler({home,ai,sources:butlerSources});
+const butlerDelivery=createButlerDelivery({enabled:!process.env.BOBO_HOME,sessionState:target=>sessionsMerged().find(s=>s.id===(target.source==='opencode'?target.sessionId:target.source+':'+target.sessionId))?.state});
 // 六个 Agent 的会话合成一份列表：各自模块给出 order（按最近一次状态变更），这里统一倒序后截断。
 function sessionsMerged(parts={opencode:opencode.snapshot(),codex:codex.snapshot(),omp:omp.snapshot(),claude:claude.snapshot(),dsh:dsh.snapshot(),agy:agy.snapshot()}){return [...parts.opencode.sessions,...parts.codex.sessions,...parts.omp.sessions,...parts.claude.sessions,...parts.dsh.sessions,...parts.agy.sessions].sort((a,b)=>(b.order??0)-(a.order??0)).slice(0,40);}
 // dsh 通常是 web profile：界面是本地页面 127.0.0.1:3080（dsh 默认端口）。点 dsh 会话时能连上就直接把页面打开
@@ -90,7 +96,7 @@ setInterval(()=>{if(Date.now()<terminalWatchUntil)scanTerminals().catch(()=>{});
 // 状态流与 /api/opencode 共用的快照：各来源只取一次，避免同一轮重复计算六个 snapshot。
 function islandSnapshot(){
  const parts={opencode:opencode.snapshot(),codex:codex.snapshot(),omp:omp.snapshot(),claude:claude.snapshot(),dsh:dsh.snapshot(),agy:agy.snapshot()};
- return {...parts.opencode,sessions:sessionsMerged(parts).map(s=>({...s,terminal:sessionTerminals[s.id],link:links.linkFor(s.source)})),codex:parts.codex,omp:parts.omp,claude:parts.claude,dsh:parts.dsh,agy:parts.agy};
+ return {...parts.opencode,sessions:sessionsMerged(parts).map(s=>({...s,terminal:sessionTerminals[s.id],link:links.linkFor(s.source)})),codex:parts.codex,omp:parts.omp,claude:parts.claude,dsh:parts.dsh,agy:parts.agy,butler:butler.snapshot()};
 }
 // 结束 / 终止的头像要留到用户看过终端才收起：对应终端在前台且正停在那个标签页时算已查看；
 // 手动切标签页与点会话行跳过去（/api/opencode/focus）命中同一套匹配。
@@ -118,6 +124,7 @@ for(const entry of await fs.readdir(path.join(home,'.skills-manager'),{withFileT
  try{await fs.mkdir(dataDir,{recursive:true});await fs.rename(from,to);}
  catch(e){console.warn('迁移旧数据 '+entry.name+' 失败：'+e.message);}
 }
+await butler.load();butler.start();
 const catalogFile=path.join(dataDir,'catalog.json');
 // 备份保留最近 3 份：启动时先清理一次历史遗留，之后每次创建备份再淘汰最旧的。
 await pruneBackups(path.join(dataDir,'backups'));
@@ -215,7 +222,7 @@ function normalize(args){
 // 去掉 -g / -y 之类的开关，只留命令与操作对象。
 const operands=args=>args.slice(1).filter(a=>!a.startsWith('-'));
 const flagValue=(args,name)=>{const i=args.indexOf(name);return i>=0?args[i+1]:null;};
-async function body(req){let text='';for await(const b of req){text+=b;if(text.length>1100000)fail('内容超过 1 MB',413);}return JSON.parse(text||'{}');}
+async function body(req,limit=1100000){let text='';for await(const b of req){text+=b;if(text.length>limit)fail('内容超过请求大小限制',413);}return JSON.parse(text||'{}');}
 async function mutate(fn){if(busy)fail('另一个操作正在运行',409);busy=true;try{return await fn();}finally{busy=false;}}
 // 目录/链接变化会影响技能列表，成功后让快照失效。
 const sourcesMutate=fn=>mutate(async()=>{try{return await fn();}finally{catalogTime=0;}});
@@ -237,6 +244,8 @@ const server=http.createServer(async(req,res)=>{
    if(req.method==='GET'&&url.pathname==='/api/ai/agent/document')return json(await agentReader.document(url.searchParams.get('id')));
    if(req.method==='GET'&&url.pathname==='/api/ai/codex/document')return json(await codexReader.document(url.searchParams.get('id')));
    if(req.method==='GET'&&url.pathname==='/api/ai/settings')return json(await ai.status());
+   if(req.method==='GET'&&url.pathname==='/api/ai/usage')return json(await ai.usage());
+   if(req.method==='GET'&&url.pathname==='/api/butler')return json(butler.detail());
    if(req.method==='GET'&&url.pathname==='/api/agents')return json(await agents.list());
    if(req.method==='GET'&&url.pathname==='/api/agents/file')return json(await agents.file(url.searchParams.get('id')));
    if(req.method==='GET'&&url.pathname==='/api/codex/agents')return json(await codexAgents.list());
@@ -277,8 +286,8 @@ const server=http.createServer(async(req,res)=>{
      });
     };
     send();
-    const stop=opencode.subscribe(send),stopUsage=usage.subscribe(send),stopCodex=codex.subscribe(send),stopOmp=omp.subscribe(send),stopClaude=claude.subscribe(send),stopDsh=dsh.subscribe(send),stopAgy=agy.subscribe(send),stopDevices=devices.subscribe(send),stopNetwork=network.subscribe(send),stopLinks=links.subscribe(send);
-    const close=()=>{stop();stopUsage();stopCodex();stopOmp();stopClaude();stopDsh();stopAgy();stopDevices();stopNetwork();stopLinks();};
+    const stop=opencode.subscribe(send),stopUsage=usage.subscribe(send),stopCodex=codex.subscribe(send),stopOmp=omp.subscribe(send),stopClaude=claude.subscribe(send),stopDsh=dsh.subscribe(send),stopAgy=agy.subscribe(send),stopDevices=devices.subscribe(send),stopNetwork=network.subscribe(send),stopLinks=links.subscribe(send),stopButler=butler.subscribe(send);
+    const close=()=>{stop();stopUsage();stopCodex();stopOmp();stopClaude();stopDsh();stopAgy();stopDevices();stopNetwork();stopLinks();stopButler();};
     req.on('close',close);res.on('close',close);
     return;
    }
@@ -289,8 +298,39 @@ const server=http.createServer(async(req,res)=>{
     const b=await fs.readFile(file);if(b.includes(0))fail('二进制文件，请在 Finder 中打开');return json({content:b.toString('utf8'),version:hash(b)});
    }
    if(req.method!=='POST')fail('不存在的接口',404);
-   const b=await body(req);
+   const b=await body(req,url.pathname==='/api/butler/reply'?23*1024*1024:1100000);
    if(url.pathname==='/api/ai/settings')return json(await ai.save(b));
+   if(url.pathname==='/api/butler/settings')return json(await butler.saveSettings(b));
+   if(url.pathname==='/api/butler/refresh')return json(await butler.refresh());
+   if(url.pathname==='/api/butler/focus'){
+    const stored=butler.message(b.id),m=butler.targets().find(t=>t.source===stored.source&&t.sessionId===stored.sessionId)||stored,id=m.source==='opencode'?m.sessionId:m.source+':'+m.sessionId;
+    if(process.env.BOBO_HOME)return json({ok:false,reason:'隔离环境不操作真实 Agent 窗口'});
+    const current=sessionsMerged().find(s=>s.id===id),target=await butlerSources.resolveTarget({...m,title:current?.title||m.title,directory:current?.directory||m.directory});
+    const focused=await butlerDelivery.focus(target);if(focused)return json(focused);
+    if(m.source==='dsh'&&await dshWebAlive())return json(await browser.focus(dshWebUrl));
+    return json(await terminals.focus({id,sessionId:m.sessionId,title:target.title,directory:target.directory,source:m.source,sessionOnly:true,app:m.source==='codex'&&codex.appSession(id)}));
+   }
+   if(url.pathname==='/api/butler/reply'){
+    if(!butler.snapshot().enabled)fail('请先开启 bobo 管家');
+    const m=b.replyTo?butler.message(b.replyTo):null,validated=validateInstruction(b,m);
+    const targets=await Promise.all(butler.targets().map(t=>butlerSources.resolveTarget(t)));
+    let target=m?(targets.find(t=>t.source===m.source&&t.sessionId===m.sessionId)||{id:m.source+':'+m.sessionId,projectId:m.projectId,name:m.name,source:m.source,sessionId:m.sessionId,title:m.title,directory:m.directory}):null;
+    if(b.targetId){
+     if(target&&target.id!==b.targetId)fail('引用回复只能发回原会话');
+     if(!target){target=targets.find(t=>t.id===b.targetId);if(!target)fail('目标会话已变化，请重新选择');}
+    }
+    if(!target){
+     const routed=routeInstruction(validated.text,targets);target=routed.target;
+     if(!target)return json({status:'choose',reason:routed.reason,candidates:routed.candidates.map(({id,name,source,title})=>({id,name,source,title}))});
+    }
+    const current=sessionsMerged().find(s=>s.id===(target.source==='opencode'?target.sessionId:target.source+':'+target.sessionId));
+    if(current)target={...target,title:current.title||target.title,directory:current.directory||target.directory};
+    target=await butlerSources.resolveTarget(target);
+    return json(await butler.appendReply({...validated,requestId:b.requestId,replyTo:m?.id,target,deliver:async()=>{
+     if(b.enableOttyInput===true)await butlerDelivery.enableInput(target);
+     return butlerDelivery.send(target,validated.prompt,validated.attachments);
+    }}));
+   }
    if(url.pathname==='/api/opencode/settings')return json(await opencode.saveSettings(b));
    // 刘海额度指示显示哪一家：{next:true} 点击切换（按显示顺序轮换），或 {id} 把这家排到最前；顺序存在 usage.json。
    if(url.pathname==='/api/usage/provider')return json(b.next?usage.cycleProvider():usage.selectProvider(b.id));
@@ -447,7 +487,7 @@ const server=http.createServer(async(req,res)=>{
     return json({ok:true});
    }fail('不存在的接口：'+req.method+' '+url.pathname,404);
   }
-  const assets={'/stream.js':['stream.js','text/javascript'],'/markdown.js':['markdown.js','text/javascript'],'/agent-format.js':['agent-format.js','text/javascript'],'/codex-format.js':['codex-format.js','text/javascript'],'/icon.png':['icon.png','image/png'],'/':['index.html','text/html'],'/app.js':['app.js','text/javascript'],'/style.css':['style.css','text/css'],
+  const assets={'/stream.js':['stream.js','text/javascript'],'/markdown.js':['markdown.js','text/javascript'],'/agent-format.js':['agent-format.js','text/javascript'],'/codex-format.js':['codex-format.js','text/javascript'],'/icon.png':['icon.png','image/png'],'/bobo-avatar.png':['bobo-avatar.png','image/png'],'/':['index.html','text/html'],'/app.js':['app.js','text/javascript'],'/style.css':['style.css','text/css'],
    // 通知岛面板：独立的小页面，给桌面壳的透明悬浮窗用（浏览器访问也正常）。
    '/panel.html':['panel.html','text/html'],'/panel.css':['panel.css','text/css'],'/panel.js':['panel.js','text/javascript']};
   const asset=assets[url.pathname];if(!asset)fail('Not found',404);

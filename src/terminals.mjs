@@ -61,10 +61,23 @@ export function sameTabTitle(tabTitle, prefix, title) {
 // 1) 工作目录精确相等（Ghostty / Otty 才有 cwd）  2) 标题等于 `<前缀><会话标题>`  3) 标题包含会话标题
 // 4) 同目录下标题包含目录名（会话还没拿到标题时靠它认人）  5) 同目录只剩一个标签页  6) 标题包含目录名（strict 时不做）。
 // titleOnly：只认标题（跳过目录匹配）——「这个标签页在跑这条线程」只有标题能证明，同目录只说明它俩在同一个目录。
-export function matchTab(tabs, { title, directory, name, source = 'opencode' } = {}, { strict = false, titleOnly = false } = {}) {
+export function matchTab(tabs, { title, directory, name, source = 'opencode' } = {}, { strict = false, titleOnly = false, sessionOnly = false } = {}) {
  const list = (tabs || []).filter(Boolean), t = String(title ?? '').trim(), base = folderName(directory, name);
  const prefixes = [...(TITLE_PREFIX[source] || []), ''];
  const exact = x => t && prefixes.some(p => sameTabTitle(x.title, p, t));
+ // 管家历史消息必须唯一匹配完整标题；原会话已关闭时不跳到同目录的其它任务。
+ if(sessionOnly){
+  if(!t)return null;
+  const matches=list.filter(x=>{
+   if(x.cwd&&directory&&!samePath(x.cwd,directory))return false;
+   let label=String(x.title||'').trim();
+   const prefix=prefixes.find(p=>p&&label.startsWith(p));if(prefix)label=label.slice(prefix.length);
+   label=label.replace(/^[^\p{L}\p{N}]+/u,'');
+   if(base&&label.endsWith(' | '+base))label=label.slice(0,-base.length-3).trim();
+   return label===t;
+  });
+  return matches.length===1?matches[0]:null;
+ }
  if (directory && !titleOnly) {
   const same = list.filter(x => x.cwd && samePath(x.cwd, directory));
   if (same.length) return same.find(exact) || same.find(x => t && String(x.title || '').includes(t)) || same.find(x => base && String(x.title || '').includes(base)) || same[0];
@@ -276,8 +289,10 @@ export function createTerminals() {
   // app 出身的会话（rollout 记着 Codex Desktop / vscode）先按标题认终端：它可能已经被 CLI resume，
   // 这份 meta 却照旧——不认终端就直接跳深链，会把已经退出的 app 拉起来（线程其实在终端里跑着）。
   // app 在跑时只认标题：同目录不算数，否则会跳到同目录里另一条无关的标签页。
-  const match = opts.app === true && appRunning ? { titleOnly: true } : undefined;
+  const match = opts.sessionOnly ? {sessionOnly:true} : opts.app === true && appRunning ? { titleOnly: true } : undefined;
   for (const a of adapters) {
+   // 管家先用 Otty pane 的 Agent/会话 ID 匹配，不能再退回旧标签页规则。
+   if(opts.sessionOnly&&a.bundle===OTTS_BUNDLE)continue;
    if (!a.available() || !running.has(a.bundle)) continue;
    const r = await a.focus(opts, match);
    if (r?.ok) return r;

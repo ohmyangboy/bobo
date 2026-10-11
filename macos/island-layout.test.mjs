@@ -69,6 +69,249 @@ precondition(!model.motionActive)
 `);
 });
 
+test('管家多项目列表：兼容旧快照，紧凑视口不随历史增长，全部项目可滚动查看', {skip:process.platform!=='darwin'}, async()=>{
+ const declarations=await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','// 悬停明细卡的内容类型');
+ const model=await swiftSlice('enum IslandDetailKind:','// 通知岛面板：黑色卡片贴住刘海');
+ await checkSwift(declarations+'\n'+model,`
+let legacy = try JSONDecoder().decode(IslandSnapshot.self, from: Data(#"{"connected":false,"sessions":[],"settings":{}}"#.utf8))
+precondition(legacy.butler == nil)
+let payload = #"{"enabled":true,"revision":3,"status":"ready","message":"自动更新","lead":{"id":"p","name":"项目","text":"构建通过，需要验收","updatedAt":1000,"summaryAt":1000}}"#
+let butler = try JSONDecoder().decode(IslandButler.self, from: Data(payload.utf8))
+precondition(butler.text == "项目：构建通过，需要验收")
+precondition(butler.projects.count == 1 && butler.height == 88, "旧单行快照兼容为一张项目卡片")
+var multiple = butler
+multiple.recentProjects = (0..<8).map { IslandButlerLead(id: "p\\($0)", name: "项目\\($0)", text: "有新进展", updatedAt: 1000, summaryAt: 1000) }
+precondition(multiple.projects.count == 8, "超过三项的项目不能丢弃")
+precondition(multiple.height == 192, "最近三项决定初始视口，其余滚动；不能无限增加窗口高度")
+multiple.recentProjects = []
+precondition(multiple.projects.isEmpty && multiple.height == 64, "显式空列表不能错误地恢复旧 lead")
+let model = IslandModel()
+model.butler = butler
+precondition(model.butlerHeight == 0 && !model.expanded, "管家更新不能自己展开刘海")
+model.hovering = true
+precondition(model.butlerHeight == 88)
+multiple.recentProjects = [butler.lead!, butler.lead!]
+model.butler = multiple
+precondition(model.butlerHeight == 140, "项目数量变化时窗口高度随之变化")
+model.butler?.enabled = false
+precondition(model.butlerHeight == 0)
+model.butler = butler
+model.hovering = false
+model.autoRevealed = true
+precondition(model.butlerHeight == 88)
+model.settings.autoExpand = false
+precondition(model.butlerHeight == 0)
+`);
+});
+
+test('管家消息流：同项目多条消息保持独立，空消息不恢复旧摘要，视口有上限', {skip:process.platform!=='darwin'}, async()=>{
+ await checkSwift(await swiftSlice('struct IslandButlerLead:','struct IslandSnapshot:'),`
+let payload = #"{"enabled":true,"revision":2,"status":"ready","message":"新进展","lead":{"id":"legacy","name":"旧摘要","text":"旧文案","updatedAt":1000,"summaryAt":1000},"messages":[{"id":"m1","projectId":"bobo","name":"bobo","text":"已调整布局。","at":1000,"summaryAt":1000,"role":"butler","source":"codex"},{"id":"m2","projectId":"bobo","name":"bobo","text":"继续验证。","at":2000,"summaryAt":0,"role":"user","source":"codex","delivery":"sent"}]}"#
+var butler = try JSONDecoder().decode(IslandButler.self, from: Data(payload.utf8))
+precondition(butler.displayMessages.map(\\.id) == ["m1", "m2"])
+precondition(butler.displayMessages[1].delivery == "sent" && butler.height == 140)
+let template = butler.displayMessages[0]
+butler.messages = (0..<80).map { i in var message = template; message.id = "m\\(i)"; return message }
+precondition(butler.displayMessages.count == 80 && butler.height == 192, "历史增长不能撑高窗口")
+butler.messages = []
+precondition(butler.displayMessages.isEmpty && butler.height == 64, "显式空消息不能退回旧摘要")
+var withRequest = template
+withRequest.request = String(repeating: "原始指令\\n", count: 40)
+butler.messages = (0..<80).map { i in var message = withRequest; message.id = "q\\(i)"; return message }
+precondition(butler.visibleListHeight(measured: 5000) == 184 && butler.visibleListHeight(measured: 5000, replying: true) == 112, "长引用和大量历史不能撑高通知岛；回复时收紧消息区")
+precondition(butler.visibleListHeight(measured: 60) == 60 && butler.visibleListHeight(measured: .nan) == butler.listHeight, "短消息按测得的高度显示，不补齐固定行数")
+butler.enabled = false
+precondition(butler.height == 0)
+`);
+});
+
+test('通知岛便捷回复：收起保留草稿，按回执清空或保留；编辑时保持展开且高度有限', {skip:process.platform!=='darwin'}, async()=>{
+ const declarations=await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {');
+ const model=await swiftSlice('enum IslandDetailKind:','// 通知岛面板：黑色卡片贴住刘海');
+ await checkSwift(declarations+'\n'+model,`
+let message = IslandButlerMessage(id: "m1", projectId: "bobo", name: "bobo", text: "已完成布局调整。", at: 1000, summaryAt: 1000, role: "butler", source: "codex")
+var draft = IslandButlerReplyDraft()
+precondition(!draft.isOpen && draft.height == 0 && !draft.canSend)
+draft.open(message: message)
+draft.edit("继续验证\\n保留当前布局")
+let requestId = draft.requestId
+draft.isOpen = false
+draft.isOpen = true
+precondition(draft.text == "继续验证\\n保留当前布局" && draft.message?.id == "m1" && draft.requestId == requestId, "收起 / 重开不能丢草稿或产生新的发送请求")
+draft.sending = true
+draft.edit("不能覆盖发送中的指令")
+precondition(draft.text.contains("继续验证") && !draft.canSend)
+func receipt(_ json: String) throws -> IslandButlerReplyReceipt { try JSONDecoder().decode(IslandButlerReplyReceipt.self, from: Data(json.utf8)) }
+draft.receive(try receipt(#"{"status":"failed","reason":"原会话未找到","retryable":true,"target":{"name":"bobo","source":"codex","title":"开发管家"}}"#))
+precondition(!draft.sending && draft.canSend && draft.text.contains("继续验证") && draft.requestId == requestId)
+draft.receive(try receipt(#"{"status":"failed","reason":"Otty 未开启程序输入","retryable":true,"action":"enable-otty-input"}"#))
+precondition(draft.needsOttyInput && draft.canSend && !draft.enableOttyInput, "只能显示开启按钮，不能自动授权")
+draft.enableOttyInput = true
+draft.receive(try receipt(#"{"status":"failed","reason":"原会话已关闭","retryable":true}"#))
+precondition(!draft.needsOttyInput && !draft.enableOttyInput && draft.requestId == requestId, "回执清除授权意图但保留原请求防重")
+draft.receive(try receipt(#"{"status":"failed","reason":"未确认送达","retryable":false}"#))
+precondition(draft.uncertain && !draft.canSend && draft.requestId == requestId, "未知送达不能自动重发")
+draft.edit("继续进行真机验证")
+precondition(draft.canSend && draft.requestId != requestId && !draft.uncertain)
+draft.open(message: nil)
+draft.receive(try receipt(#"{"status":"choose","candidates":[{"id":"codex:one","name":"bobo","source":"codex","title":"管家开发"},{"id":"claude:two","name":"paper-blog","source":"claude","title":"发布博客"}]}"#))
+precondition(draft.candidates.count == 2 && draft.targetId == nil && draft.text == "继续进行真机验证")
+draft.choose(draft.candidates[1])
+precondition(draft.targetId == "claude:two" && draft.canSend)
+draft.receive(try receipt(#"{"status":"sent","target":{"name":"paper-blog","source":"claude","title":"发布博客"}}"#))
+precondition(draft.text.isEmpty && draft.message == nil && draft.candidates.isEmpty && !draft.canSend && draft.hint.contains("paper-blog"), "实际 API 回执没有目标 id，仍需正确解码并清空草稿")
+draft.edit(String(repeating: "字", count: 4200))
+precondition(draft.text.count == 4096)
+draft.edit("")
+draft.addImages([Data([1, 2, 3])])
+precondition(draft.canSend && draft.images.count == 1, "支持纯图片草稿")
+let imageRequest = draft.requestId
+draft.isOpen = false; draft.isOpen = true
+precondition(draft.images.count == 1 && draft.requestId == imageRequest)
+draft.receive(try receipt(#"{"status":"failed","reason":"未送达","retryable":true}"#))
+precondition(draft.images.count == 1, "失败保留图片")
+draft.removeImage(draft.images[0].id)
+precondition(!draft.canSend && draft.requestId != imageRequest)
+draft.addImages([Data([1])]); draft.receive(try receipt(#"{"status":"sent"}"#))
+precondition(draft.images.isEmpty, "发送成功清空图片")
+let model = IslandModel()
+model.settings.autoExpand = false; model.settings.hideWhenIdle = true
+model.butler = IslandButler(enabled: true, revision: 1, status: "ready", message: "新进展", messages: [message])
+precondition(!model.expanded && !model.visible && model.butlerHeight == 0)
+model.butlerReply.open(message: message)
+precondition(model.expanded && model.visible && model.butlerHeight == 88 + model.butlerReply.height, "打字时鼠标离开不能收起便捷回复")
+model.butlerContentHeight = 70
+model.butlerComposerHeight = 100
+precondition(model.butlerHeight == 206, "窗口高度要采用原生排版的实际测量值")
+model.butlerContentHeight = 5000
+precondition(model.butlerHeight == 248, "展开回复时消息区最多 112 点，不能被大量历史撑开")
+model.butlerReply.receive(try receipt(#"{"status":"failed","reason":"未送达","retryable":true}"#))
+precondition(model.butlerReply.height <= 230)
+model.butlerReply.isOpen = false
+precondition(!model.expanded && model.butlerHeight == 0)
+`);
+});
+
+test('管家原生排版：引用按内容撑高，最多三行，换行与窄宽度均不留固定空白', {skip:process.platform!=='darwin'}, async()=>{
+ const declarations=await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot:');
+ const views=await swiftSlice('struct IslandButlerList:','// 会话行：悬停高亮');
+ const avatar=await swiftSlice('struct IslandAvatarFace: View {','struct IslandAvatar: View {');
+ await checkSwift(declarations+'\n'+avatar+'\n'+views,`
+NSApplication.shared.setActivationPolicy(.prohibited)
+func rowHeight(_ request: String?, width: CGFloat = 560) -> CGFloat {
+    let message = IslandButlerMessage(id: "preview", projectId: "bobo", name: "bobo", text: "已修复，待验收。", at: 1000, summaryAt: 1000, role: "butler", request: request)
+    let host = NSHostingView(rootView: IslandButlerMessageRow(message: message, avatarImage: nil, onFocus: {}, onQuote: {}).frame(width: width))
+    host.frame = NSRect(x: 0, y: 0, width: width, height: 200)
+    host.layoutSubtreeIfNeeded()
+    return host.fittingSize.height
+}
+let plain = rowHeight(nil)
+let one = rowHeight("翻译这个选项")
+let two = rowHeight("翻译这个选项\\n检查音量键")
+let three = rowHeight("翻译这个选项\\n检查音量键\\n编译后部署")
+let forty = rowHeight((["翻译这个选项", "检查音量键", "编译后部署"] + Array(repeating: "不要额外展示", count: 37)).joined(separator: "\\n"))
+precondition(plain < one && one < two && two < three, "一行、两行引用必须分别更矮，不能预留三行的高度")
+precondition(abs(three-forty) < 1, "超过三行只截断，不能继续增加气泡高度")
+precondition(plain < 50 && one < 65 && three < 95, "头像、气泡留白与行间距应保持紧凑")
+precondition(rowHeight("用业界常用的术语翻译一下这个音频调整选项", width: 300) > rowHeight("用业界常用的术语翻译一下这个音频调整选项"), "窄面板要按实际换行撑高")
+precondition(rowHeight("   \\n  ") == plain, "空白引用不应占高度")
+let requests = ["翻译这个选项", "翻译这个选项\\n检查音量键", "翻译这个选项\\n检查音量键\\n编译后部署"]
+let messages = requests.enumerated().map { index, request in
+    IslandButlerMessage(id: "m\\(index)", projectId: "bobo", name: "bobo", text: "已修复，待验收。", at: 1000, summaryAt: 1000, role: "butler", request: request)
+}
+let butler = IslandButler(enabled: true, revision: 1, status: "ready", message: "新进展", messages: messages)
+var measured: CGFloat = 0
+let host = NSHostingView(rootView: IslandButlerList(butler: butler, onSelect: {}, onMeasure: { measured = $0 }).frame(width: 560))
+host.frame = NSRect(x: 0, y: 0, width: 560, height: butler.height)
+let window = NSWindow(contentRect: host.frame, styleMask: .borderless, backing: .buffered, defer: false)
+window.contentView = host
+host.layoutSubtreeIfNeeded()
+RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+precondition(abs(measured - ceil(one+two+three+20)) < 2, "窗口的测量值必须来自相同宽度下的自然排版，而非被视口高度压缩")
+precondition(measured > 184 && butler.visibleListHeight(measured: measured) == 184, "长引用仍按自然高度滚动，原生窗口保持高度上限")
+`);
+});
+
+test('悬停明细：展开后重新检查真实图标区域，离开不误弹，旧圆环退出不取消新来源', {skip:process.platform!=='darwin'}, async()=>{
+ const declarations=await swiftSlice('enum IslandDetailKind:', '// 通知岛的状态：');
+ const hover=await swiftSlice('    private func detailHoverChanged(', '    // 明细卡固定在触发图标下方');
+ await checkSwift(declarations+`
+enum NSEvent { static var mouseLocation = NSPoint.zero }
+enum IslandMetrics { static let detailDelay = 3600.0 }
+final class ProbePanel {
+ var isVisible = true
+ var frame = NSRect(x: 0, y: 0, width: 100, height: 100)
+ func orderOut(_ sender: Any?) { isVisible = false }
+}
+final class ProbeModel {
+ var onScreen = true
+ var detail: IslandDetailKind?
+ var quotaFocus: String?
+ var detailMetrics = DetailMetrics()
+}
+final class DetailProbe {
+ var islandModel = ProbeModel()
+ var notchWindow: ProbePanel? = ProbePanel()
+ var detailWindow: ProbePanel? = ProbePanel()
+ var isHopping = false, islandQuotaDragging = false, pointerMoved = true
+ var detailHover: IslandDetailTarget?
+ var detailHoverRegion: IslandHoverRegion?
+ var detailShownTarget: IslandDetailTarget?
+ var detailShownRegion: IslandHoverRegion?
+ var detailShowWork: DispatchWorkItem?, detailHideWork: DispatchWorkItem?
+ var detailAnchor = NSPoint.zero
+ var refreshes = 0
+ func islandPointerMoved() -> Bool { pointerMoved }
+ func refreshDetail(_ kind: IslandDetailKind) { refreshes += 1 }
+ func applyDetail(_ metrics: DetailMetrics) { detailWindow?.isVisible = true }
+ func hover(_ target: IslandDetailTarget, _ value: Bool, _ region: IslandHoverRegion) { detailHoverChanged(target, value, region: region) }
+ func finishShow() { detailShowWork?.perform() }
+ func finishHide() { detailHideWork?.perform() }
+ func queueHide() { scheduleDetailHide() }
+`+hover+'\n}',`
+var rect: NSRect? = NSRect(x: 400, y: 950, width: 22, height: 22)
+let region = IslandHoverRegion(rect: { rect })
+let probe = DetailProbe()
+NSEvent.mouseLocation = NSPoint(x: 411, y: 961)
+probe.hover(.quota("codex"), true, region)
+rect = NSRect(x: 500, y: 950, width: 22, height: 22)
+probe.finishShow()
+precondition(probe.islandModel.detail == nil && probe.refreshes == 0, "展开把图标移走后，旧 enter 不能弹出或刷新额度")
+NSEvent.mouseLocation = NSPoint(x: 511, y: 961)
+probe.hover(.quota("codex"), true, region)
+NSEvent.mouseLocation = NSPoint(x: 511, y: 700)
+probe.finishShow()
+precondition(probe.islandModel.detail == nil && probe.refreshes == 0, "漏掉 exit 时，移到消息区域也不能误弹")
+NSEvent.mouseLocation = NSPoint(x: 511, y: 961)
+probe.hover(.quota("codex"), true, region)
+let nextRect = NSRect(x: 530, y: 950, width: 22, height: 22)
+let next = IslandHoverRegion(rect: { nextRect })
+NSEvent.mouseLocation = NSPoint(x: 541, y: 961)
+probe.hover(.quota("claude"), true, next)
+probe.hover(.quota("codex"), false, region)
+probe.finishShow()
+precondition(probe.islandModel.detail == .quota && probe.islandModel.quotaFocus == "claude" && probe.refreshes == 1, "不同额度图标必须各自判断，旧退出不能取消新来源")
+precondition(probe.detailAnchor == NSPoint(x: 541, y: 950), "卡片应锚定在真实图标底边中心")
+NSEvent.mouseLocation = NSPoint(x: 600, y: 700)
+probe.queueHide(); probe.finishHide()
+precondition(probe.islandModel.detail == nil, "旧悬停状态不能让卡片一直保留")
+NSEvent.mouseLocation = NSPoint(x: 511, y: 961)
+probe.hover(.device, true, region)
+rect = nil
+probe.finishShow()
+precondition(probe.islandModel.detail == nil && probe.refreshes == 1, "旧控件卸载后不能弹出")
+rect = NSRect(x: 500, y: 950, width: 22, height: 22)
+for mode in 0...2 {
+ let hidden = DetailProbe()
+ if mode == 0 { hidden.islandModel.onScreen = false }
+ if mode == 1 { hidden.islandQuotaDragging = true }
+ if mode == 2 { hidden.pointerMoved = false }
+ hidden.hover(.network, true, region); hidden.finishShow()
+ precondition(hidden.islandModel.detail == nil && hidden.refreshes == 0, "让位、拖动或被动展开不能误触悬停刷新")
+}
+`);
+});
+
 test('通知岛动画：非对称两翼变化时让位中心与顶边保持稳定，中途反向连续', {skip:process.platform!=='darwin'}, async()=>{
  await checkSwift(await swiftSlice('struct IslandBarLayout:','// 顶部栏的排布计算（纯函数'),`
 func near(_ a: CGFloat, _ b: CGFloat) { precondition(abs(a-b) < 0.00001, "坐标不连续或锚点漂移") }
@@ -392,6 +635,201 @@ precondition(probe.hops == 1 && probe.layouts == 9)
 `);
 });
 
+test('通知岛全屏：只认前台最上面的可见普通窗口，忽略后面的全屏与透明残窗', {skip:process.platform!=='darwin'}, async()=>{
+ await checkSwift(await swiftSlice('enum IslandWindowGeometry {','// 顶栏命中范围'),`
+let display = CGRect(x: 0, y: 0, width: 1512, height: 982)
+let normal = CGRect(x: 40, y: 38, width: 1400, height: 900)
+func window(_ rect: CGRect, pid: pid_t = 42, layer: Int = 0, alpha: Double = 1) -> [String: Any] {
+ [kCGWindowOwnerPID as String: pid, kCGWindowLayer as String: layer, kCGWindowAlpha as String: alpha,
+  kCGWindowBounds as String: rect.dictionaryRepresentation as NSDictionary]
+}
+let normalFirst = IslandWindowGeometry.frontmostBounds([window(normal), window(display)], pid: 42, displays: [display])!
+precondition(normalFirst == normal && !IslandWindowGeometry.isFullScreen(normalFirst, displays: [display]), "后面的全屏窗口不能继续让位")
+let fullFirst = IslandWindowGeometry.frontmostBounds([window(display), window(normal)], pid: 42, displays: [display])!
+precondition(IslandWindowGeometry.isFullScreen(fullFirst, displays: [display]))
+let recovered = IslandWindowGeometry.frontmostBounds([window(display, pid: 9), window(display, layer: 25), window(display, alpha: 0), window(.zero), window(normal)], pid: 42, displays: [display])
+precondition(recovered == normal, "透明残窗、菜单与其它应用不能遮住前台普通窗口的状态")
+precondition(IslandWindowGeometry.frontmostBounds([window(display, pid: 9)], pid: 42, displays: [display]) == nil)
+let upper = CGRect(x: -100, y: -1080, width: 1920, height: 1080)
+precondition(IslandWindowGeometry.isFullScreen(upper, displays: [display, upper]), "上下排列使用 Quartz 显示器坐标")
+precondition(!IslandWindowGeometry.isFullScreen(normal, displays: [display, upper]))
+
+// 现场 Chrome 网页全屏：屏幕外的 47pt 标题条、屏幕内的 115pt 工具栏都排在主窗口前面。
+let chromeDisplay = CGRect(x: 0, y: 0, width: 2048, height: 1152)
+let titleStrip = CGRect(x: 0, y: -47, width: 2048, height: 47)
+let toolbar = CGRect(x: 0, y: 0, width: 2048, height: 115)
+let chromeFull = IslandWindowGeometry.frontmostBounds([window(titleStrip), window(toolbar), window(chromeDisplay)], pid: 42, displays: [chromeDisplay])!
+precondition(chromeFull == chromeDisplay && IslandWindowGeometry.isFullScreen(chromeFull, displays: [chromeDisplay]), "全屏工具栏不能冒充视频主窗口")
+let chromeNormal = CGRect(x: 63, y: 30, width: 1985, height: 1122)
+let chromeRecovered = IslandWindowGeometry.frontmostBounds([window(titleStrip), window(toolbar), window(chromeNormal), window(chromeDisplay)], pid: 42, displays: [chromeDisplay])!
+precondition(chromeRecovered == chromeNormal && !IslandWindowGeometry.isFullScreen(chromeRecovered, displays: [chromeDisplay]), "工具栏残留也不能让后面的旧全屏窗口继续让位")
+let smallWindow = CGRect(x: 300, y: 0, width: 900, height: 115)
+precondition(IslandWindowGeometry.frontmostBounds([window(smallWindow), window(chromeDisplay)], pid: 42, displays: [chromeDisplay]) == smallWindow, "短小的普通窗口不能当作全屏工具栏跳过")
+precondition(IslandWindowGeometry.frontmostBounds([window(toolbar)], pid: 42, displays: [chromeDisplay]) == toolbar, "没有对应全屏主窗口时保留顶边窗口")
+precondition(IslandWindowGeometry.frontmostBounds([window(titleStrip)], pid: 42, displays: [chromeDisplay]) == nil)
+let upperToolbar = CGRect(x: upper.minX, y: upper.minY, width: upper.width, height: 115)
+precondition(IslandWindowGeometry.frontmostBounds([window(upperToolbar), window(upper)], pid: 42, displays: [display, upper]) == upper, "上下排列的屏幕也要跳过全屏工具栏")
+`);
+});
+
+// 直接执行鼠标采样入口、全屏缓存、悬停与自动回缩回调；窗口 / 鼠标 / 全屏信号都是内存里的假值。
+test('通知岛恢复：无激活或 Space 事件也能进入 / 退出全屏，漏掉 mouseExited 后自动回缩', {skip:process.platform!=='darwin'}, async()=>{
+ const declarations=await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {');
+ const model=await swiftSlice('enum IslandDetailKind:', '// 通知岛面板：黑色卡片贴住刘海');
+ const cache=await swiftSlice('    private func frontmostFullScreenCached(', '    private func frontmostAppFullScreen()');
+ const space=await swiftSlice('    private func handleSpaceChange()', '    // 网页播放器切换全屏');
+ const fullscreen=await swiftSlice('    private func recheckFullScreenYield()', '    // 重判面板该在哪块屏幕');
+ const hover=await swiftSlice('    private func islandHovering(', '    // MARK: 悬停明细卡');
+ const reveal=await swiftSlice('    private func revealIslandTemporarily(', '    private func scheduleIslandLayout()');
+ const monitor=await swiftSlice('    private func updateMenuBarYield()', '    // 折叠（未激活）态的面板宽度');
+ await checkSwift(declarations+'\n'+model+`
+enum NSEvent { static var mouseLocation = NSPoint(x: 300, y: 700) }
+final class IslandReplyTextView {
+ var lastInputAt = Date.distantPast
+ var marked = false
+ func hasMarkedText() -> Bool { marked }
+}
+struct ProbeScreen { var frame = NSRect(x: 0, y: 0, width: 1512, height: 1000) }
+final class ProbePanel {
+ var firstResponder: Any?
+ var isVisible = true
+ var frame = NSRect(x: 476, y: 790, width: 560, height: 210)
+ var screen: ProbeScreen? = ProbeScreen()
+}
+final class Probe {
+ let islandModel = IslandModel()
+ var notchWindow: ProbePanel? = ProbePanel(), detailWindow: ProbePanel?
+ var islandDragging = false, islandQuotaDragging = false, isHopping = false
+ var islandLayoutTimer: Timer?, islandDisplayDriver: AnyObject?
+ var islandCollapse: DispatchWorkItem?, islandAutoCollapse: DispatchWorkItem?
+ var menuBarYielding = false, menuBarLeftAt: Date?
+ var fullScreenCached = false, fullScreenCheckedAt: Date?
+ var passiveRevealMouse: NSPoint?
+ var fullScreen = false, scans = 0, layouts = 0, refreshes = 0
+ func frontmostAppFullScreen() -> Bool { scans += 1; return fullScreen }
+ func scheduleIslandLayout() { layouts += 1 }
+ func refreshScreen() { refreshes += 1 }
+ func hideDetail() {}
+ func closeButlerReply() { islandModel.butlerReply.isOpen = false }
+ func stopTerminalWatch() {}
+ func islandBarHeight(_ screen: ProbeScreen) -> CGFloat { 30 }
+ func collapsedIslandWidth(for screen: ProbeScreen) -> CGFloat { 220 }
+ func tick() { updateMenuBarYield() }
+ func spaceChanged() { handleSpaceChange() }
+ func hover(_ value: Bool) { islandHovering(value) }
+ func reveal() { revealIslandTemporarily(seconds: 3600) }
+ func finishReveal() { islandAutoCollapse?.perform() }
+ func finishLeave() { islandCollapse?.perform() }
+ func contains(_ point: NSPoint) -> Bool { islandContainsPointer(point) }
+`+[cache,space,fullscreen,hover,reveal,monitor].join('\n')+'\n}',`
+let full = Probe()
+full.tick()
+precondition(full.scans == 1 && full.layouts == 0 && !full.fullScreenCached)
+full.fullScreen = true
+full.tick()
+precondition(full.scans == 1, "进入全屏的复查不能超过每秒一次")
+full.fullScreenCheckedAt = Date().addingTimeInterval(-2)
+full.isHopping = true
+full.tick()
+precondition(full.fullScreenCached && full.scans == 2 && full.layouts == 1, "没有焦点 / Space 事件也要发现进入全屏，不能被动画 guard 截住")
+full.fullScreen = false
+full.tick()
+precondition(full.scans == 2, "退出全屏的复查不能超过每秒一次")
+full.fullScreenCheckedAt = Date().addingTimeInterval(-2)
+full.notchWindow?.isVisible = false
+full.tick()
+precondition(!full.fullScreenCached && full.scans == 3 && full.layouts == 2, "隐藏或动画期间仍能发现退出全屏并恢复")
+full.isHopping = false
+full.fullScreenCheckedAt = Date().addingTimeInterval(-2)
+full.tick()
+precondition(full.scans == 4 && full.layouts == 2, "普通窗口也继续低频复查，状态未变化不重排布局")
+full.islandModel.screenAwake = false
+full.fullScreenCheckedAt = Date().addingTimeInterval(-2)
+full.tick()
+precondition(full.scans == 4, "屏幕休眠时不查窗口")
+full.islandModel.screenAwake = true
+full.islandModel.settings.notch = false
+full.tick()
+precondition(full.scans == 4, "关闭通知岛时不查窗口")
+
+let replying = Probe()
+replying.islandModel.butlerReply.isOpen = true
+replying.islandModel.butlerReply.edit("保留文字")
+let input = IslandReplyTextView()
+replying.notchWindow?.firstResponder = input
+input.marked = true
+replying.hover(false); replying.finishLeave()
+precondition(replying.islandModel.butlerReply.isOpen, "离开时正在选词不能关闭")
+input.marked = false; input.lastInputAt = Date()
+replying.finishLeave()
+precondition(replying.islandModel.butlerReply.isOpen, "正在打字时不能关闭")
+input.lastInputAt = Date.distantPast
+replying.finishLeave()
+precondition(!replying.islandModel.butlerReply.isOpen && replying.islandModel.butlerReply.text == "保留文字", "移出并停止输入后关闭，保留草稿")
+
+let delayed = Probe()
+delayed.fullScreen = true
+delayed.spaceChanged()
+delayed.fullScreen = false
+RunLoop.main.run(until: Date().addingTimeInterval(0.55))
+precondition(delayed.scans == 2 && !delayed.fullScreenCached && delayed.refreshes == 2, "延迟复查不能复用一秒内的旧全屏缓存")
+
+let passive = Probe()
+NSEvent.mouseLocation = NSPoint(x: 300, y: 700)
+passive.reveal()
+precondition(passive.islandModel.expanded && passive.layouts == 1)
+NSEvent.mouseLocation = NSPoint(x: 350, y: 700)
+passive.tick()
+precondition(passive.passiveRevealMouse == NSPoint(x: 300, y: 700), "在别处移动鼠标不能取消被动展开保护")
+passive.reveal()
+passive.notchWindow?.frame = NSRect(x: 200, y: 600, width: 560, height: 400)
+passive.hover(true)
+precondition(!passive.islandModel.hovering, "自动展开长到静止光标下方不算主动悬停")
+passive.finishReveal()
+precondition(!passive.islandModel.expanded, "没有操作的通知展开要按时回缩")
+
+let lostExit = Probe()
+NSEvent.mouseLocation = NSPoint(x: 650, y: 900)
+lostExit.hover(true)
+precondition(lostExit.islandModel.hovering)
+NSEvent.mouseLocation = NSPoint(x: 300, y: 700)
+lostExit.tick()
+lostExit.finishLeave()
+precondition(!lostExit.islandModel.expanded, "漏掉 mouseExited 也必须解除旧悬停")
+lostExit.islandModel.hovering = true
+lostExit.reveal()
+precondition(!lostExit.islandModel.hovering && lostExit.islandModel.autoRevealed, "旧悬停不能阻止新通知安排回缩")
+lostExit.islandModel.hovering = true
+lostExit.finishReveal()
+precondition(!lostExit.islandModel.expanded, "回缩截止时再次校正旧悬停")
+
+let active = Probe()
+NSEvent.mouseLocation = NSPoint(x: 300, y: 700)
+active.reveal()
+NSEvent.mouseLocation = NSPoint(x: 650, y: 900)
+active.hover(true)
+precondition(active.islandModel.hovering && !active.islandModel.autoRevealed && active.islandAutoCollapse?.isCancelled == true)
+active.hover(false)
+active.finishLeave()
+precondition(active.islandModel.expanded, "鼠标实际还在面板里，误报的退出事件不能收回")
+active.reveal()
+precondition(active.islandModel.hovering && active.islandModel.expanded, "用户主动查看时保持展开")
+active.islandModel.yielding = true
+active.islandModel.hovering = false
+active.hover(true)
+precondition(!active.islandModel.hovering, "透明让位窗口不能接管悬停")
+active.islandModel.yielding = false
+active.islandModel.barLayout = IslandBarLayout(left: 60, keepOut: 200, right: 60, notched: true)
+precondition(!active.contains(NSPoint(x: 480, y: 900)) && active.contains(NSPoint(x: 650, y: 900)), "透明包络两侧不能维持悬停")
+NSEvent.mouseLocation = NSPoint(x: 480, y: 900)
+active.hover(true)
+precondition(!active.islandModel.hovering)
+NSEvent.mouseLocation = NSPoint(x: 650, y: 900)
+active.tick()
+precondition(active.islandModel.hovering, "从透明包络走到可见面板，没有新的 mouseEntered 也要接管悬停")
+`);
+});
+
 // 回答完成只结束自动亮起；鼠标主动停在面板上时继续展开。测试直接运行快照处理入口。
 test('通知岛状态：回答完成保留主动悬停，自动亮起则正常收回', {skip:process.platform!=='darwin'}, async()=>{
  const declarations=await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {');
@@ -409,6 +847,7 @@ final class Probe {
  func revealIslandTemporarily(seconds: Double) { islandModel.autoRevealed = true }
  func justFinished(from before: [IslandSession]) -> Bool { false }
  func postNotice(_ notice: IslandNotice) {}
+ func closeButlerReply() { islandModel.butlerReply.isOpen = false }
  func syncStatusItem(_ enabled: Bool) {}
  func updateNotchStatus(_ state: String, label: String, count: Int) {}
  func refreshScreen() {}
@@ -430,5 +869,60 @@ passive.apply(waiting)
 precondition(passive.islandModel.autoRevealed && passive.islandModel.expanded)
 passive.apply(working)
 precondition(!passive.islandModel.hovering && !passive.islandModel.autoRevealed && !passive.islandModel.expanded)
+var enabled = working
+enabled.butler = IslandButler(enabled: true, revision: 1, status: "ready", message: "新进展")
+active.apply(enabled)
+active.islandModel.butlerReply.isOpen = true
+active.islandModel.butlerReply.edit("保留草稿")
+active.apply(working)
+precondition(!active.islandModel.butlerReply.isOpen && active.islandModel.butlerReply.text == "保留草稿", "关闭管家要收起便捷回复，但保留草稿")
+`);
+});
+
+test('原生回复输入：中文组合词不发送，提交后可发送；图片粘贴不污染文字', {skip:process.platform!=='darwin'}, async()=>{
+ const editor=await swiftSlice('final class IslandReplyTextView: NSTextView {','struct IslandButlerComposer: View {');
+ await checkSwift(editor,`
+let app = NSApplication.shared
+let editor = IslandReplyTextView(frame: NSRect(x: 0, y: 0, width: 440, height: 80))
+let window = NSWindow(contentRect: editor.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+window.contentView = editor
+var sends = 0
+var closes = 0
+editor.onSend = { sends += 1 }; editor.onClose = { closes += 1 }
+let commandReturn = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "\\r", charactersIgnoringModifiers: "\\r", isARepeat: false, keyCode: 36)!
+editor.setMarkedText("zhongwen", selectedRange: NSRange(location: 8, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+precondition(editor.hasMarkedText())
+precondition(editor.performKeyEquivalent(with: commandReturn))
+precondition(sends == 0 && closes == 0 && editor.hasMarkedText(), "候选词不能被发送快捷键吞掉")
+let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "\\u{1b}", charactersIgnoringModifiers: "\\u{1b}", isARepeat: false, keyCode: 53)!
+editor.keyDown(with: escape)
+precondition(closes == 0, "Esc 取消选词不能关闭回复框")
+editor.string = ""
+editor.setMarkedText("zhongwen", selectedRange: NSRange(location: 8, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+editor.insertText("中文", replacementRange: NSRange(location: NSNotFound, length: 0))
+precondition(!editor.hasMarkedText() && editor.string == "中文")
+precondition(editor.performKeyEquivalent(with: commandReturn) && sends == 1)
+let board = NSPasteboard.withUniqueName()
+defer { board.releaseGlobally() }
+editor.imagePasteboard = board
+let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEUlEQVR4nGP4z8DA8B+MgBgAHfAD/dPQfSYAAAAASUVORK5CYII=")!
+board.setData(png, forType: .png)
+var images: [Data] = []
+editor.onImages = { images = $0 }
+let pasteItem = NSMenuItem(title: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+precondition(editor.validateUserInterfaceItem(pasteItem), "纯图片剪贴板也必须启用粘贴菜单")
+let pasteKey = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command], timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "v", charactersIgnoringModifiers: "v", isARepeat: false, keyCode: 9)!
+precondition(editor.performKeyEquivalent(with: pasteKey), "非激活面板必须直接接住 Command V")
+precondition(images.count == 1 && NSImage(data: images[0]) != nil && editor.string == "中文")
+images = []; editor.keyDown(with: pasteKey)
+precondition(images.count == 1, "直接进入 keyDown 的粘贴也要接住")
+let imageFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString + ".png")
+try png.write(to: imageFile)
+defer { try? FileManager.default.removeItem(at: imageFile) }
+board.clearContents(); board.writeObjects([imageFile as NSURL]); images = []
+editor.paste(nil)
+precondition(images.count == 1, "Finder 复制的图片文件也能粘贴")
+editor.isEditable = false; images = []; editor.paste(nil)
+precondition(images.isEmpty, "发送中不能修改附件")
 `);
 });

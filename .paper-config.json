@@ -1,14 +1,15 @@
 {
   "editor": "/Applications/MarkText.app",
   "deploy": "auto",
-  "color": "#D97757",
-  "icon": "paper:default",
+  "color": "#2563EB",
+  "icon": "assets/app-icon.png",
   "compress": true,
   "language": "zh_CN",
-  "postsDir": "/Users/yangbukun/Desktop/code/bobo",
-  "siteDir": "/Users/yangbukun/Desktop/code/bobo",
+  "postsDir": "./posts",
+  "siteDir": ".",
   "gitRemote": "https://github.com/ohmyangboy/bobo.git",
-  "siteName": "Paper Blog",
-  "siteUrl": "",
+  "siteName": "bobo",
+  "siteUrl": "https://ohmyangboy.github.io/bobo/",
+  "imageRadius": 8,
   "schemaVersion": 2
 }

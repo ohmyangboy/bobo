@@ -9,6 +9,9 @@ test('隔离环境：列表、文件增删改、冲突保护、路径保护、�
   const req=async(route,data,extra={})=>{const r=await fetch(base+'/api/'+route,{method:data?'POST':'GET',headers:{'x-bobo-token':token,'Content-Type':'application/json',...extra},body:data?JSON.stringify(data):undefined});return {status:r.status,data:await r.json()};};
   assert.equal((await fetch(base+'/api/skills')).status,403);
   assert.equal((await fetch(base+'/api/ai/settings')).status,403);
+  assert.equal((await fetch(base+'/api/ai/usage')).status,403);
+  assert.equal((await fetch(base+'/api/butler')).status,403);
+  assert.equal((await req('butler/settings',{enabled:true},{Origin:'https://evil.example'})).status,403);
   assert.equal((await req('ai/settings',null,{Origin:'https://evil.example'})).status,403);
   assert.equal((await req('ai/settings',{keySource:'manual',baseUrl:'http://127.0.0.1:1/v1',model:'test',clearKey:true})).status,200);
   assert.equal((await req('skills',null,{Origin:'https://evil.example'})).status,403);
@@ -17,6 +20,18 @@ test('隔离环境：列表、文件增删改、冲突保护、路径保护、�
   assert.equal(usage.available,false);assert.equal(usage.providers.length,4);assert.equal(usage.providers[0].id,'codex');assert.equal(usage.providers[1].id,'claude');assert.equal(usage.providers[2].id,'opencode-go');assert.equal(usage.providers[3].id,'agy');
   const island=(await req('opencode')).data;
   assert.ok(island.agy);
+  assert.equal(island.butler.enabled,false);
+  assert.deepEqual((await req('butler')).data.projects,[]);
+  assert.equal((await req('butler/refresh',{})).status,400);
+  assert.equal((await req('butler/settings',{enabled:'yes'})).status,400);
+  assert.equal((await req('butler/settings',{enabled:true})).data.enabled,true);
+  assert.equal((await req('opencode')).data.butler.enabled,true);
+  assert.equal((await req('butler/settings',{enabled:false})).data.enabled,false);
+  const aiUsage=(await req('ai/usage')).data;
+  assert.equal(aiUsage.total.requests,0);
+  assert.ok(aiUsage.features.some(f=>f.id==='butler'));
+  assert.ok(aiUsage.features.some(f=>f.id==='skill:summary'));
+  assert.ok(aiUsage.features.some(f=>f.id==='skill:translate'));
   await fs.mkdir(path.join(home,'.bobo'),{recursive:true});
   await fs.writeFile(path.join(home,'.bobo/catalog.json'),JSON.stringify([{name:'cached-demo',path:root,agents:['Codex'],agentLinks:[],source:'test/demo',id:'cached'}]));
   const startup=(await req('startup')).data;

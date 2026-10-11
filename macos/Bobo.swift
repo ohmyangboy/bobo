@@ -40,14 +40,17 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     private var detailHideWork: DispatchWorkItem?
     private var detailObserver: AnyCancellable?
     // 鼠标当前停在哪个指示上（nil = 都不在）：明细卡只在触发指示或卡片本身被悬停时保留。
-    private var detailHover: IslandDetailKind?
-    // 弹出位置锚点（鼠标位置，屏幕坐标）：卡片尺寸变化时按它重算，不跟着鼠标跑。
+    private var detailHover: IslandDetailTarget?
+    private var detailHoverRegion: IslandHoverRegion?
+    private var detailShownTarget: IslandDetailTarget?
+    private var detailShownRegion: IslandHoverRegion?
+    // 弹出位置锚点（触发图标的底边中心，屏幕坐标）：不跟着鼠标跑。
     private var detailAnchor = NSPoint.zero
     // 终端归属只在面板展开时扫描：展开期间定期让服务端续期，收起即停（见 syncTerminalWatch）。
     private var menuBarWatchTimer: Timer?
     private var menuBarYielding = false
     private var menuBarLeftAt: Date?
-    // 前台应用的全屏状态只随激活 / 空间切换变化；普通快照不要反复向 WindowServer 要完整窗口列表。
+    // 激活 / 空间切换时强制刷新，平时缓存一秒，覆盖网页播放器无通知的进入 / 退出全屏。
     private var fullScreenCached = false
     private var fullScreenCheckedAt: Date?
     // 让位（防遮挡菜单栏 / 全屏应用）状态：true 时面板缩成一只 bobo 躲进刘海区域（见 setIslandYielding）。
@@ -253,12 +256,20 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         notchWindow.isOpaque = false
         notchWindow.hasShadow = false
         notchWindow.isReleasedWhenClosed = false
+        notchWindow.onResignKey = { [weak self] in self?.islandHovering(false) }
         notchWindow.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         let hosting = IslandHostingView(rootView: IslandView(
             model: islandModel,
             onSelect: { [weak self] session in self?.focusIsland(session) },
             onActivate: { [weak self] in self?.showIslandStatus() },
             onAvatar: { [weak self] source in self?.showIslandStatus(source: source) },
+            onButler: { [weak self] in self?.openInApp(tab: "islandTab", pane: ("island", "butler")) },
+            onButlerFocus: { [weak self] id in self?.postIsland("/api/butler/focus", ["id": id]) },
+            onButlerQuote: { [weak self] id in self?.quoteButlerMessage(id) },
+            onButlerCompose: { [weak self] in self?.beginButlerReply() },
+            onButlerSend: { [weak self] in self?.sendButlerReply() },
+            onButlerClose: { [weak self] in self?.closeButlerReply() },
+            onButlerResize: { [weak self] in self?.scheduleIslandLayout() },
             onQuota: { [weak self] in
                 guard let self, !self.islandDragging else { return }
                 self.cycleUsage()
@@ -286,7 +297,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             onDevice: { [weak self] in self?.showDeviceStatus() },
             onNetwork: { [weak self] in self?.showNetworkStatus() },
             onSettings: { [weak self] in self?.showSettingsStatus() },
-            onDetail: { [weak self] kind, hovering in self?.detailHoverChanged(kind, hovering) },
+            onDetail: { [weak self] target, hovering, region in self?.detailHoverChanged(target, hovering, region: region) },
             onQuit: {
                 // 退出 bobo：和菜单里的「退出 bobo」同一条路径，applicationWillTerminate 会顺带停掉本地服务。
                 NSApp.terminate(nil)
@@ -301,7 +312,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         islandHosting = hosting
         notchWindow.contentView = hosting
         setupIslandDrag()
-        // 只采鼠标坐标，不扫描应用或启动子进程。让出菜单栏后一直保持隐藏，直到鼠标离开。
+        // 采鼠标坐标，并按一秒缓存补查进入 / 退出全屏；网页播放器可能不切应用或 Space。
         menuBarWatchTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.updateMenuBarYield()
         }
@@ -313,11 +324,9 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             self?.handleScreenParametersChange()
         }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
-            _ = self?.frontmostFullScreenCached(force: true)
-            self?.refreshScreen()
+            self?.handleSpaceChange()
         }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
-            _ = self?.frontmostFullScreenCached(force: true)
             self?.handleSpaceChange()
         }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
@@ -338,6 +347,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     private func chosenScreen() -> NSScreen? {
         let screens = NSScreen.screens
         guard let primary = screens.first else { return nil }
+        if islandModel.butlerReply.isOpen, let current = screen(withSignature: currentScreenSignature) { return current }
         switch islandModel.settings.display {
         case "builtin": return screens.first { Self.hasNotch($0) } ?? primary
         case "main": return primary
@@ -385,38 +395,25 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     }
 
     private func frontmostAppFullScreen() -> Bool {
-        guard let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return false }
-        guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return false }
-        for window in windows {
-            guard let pid = window[kCGWindowOwnerPID as String] as? pid_t, pid == front.processIdentifier,
-                  let layer = window[kCGWindowLayer as String] as? Int, layer == 0,
-                  let bounds = window[kCGWindowBounds as String] as? [String: Any],
-                  let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary), rect.width > 0, rect.height > 0 else { continue }
-            // 用 CGDisplayBounds 比：窗口 bounds 是 Quartz 坐标（左上角原点），和 NSScreen.frame 的
-            // 原点方向不一致，按屏幕各自的显示器 ID 取 bounds 才不会在上下排列的多屏里判错。
-            let full = NSScreen.screens.contains { screen in
-                guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else { return false }
-                let display = CGDisplayBounds(id)
-                return abs(rect.minX - display.minX) < 1 && abs(rect.minY - display.minY) < 1
-                    && abs(rect.width - display.width) < 1 && abs(rect.height - display.height) < 1
-            }
-            if full { return true }
+        // 只看前台主窗口（略过全屏工具栏），不能让后面的旧全屏窗口继续把通知岛藏住。
+        guard let rect = frontmostWindowBounds() else { return false }
+        // 窗口 bounds 是 Quartz 坐标（左上角原点），按显示器 ID 取 bounds，避免上下排列多屏误判。
+        let displays = NSScreen.screens.compactMap { screen -> CGRect? in
+            guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else { return nil }
+            return CGDisplayBounds(id)
         }
-        return false
+        return IslandWindowGeometry.isFullScreen(rect, displays: displays)
     }
 
     // 前台应用（排除 bobo 自己）最上面那个普通窗口的位置；拿不到就返回 nil（保持当前屏幕）。
     private func frontmostWindowBounds() -> CGRect? {
         guard let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return nil }
         guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
-        for window in windows {
-            guard let pid = window[kCGWindowOwnerPID as String] as? pid_t, pid == front.processIdentifier,
-                  let layer = window[kCGWindowLayer as String] as? Int, layer == 0,
-                  let bounds = window[kCGWindowBounds as String] as? [String: Any],
-                  let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary), rect.width > 0, rect.height > 0 else { continue }
-            return rect
+        let displays = NSScreen.screens.compactMap { screen -> CGRect? in
+            guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else { return nil }
+            return CGDisplayBounds(id)
         }
-        return nil
+        return IslandWindowGeometry.frontmostBounds(windows, pid: front.processIdentifier, displays: displays)
     }
 
     // 屏幕配置变化时 macOS 发通知，但此刻 NSScreen.screens 可能还没更新：立刻 + 0.5 秒各处理一次。
@@ -425,10 +422,22 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.refreshScreen() }
     }
 
-    // 切换空间（包含进入 / 退出全屏）后系统发通知，但此刻窗口列表与前台应用可能还没更新：立刻 + 0.4 秒各查一次。
+    // 激活应用 / 切换空间（包含进入 / 退出全屏）时窗口列表可能还没更新：立刻 + 0.4 秒强制各查一次。
     private func handleSpaceChange() {
+        _ = frontmostFullScreenCached(force: true)
         refreshScreen()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in self?.refreshScreen() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self else { return }
+            _ = self.frontmostFullScreenCached(force: true)
+            self.refreshScreen()
+        }
+    }
+
+    // 网页播放器切换全屏可能既不换应用也不换 Space；双向复查，状态变化后主动更新让位。
+    private func recheckFullScreenYield() {
+        guard islandModel.visible, islandModel.screenAwake else { return }
+        let previous = fullScreenCached
+        if frontmostFullScreenCached() != previous { scheduleIslandLayout() }
     }
 
     // 重判面板该在哪块屏幕：只有屏幕签名变了才触发换屏动画。
@@ -475,7 +484,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             network: islandModel.network != nil,
             actionButtons: islandModel.expanded)
         // 刘海屏上下同宽，列表沿用顶部内容宽度；外接屏保留原有展开宽度。
-        let minWidth: CGFloat = islandModel.expanded ? min(560, screen.frame.width - IslandMetrics.screenEdgeMargin * 2) : 0
+        let minWidth: CGFloat = islandModel.expanded ? min(480, screen.frame.width - IslandMetrics.screenEdgeMargin * 2) : 0
         let layout = IslandBarGeometry.layout(left: widths.left, right: widths.right, notch: notch, minWidth: minWidth)
         islandModel.barLayout = layout
         let barWidth = IslandBarGeometry.envelope(layout)
@@ -483,7 +492,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         // 展开高度按设置里的条数算（会话不足时跟着变矮），装不下的会话在列表里滚动查看。
         let visibleRows = max(1, min(islandModel.settings.rows, islandModel.listed.count))
         let listHeight: CGFloat = islandModel.expanded ? (islandModel.listed.isEmpty ? 42 : 13.5 + CGFloat(visibleRows) * 38) : 0
-        return NSSize(width: width, height: islandBarHeight(screen) + listHeight)
+        return NSSize(width: width, height: islandBarHeight(screen) + listHeight + islandModel.butlerHeight)
     }
 
     // 顶部栏该画几枚额度圆环（写进 IslandModel.quotaChipLimit，SwiftUI 只按它渲染前几家）：
@@ -526,6 +535,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         guard islandModel.visible else {
             // 面板本来就要收起（关掉显示 / hideWhenIdle）：直接清掉让位状态，别再淡入一次，交给 setNotchVisible 淡出。
             islandYielding = false
+            if islandModel.yielding { islandModel.yielding = false }
             notchWindow?.ignoresMouseEvents = false
             setNotchVisible(false)
             syncTerminalWatch(force: false)
@@ -533,12 +543,14 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         }
         // 防遮挡：前台应用全屏、或鼠标停在菜单栏上时让位。不再整块收起（那样是生硬的出现 / 消失），
         // 改为缩成一只 bobo 躲进刘海区域，回来时同样淡入 + 尺寸补间（见 setIslandYielding）。
-        let yielding = menuBarYielding || frontmostFullScreenCached()
+        // 输入法候选窗会改变前台窗口与鼠标位置；编辑中的面板不能因此让位 / 被销毁。
+        let yielding = !islandModel.butlerReply.isOpen && (menuBarYielding || frontmostFullScreenCached())
         if yielding {
             islandCollapse?.cancel()
             islandAutoCollapse?.cancel()
             islandModel.hovering = false
             islandModel.autoRevealed = false
+            if islandModel.butlerReply.isOpen { closeButlerReply() }
         }
         setIslandYielding(yielding)
         setNotchVisible(true)
@@ -624,6 +636,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         guard animated, window.isVisible, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
             islandModel.barLayout = targetLayout
             window.setFrame(frame, display: true)
+            applyDetail(islandModel.detailMetrics)
             return
         }
         let started = CACurrentMediaTime()
@@ -645,6 +658,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
                 self.islandLayoutTimer = nil
                 if #available(macOS 14.0, *) { (self.islandDisplayDriver as? IslandDisplayDriver)?.stop() }
                 self.islandDisplayDriver = nil
+                self.applyDetail(self.islandModel.detailMetrics)
             }
         }
         if #available(macOS 14.0, *), let hosting = islandHosting {
@@ -682,7 +696,11 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     // 鼠标移入立即展开，移出稍等再收起（避免划过时闪动）。
     // 改完模型先让出一帧：等 SwiftUI 把内容渲染出来再动窗口，动画中就不会出现「窗口已变大、内容还没画」的空隙。
     private func islandHovering(_ hovering: Bool) {
-        if hovering, !islandPointerMoved() { return }
+        if hovering {
+            guard islandContainsPointer(), islandPointerMoved() else { return }
+            // 只有实际进入可见面板才接管，光标在别处移动不能取消被动展开保护。
+            passiveRevealMouse = nil
+        }
         islandCollapse?.cancel()
         if hovering {
             // 鼠标移入即解除「3 秒后自动收起」的限制：临时展开交给悬停保持，移出后再按 0.35 秒收起。
@@ -700,7 +718,15 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             if self.islandQuotaDragging { return }
             let mouse = NSEvent.mouseLocation
             // mouseExited 有时是误报（滚动、窗口尺寸动画时系统会重算跟踪区）：鼠标还在面板上就别收起。
-            if let window = self.notchWindow, window.frame.contains(mouse) { return }
+            if self.islandContainsPointer(mouse) { return }
+            if self.islandModel.butlerReply.isOpen {
+                let editor = self.notchWindow?.firstResponder as? IslandReplyTextView
+                if editor?.hasMarkedText() == true || (editor.map { Date().timeIntervalSince($0.lastInputAt) < 1.2 } ?? false) || self.islandModel.butlerReply.sending {
+                    self.islandHovering(false)
+                    return
+                }
+                self.closeButlerReply()
+            }
             if self.islandModel.hovering {
                 self.islandModel.hovering = false
                 self.scheduleIslandLayout()
@@ -710,15 +736,31 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             self.hideDetail()
         }
         islandCollapse = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + (islandModel.butlerReply.isOpen ? 0.8 : 0.35), execute: work)
     }
 
     private func islandPointerMoved() -> Bool {
         guard let origin = passiveRevealMouse else { return true }
         let mouse = NSEvent.mouseLocation
         guard hypot(mouse.x - origin.x, mouse.y - origin.y) > 2 else { return false }
-        passiveRevealMouse = nil
         return true
+    }
+
+    // 透明窗口包络比真正画出的面板宽，不能把两侧空白也算作持续悬停。
+    private func islandContainsPointer(_ mouse: NSPoint = NSEvent.mouseLocation) -> Bool {
+        guard let panel = notchWindow, panel.isVisible, islandModel.onScreen else { return false }
+        let bar = IslandLayoutTween.barFrame(width: panel.frame.width, height: islandModel.barHeight, layout: islandModel.barLayout)
+        let visible = NSRect(x: panel.frame.minX + bar.minX, y: panel.frame.minY, width: bar.width, height: panel.frame.height)
+        return visible.contains(mouse)
+    }
+
+    // 焦点切换 / 跟踪区重建可能漏掉 mouseExited；用现有鼠标采样修正旧悬停，避免展开后永远不收回。
+    private func recheckIslandHover() {
+        if islandModel.hovering, !islandContainsPointer() {
+            islandHovering(false)
+        } else if !islandModel.hovering, islandContainsPointer(), islandPointerMoved() {
+            islandHovering(true)
+        }
     }
 
     // MARK: 悬停明细卡
@@ -758,31 +800,46 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     }
 
     // 悬停额度 / 设备 / 网络指示：满半秒弹明细卡；离开后 0.4 秒内没落在卡片上就收起。
-    private func detailHoverChanged(_ kind: IslandDetailKind, _ hovering: Bool) {
-        if hovering {
-            // 先记下当前悬停的指示：并排显示的额度圆环之间切换时卡片已经在台上（下面提前返回），
-            // 不记就会被另一枚圆环离开时排的收起任务带走。
-            detailHover = kind
-            guard islandModel.detail != kind else { return }
+    private func detailHoverChanged(_ target: IslandDetailTarget, _ hovering: Bool, region: IslandHoverRegion) {
+        if hovering, region.containsPointer {
+            let sameTarget = detailHover == target
+            detailHover = target
+            detailHoverRegion = region
+            detailHideWork?.cancel()
+            guard detailShownTarget != target || islandModel.detail == nil else { return }
+            if sameTarget, detailShowWork != nil { return }
             detailShowWork?.cancel()
             let work = DispatchWorkItem { [weak self] in
-                guard let self, self.detailHover == kind else { return }
-                self.showDetail(kind)
+                guard let self, self.detailHover == target, let region = self.detailHoverRegion else { return }
+                self.detailShowWork = nil
+                self.showDetail(target, region: region)
             }
             detailShowWork = work
             DispatchQueue.main.asyncAfter(deadline: .now() + IslandMetrics.detailDelay, execute: work)
         } else {
-            if detailHover == kind { detailHover = nil }
+            // 旧圆环的 exit 可能晚于新圆环的 enter；不能取消另一家的悬停任务。
+            guard detailHover == target else { return }
+            detailHover = nil
+            detailHoverRegion = nil
             detailShowWork?.cancel(); detailShowWork = nil
             scheduleDetailHide()
         }
     }
 
-    private func showDetail(_ kind: IslandDetailKind) {
-        guard islandModel.visible, let panel = notchWindow, panel.isVisible else { return }
-        detailAnchor = NSEvent.mouseLocation
-        islandModel.detail = kind
-        refreshDetail(kind)
+    private func showDetail(_ target: IslandDetailTarget, region: IslandHoverRegion) {
+        // 展开会移动图标并重建跟踪区；到期时重新读取图标的真实位置，不能只相信旧 enter。
+        guard islandModel.onScreen, !isHopping, !islandQuotaDragging, islandPointerMoved(),
+              let panel = notchWindow, panel.isVisible, let rect = region.rect(), rect.contains(NSEvent.mouseLocation) else {
+            detailHover = nil; detailHoverRegion = nil
+            scheduleDetailHide()
+            return
+        }
+        detailShownTarget = target
+        detailShownRegion = region
+        detailAnchor = NSPoint(x: rect.midX, y: rect.minY)
+        if case .quota(let id) = target { islandModel.quotaFocus = id }
+        islandModel.detail = target.kind
+        refreshDetail(target.kind)
         // 内容与尺寸都没变（同一种卡重新打开）时 SwiftUI 不会再上报：这里按已有尺寸直接摆好。
         applyDetail(islandModel.detailMetrics)
     }
@@ -791,6 +848,9 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         detailShowWork?.cancel(); detailShowWork = nil
         detailHideWork?.cancel(); detailHideWork = nil
         detailHover = nil
+        detailHoverRegion = nil
+        detailShownTarget = nil
+        detailShownRegion = nil
         guard islandModel.detail != nil else { return }
         islandModel.detail = nil
         detailWindow?.orderOut(nil)
@@ -802,7 +862,8 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         detailHideWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            if self.detailHover != nil { return }
+            if self.islandModel.onScreen, self.detailHover != nil, self.detailHoverRegion?.containsPointer == true { return }
+            self.detailHover = nil; self.detailHoverRegion = nil
             if let card = self.detailWindow, card.isVisible, card.frame.contains(NSEvent.mouseLocation) { return }
             self.hideDetail()
         }
@@ -810,10 +871,11 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
     }
 
-    // 按 SwiftUI 报来的尺寸摆放明细卡：水平居中在弹出时的鼠标位置（clamp 进屏幕），顶边在鼠标下方一点；
-    // 尺寸变化时按同一个锚点重算，卡片不会跟着鼠标乱跑。
+    // 明细卡固定在触发图标下方；展开完成或尺寸变化时重新读取图标位置，不用旧鼠标位置。
     private func applyDetail(_ metrics: DetailMetrics) {
         guard let kind = metrics.kind, kind == islandModel.detail, let panel = detailWindow else { return }
+        guard let rect = detailShownRegion?.rect() else { hideDetail(); return }
+        detailAnchor = NSPoint(x: rect.midX, y: rect.minY)
         // 尺寸优先用 SwiftUI 量好的（含卡片内边距）；还没量到时退回宿主的固有尺寸（Auto Layout 已算好内容尺寸）。
         var size = metrics.size
         if size.width < 2 || size.height < 2, let hosting = detailHosting {
@@ -824,7 +886,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         panel.setContentSize(size)
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(detailAnchor) }) ?? chosenScreen() else { return }
         let x = min(max(detailAnchor.x - size.width / 2, screen.frame.minX + 8), screen.frame.maxX - size.width - 8)
-        let y = max(detailAnchor.y - 14 - size.height, screen.frame.minY + 8)
+        let y = max(detailAnchor.y - 8 - size.height, screen.frame.minY + 8)
         panel.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
         panel.invalidateShadow()
         guard !panel.isVisible else { return }
@@ -839,17 +901,23 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
 
     // 「等你回答」或会话结束/终止时自动亮起：没有操作就收回胶囊；鼠标移入即解除限制（见 islandHovering）。
     private func revealIslandTemporarily(seconds: Double) {
-        guard islandModel.settings.autoExpand, !islandModel.hovering else { return }
+        guard islandModel.settings.autoExpand else { return }
+        // 通知到达前先修正漏掉退出事件的旧悬停；主动停在面板上时仍保持展开。
+        if islandModel.hovering, !islandContainsPointer() { islandModel.hovering = false }
+        guard !islandModel.hovering else { return }
         passiveRevealMouse = NSEvent.mouseLocation
         islandModel.autoRevealed = true
         islandAutoCollapse?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            guard let self, !self.islandModel.hovering else { return }
+            guard let self else { return }
+            self.islandAutoCollapse = nil
+            if self.islandModel.hovering, !self.islandContainsPointer() { self.islandModel.hovering = false }
             self.islandModel.autoRevealed = false
             self.scheduleIslandLayout()
         }
         islandAutoCollapse = work
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+        scheduleIslandLayout()
     }
 
     private func scheduleIslandLayout() {
@@ -906,7 +974,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         islandDragMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) { [weak self] event in
             guard let self, let panel = self.notchWindow, event.window === panel else { return event }
             // 所有屏幕都遵循「可移动」开关；拖圆环排序时也别把面板拖走。
-            guard self.islandModel.settings.movable, !self.islandQuotaDragging else { return event }
+            guard self.islandModel.settings.movable, !self.islandQuotaDragging, !self.islandModel.butlerReply.isOpen else { return event }
             switch event.type {
             case .leftMouseDown:
                 self.hideDetail()
@@ -952,16 +1020,16 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     }
 
     private func updateMenuBarYield() {
+        if islandModel.butlerReply.isOpen { menuBarYielding = false; menuBarLeftAt = nil; return }
+        // 在动画 / 鼠标 / 窗口可见性 guard 之前复查：全屏让位的透明窗口也必须能自己恢复。
+        recheckFullScreenYield()
         guard !islandDragging, !isHopping, islandLayoutTimer == nil, islandDisplayDriver == nil, let panel = notchWindow, panel.isVisible, let screen = panel.screen else { return }
+        if !islandQuotaDragging { recheckIslandHover() }
         let mouse = NSEvent.mouseLocation
         let bar = NSRect(x: screen.frame.minX, y: screen.frame.maxY - islandBarHeight(screen),
                          width: screen.frame.width, height: islandBarHeight(screen))
         let top = IslandLayoutTween.barFrame(width: panel.frame.width, height: islandBarHeight(screen), layout: islandModel.barLayout)
         let visibleBar = NSRect(x: panel.frame.minX + top.minX, y: bar.minY, width: top.width, height: bar.height)
-        // 光标在自动展开前已停在这里时，只有实际移动后才接管悬停与自动收起。
-        if passiveRevealMouse != nil, islandPointerMoved(), panel.frame.contains(mouse) {
-            islandHovering(true)
-        }
         if menuBarYielding {
             if bar.contains(mouse) { menuBarLeftAt = nil; return }
             // 等鼠标稳定离开再恢复，防止在菜单栏边缘反复闪现。
@@ -1097,6 +1165,8 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         let deviceChanged = islandModel.device != snapshot.device
         let networkChanged = islandModel.network != snapshot.network
         let linksChanged = islandModel.links != snapshot.links
+        let butlerChanged = islandModel.butler != snapshot.butler
+        let butlerHeightChanged = (islandModel.butler?.height ?? 0) != (snapshot.butler?.height ?? 0)
         let deviceVisibleChanged = (islandModel.device == nil) != (snapshot.device == nil)
         let networkVisibleChanged = (islandModel.network == nil) != (snapshot.network == nil)
         let displayChanged = settingsChanged && islandModel.settings.display != snapshot.settings.display
@@ -1109,6 +1179,10 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         if deviceChanged { islandModel.device = snapshot.device }
         if networkChanged { islandModel.network = snapshot.network }
         if linksChanged { islandModel.links = snapshot.links }
+        if butlerChanged {
+            islandModel.butler = snapshot.butler
+            if snapshot.butler?.enabled != true, islandModel.butlerReply.isOpen { closeButlerReply() }
+        }
 
         // 描边高亮：这次提醒涉及的会话，直到用户去终端看过（acked）才撤掉。
         if sessionsChanged { updateHighlights(from: before) }
@@ -1145,7 +1219,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         }
         // 选屏设置变了要立刻换屏（含重排）；普通读数变化不需要重新计算窗口几何。
         if displayChanged { refreshScreen() }
-        else if sessionsChanged || settingsChanged || usageChanged || deviceVisibleChanged || networkVisibleChanged || connectedChanged {
+        else if sessionsChanged || settingsChanged || usageChanged || deviceVisibleChanged || networkVisibleChanged || connectedChanged || butlerHeightChanged {
             scheduleIslandLayout()
         }
     }
@@ -1253,6 +1327,69 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         guard let pane else { return }
         // 分栏按钮的点击是同步的：即便视图刚切过来，这一次点击也能直接定位。
         webView.evaluateJavaScript("document.querySelector('#\(pane.workspace)Workspace [data-\(pane.workspace)-pane=\"\(pane.name)\"]')?.click()", completionHandler: nil)
+    }
+
+    private func quoteButlerMessage(_ id: String) {
+        guard let message = islandModel.butler?.displayMessages.first(where: { $0.id == id && $0.role == "butler" }) else { return }
+        beginButlerReply(message: message)
+    }
+
+    private func beginButlerReply(message: IslandButlerMessage? = nil) {
+        guard islandModel.butler?.enabled == true, !islandModel.butlerReply.sending, !islandDragging else { return }
+        hideDetail()
+        islandCollapse?.cancel()
+        islandAutoCollapse?.cancel()
+        islandModel.autoRevealed = false
+        if let message { islandModel.butlerReply.open(message: message) }
+        else { islandModel.butlerReply.isOpen = true }
+        menuBarYielding = false
+        setIslandYielding(false)
+        scheduleIslandLayout()
+        notchWindow?.makeKey()
+    }
+
+    private func closeButlerReply() {
+        islandModel.butlerReply.isOpen = false // 收起时保留引用、草稿与发送标识。
+        notchWindow?.makeFirstResponder(nil)
+        notchWindow?.resignKey()
+        scheduleIslandLayout()
+    }
+
+    private func sendButlerReply() {
+        if let editor = notchWindow?.firstResponder as? NSTextView, editor.hasMarkedText() { return }
+        guard islandModel.butlerReply.canSend else { return }
+        guard !apiToken.isEmpty, let url = URL(string: "http://127.0.0.1:4318/api/butler/reply") else {
+            islandModel.butlerReply.hint = "服务尚未连接，草稿已保留"
+            return
+        }
+        let draft = islandModel.butlerReply
+        var body: [String: Any] = ["text": draft.text, "requestId": draft.requestId]
+        if draft.enableOttyInput { body["enableOttyInput"] = true }
+        islandModel.butlerReply.enableOttyInput = false
+        body["attachments"] = draft.images.map { ["mimeType": "image/png", "data": $0.data.base64EncodedString()] }
+        if let message = draft.message { body["replyTo"] = message.id; body["quote"] = message.text }
+        if let id = draft.targetId { body["targetId"] = id }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = draft.enableOttyInput ? 45 : 15
+        request.setValue(apiToken, forHTTPHeaderField: "x-bobo-token")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        islandModel.butlerReply.sending = true
+        islandModel.butlerReply.hint = draft.enableOttyInput ? "正在开启 Otty 并重试…" : "正在发送…"
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if error == nil, let data, let receipt = try? JSONDecoder().decode(IslandButlerReplyReceipt.self, from: data) {
+                    self.islandModel.butlerReply.receive(receipt)
+                } else {
+                    self.islandModel.butlerReply.sending = false
+                    // 网络断开后继续使用同一标识查询回执，服务端会去重，不能自动另发一次。
+                    self.islandModel.butlerReply.hint = "未取得发送回执，草稿已保留；可重试查询"
+                }
+                self.scheduleIslandLayout()
+            }
+        }.resume()
     }
 
     // 左键切换窗口显示，右键或 Control+左键弹出菜单。
@@ -1426,6 +1563,8 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
 // 刘海面板用的窗口：AppKit 在屏幕重排（切换分辨率、唤醒）时会把无边框窗口压到菜单栏下方，
 // 这会把它从刘海区域拽走，所以直接放行不做约束（与 CodeIsland 的处理一致）。
 private final class NotchPanel: NSPanel {
+    var onResignKey: (() -> Void)?
+    override func resignKey() { super.resignKey(); onResignKey?() }
     override var canBecomeKey: Bool { true }
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
@@ -1462,6 +1601,14 @@ private final class IslandHostingView<Content: View>: NSHostingView<Content> {
 private final class HoverTrackingView: NSView {
     var onHoverChange: ((Bool) -> Void)?
     private var tracking: NSTrackingArea?
+    var hoverRegion: IslandHoverRegion {
+        IslandHoverRegion(rect: { [weak self] in
+            guard let self, let window = self.window, window.isVisible, !self.isHiddenOrHasHiddenAncestor else { return nil }
+            let rect = self.visibleRect.intersection(self.bounds)
+            guard !rect.isEmpty else { return nil }
+            return window.convertToScreen(self.convert(rect, to: nil))
+        })
+    }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -1474,8 +1621,7 @@ private final class HoverTrackingView: NSView {
     // 窗口做尺寸动画 / 跟踪区重建时 AppKit 会补发不准确的 enter、exit，直接信事件会让悬停（进而面板宽度）翻来覆去；
     // 按位置判定天然免疫，和滚动后补判（见 viewDidMoveToWindow）走的是同一个口径。
     private func reportHover() {
-        guard let window else { return }
-        onHoverChange?(bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil)))
+        onHoverChange?(hoverRegion.containsPointer)
     }
     // 滚动时鼠标不动、内容在动，AppKit 不会给「滑出光标」的行补发 mouseExited，那些行的悬停会一直亮着
     // （表现为滚动后多行同时 hover）。所以在滚动视图的可见区域变化后，按光标位置自己重判一次。
@@ -1499,6 +1645,54 @@ private struct HoverReporter: NSViewRepresentable {
         return view
     }
     func updateNSView(_ view: HoverTrackingView, context: Context) { view.onHoverChange = onChange }
+}
+
+// 明细卡另外保留对真实图标区域的弱引用，半秒后弹出时再读取，布局变化不会留下旧热区。
+private struct DetailHoverReporter: NSViewRepresentable {
+    var onChange: (Bool, IslandHoverRegion) -> Void
+    func makeNSView(context: Context) -> HoverTrackingView {
+        let view = HoverTrackingView()
+        updateNSView(view, context: context)
+        return view
+    }
+    func updateNSView(_ view: HoverTrackingView, context: Context) {
+        view.onHoverChange = { [weak view] hovering in
+            guard let view else { return }
+            onChange(hovering, view.hoverRegion)
+        }
+    }
+}
+
+// WindowServer 的屏幕窗口按前后顺序排列；全屏判定与自动选屏共用最上面的可见普通窗口。
+enum IslandWindowGeometry {
+    static func frontmostBounds(_ windows: [[String: Any]], pid: pid_t, displays: [CGRect]) -> CGRect? {
+        let bounds = windows.compactMap { window -> CGRect? in
+            guard let owner = window[kCGWindowOwnerPID as String] as? pid_t, owner == pid,
+                  let layer = window[kCGWindowLayer as String] as? Int, layer == 0,
+                  (window[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+                  let bounds = window[kCGWindowBounds as String] as? [String: Any],
+                  let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary), rect.width > 0, rect.height > 0 else { return nil }
+            return rect
+        }
+        let fullScreenDisplays = displays.filter { display in bounds.contains { isFullScreen($0, displays: [display]) } }
+        return bounds.first { rect in
+            guard displays.contains(where: { !rect.intersection($0).isEmpty }) else { return false }
+            // Chrome 的全屏工具栏也是 layer 0，甚至收在屏幕顶边之外。只有同屏存在全屏主窗口时，
+            // 才略过贴住顶边、横跨整屏的短条；前面的普通窗口仍优先，不能被后面的旧全屏窗口压住。
+            let toolbar = fullScreenDisplays.contains { display in
+                abs(rect.minX - display.minX) < 1 && abs(rect.width - display.width) < 1
+                    && rect.minY <= display.minY + 1 && rect.maxY <= display.minY + display.height * 0.2
+            }
+            return !toolbar
+        }
+    }
+
+    static func isFullScreen(_ rect: CGRect, displays: [CGRect]) -> Bool {
+        displays.contains { display in
+            abs(rect.minX - display.minX) < 1 && abs(rect.minY - display.minY) < 1
+                && abs(rect.width - display.width) < 1 && abs(rect.height - display.height) < 1
+        }
+    }
 }
 
 // 顶栏命中范围（网页坐标，左上角为原点）。数据未就绪或宽度已变化时透传，避免挡住按钮。
@@ -2113,6 +2307,159 @@ enum IslandBarGeometry {
     }
 }
 
+struct IslandButlerLead: Identifiable, Decodable, Equatable {
+    var id: String
+    var name: String
+    var text: String
+    var updatedAt: Double
+    var summaryAt: Double
+}
+
+struct IslandButlerMessage: Identifiable, Decodable, Equatable {
+    var id: String
+    var projectId: String
+    var name: String
+    var text: String
+    var at: Double
+    var summaryAt: Double
+    var role: String
+    var source: String?
+    var delivery: String?
+    var request: String? = nil
+}
+
+struct IslandButler: Decodable, Equatable {
+    var enabled: Bool
+    var revision: Int
+    var status: String
+    var message: String
+    var lead: IslandButlerLead?
+    var recentProjects: [IslandButlerLead]?
+    var messages: [IslandButlerMessage]? = nil
+    static let headerHeight: CGFloat = 28
+    static let rowSpacing: CGFloat = 6
+    static let listPadding: CGFloat = 4
+    static let bottomPadding: CGFloat = 8
+    static let maxListHeight: CGFloat = 184
+    static let replyListHeight: CGFloat = 112
+    static let maxVisibleRows = 3
+    var projects: [IslandButlerLead] { recentProjects ?? lead.map { [$0] } ?? [] }
+    var displayMessages: [IslandButlerMessage] {
+        messages ?? projects.reversed().map { IslandButlerMessage(id: $0.id, projectId: $0.id, name: $0.name, text: $0.text, at: $0.updatedAt, summaryAt: $0.summaryAt, role: "butler") }
+    }
+    // 首帧使用保守尺寸；SwiftUI 随后回报最近几条消息的实际高度，不按文字行数预留空白。
+    var listHeight: CGFloat { displayMessages.isEmpty ? 28 : min(Self.maxListHeight, CGFloat(min(displayMessages.count, Self.maxVisibleRows)) * 52) }
+    func visibleListHeight(measured: CGFloat?, replying: Bool = false) -> CGFloat {
+        guard !displayMessages.isEmpty else { return 28 }
+        let height = measured.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? listHeight
+        return min(height, replying ? Self.replyListHeight : Self.maxListHeight)
+    }
+    var height: CGFloat { enabled ? Self.headerHeight + listHeight + Self.bottomPadding : 0 }
+    var text: String { lead.map { $0.name + "：" + $0.text } ?? message }
+}
+
+struct IslandButlerReplyTarget: Identifiable, Decodable, Equatable {
+    var id: String
+    var name: String
+    var source: String
+    var title: String
+}
+
+struct IslandButlerReplyReceipt: Decodable {
+    var status: String?
+    var reason: String?
+    var error: String?
+    var retryable: Bool?
+    var action: String?
+    var candidates: [IslandButlerReplyTarget]?
+    var target: IslandButlerReplyDestination?
+}
+
+struct IslandButlerReplyDestination: Decodable { var name: String; var source: String; var title: String }
+
+// 草稿不进入摘要上下文；关闭便捷回复保留草稿，发送成功才清空。
+struct IslandReplyImage: Identifiable, Equatable {
+    let id = UUID().uuidString
+    let data: Data
+}
+
+struct IslandButlerReplyDraft: Equatable {
+    var isOpen = false
+    var message: IslandButlerMessage?
+    var text = ""
+    var images: [IslandReplyImage] = []
+    var requestId = UUID().uuidString
+    var targetId: String?
+    var candidates: [IslandButlerReplyTarget] = []
+    var sending = false
+    var uncertain = false
+    var needsOttyInput = false
+    var enableOttyInput = false
+    var hint = ""
+    var canSend: Bool { !sending && !uncertain && (candidates.isEmpty || targetId != nil) && (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty) }
+    var height: CGFloat { isOpen ? 60 + (message == nil ? 0 : 26) + (images.isEmpty ? 0 : 60) + (hint.isEmpty ? 0 : 30) : 0 }
+
+    mutating func addImages(_ data: [Data]) {
+        guard !sending else { return }
+        guard images.count + data.count <= 4 else { hint = "最多添加 4 张图片"; return }
+        guard data.allSatisfy({ $0.count <= 4 * 1024 * 1024 }) else { hint = "单张图片不能超过 4 MB"; return }
+        images += data.map { IslandReplyImage(data: $0) }
+        resetReceipt()
+    }
+    mutating func removeImage(_ id: String) {
+        guard !sending else { return }
+        images.removeAll { $0.id == id }; resetReceipt()
+    }
+
+    mutating func open(message: IslandButlerMessage?) {
+        isOpen = true
+        if self.message?.id != message?.id || self.message?.text != message?.text {
+            self.message = message
+            resetReceipt()
+        }
+    }
+    mutating func resetReceipt() {
+        requestId = UUID().uuidString
+        targetId = nil
+        candidates = []
+        uncertain = false
+        needsOttyInput = false
+        enableOttyInput = false
+        hint = ""
+    }
+    mutating func edit(_ value: String) {
+        guard !sending else { return }
+        let next = String(value.prefix(4096))
+        if text != next { text = next; resetReceipt() }
+    }
+    mutating func choose(_ target: IslandButlerReplyTarget) {
+        targetId = target.id
+        requestId = UUID().uuidString
+        uncertain = false
+        hint = "发往 \(target.name) · \(target.title)"
+    }
+    mutating func receive(_ receipt: IslandButlerReplyReceipt) {
+        sending = false
+        needsOttyInput = receipt.action == "enable-otty-input" && receipt.retryable == true
+        enableOttyInput = false
+        switch receipt.status {
+        case "sent":
+            let name = receipt.target?.name ?? message?.name ?? "原 Agent"
+            text = ""; images = []; message = nil; resetReceipt()
+            hint = "已发回 \(name) 的原会话"
+        case "choose":
+            candidates = receipt.candidates ?? []
+            targetId = nil
+            hint = candidates.isEmpty ? "没有可回复的会话，草稿已保留" : "请选择目标会话，再点发送"
+        case "failed":
+            uncertain = receipt.retryable != true
+            hint = (uncertain ? "送达待确认：" : "未送达：") + (receipt.reason ?? "草稿已保留")
+        case "sending": hint = "原请求正在发送，可稍后查询回执"
+        default: hint = receipt.error ?? receipt.reason ?? "发送回执暂不可读，草稿已保留"
+        }
+    }
+}
+
 struct IslandSnapshot: Decodable, Equatable {
     var connected: Bool
     var sessions: [IslandSession]
@@ -2127,10 +2474,23 @@ struct IslandSnapshot: Decodable, Equatable {
     // 服务线路（AI 服务 / 出口的延迟与出口 IP 纯净度，服务端 links.mjs 挂在状态流里）；
     // 缺字段时会话行右侧不画线路指示。
     var links: IslandLinks?
+    var butler: IslandButler?
 }
 
 // 悬停明细卡的内容类型：额度（额度圆环）、设备（设备指示）或网络（三枚灯珠指示）。
 enum IslandDetailKind: String { case quota, device, network }
+
+enum IslandDetailTarget: Equatable {
+    case quota(String), device, network
+    var kind: IslandDetailKind {
+        switch self { case .quota: return .quota; case .device: return .device; case .network: return .network }
+    }
+}
+
+struct IslandHoverRegion {
+    var rect: () -> NSRect?
+    var containsPointer: Bool { rect()?.contains(NSEvent.mouseLocation) == true }
+}
 
 // SwiftUI 明细卡量好自身尺寸后回报（kind 是卡片里实际渲染的内容）：
 // 原生按它调整小窗尺寸与位置，尺寸变了也只是重排、不跟着鼠标跑（见 Bobo.applyDetail）。
@@ -2157,6 +2517,10 @@ final class IslandModel: ObservableObject {
     @Published var network: IslandNetwork?
     // 服务线路（AI 服务 / 出口的延迟与出口 IP 纯净度）：会话行计时左侧的线路指示读它。
     @Published var links: IslandLinks?
+    @Published var butler: IslandButler?
+    @Published var butlerReply = IslandButlerReplyDraft()
+    @Published var butlerContentHeight: CGFloat? = nil
+    @Published var butlerComposerHeight: CGFloat? = nil
     // 悬停明细卡：nil 为不显示；detailMetrics 由 SwiftUI 上报，原生用它定窗口尺寸（见 Bobo.applyDetail）。
     @Published var detail: IslandDetailKind?
     @Published var detailMetrics = DetailMetrics()
@@ -2184,8 +2548,14 @@ final class IslandModel: ObservableObject {
     }
     var top: IslandSession? { waiting ?? sessions.first { $0.state == "working" } ?? sessions.first }
     // 展开：鼠标悬停，或（设置允许时）状态变化自动亮起（等你回答 3 秒、结束/终止 2 秒，见 revealIslandTemporarily）。
-    var expanded: Bool { hovering || (settings.autoExpand && autoRevealed) }
-    var visible: Bool { settings.notch && (!settings.hideWhenIdle || !busy.isEmpty) }
+    var expanded: Bool { butlerReply.isOpen || hovering || (settings.autoExpand && autoRevealed) }
+    var butlerListHeight: CGFloat { butler?.visibleListHeight(measured: butlerContentHeight, replying: butlerReply.isOpen) ?? 0 }
+    var butlerHeight: CGFloat {
+        guard expanded, butler?.enabled == true else { return 0 }
+        let composer = butlerReply.isOpen ? (butlerComposerHeight ?? butlerReply.height) : 0
+        return IslandButler.headerHeight + butlerListHeight + IslandButler.bottomPadding + composer
+    }
+    var visible: Bool { settings.notch && (!settings.hideWhenIdle || !busy.isEmpty || butlerReply.isOpen) }
     // 折叠常驻保留静态状态色；只有可见展开态才运行呼吸动画。
     var onScreen: Bool { visible && !yielding }
     var motionActive: Bool { onScreen && screenAwake && expanded }
@@ -2277,6 +2647,13 @@ struct IslandView: View {
     var onActivate: () -> Void
     // 点头像（含「+N」徽标）：打开主窗口的通知岛视图并定位这一家的分栏；nil 是默认的置灰 bobo（通知岛设置）。
     var onAvatar: (String?) -> Void
+    var onButler: () -> Void
+    var onButlerFocus: (String) -> Void
+    var onButlerQuote: (String) -> Void
+    var onButlerCompose: () -> Void
+    var onButlerSend: () -> Void
+    var onButlerClose: () -> Void
+    var onButlerResize: () -> Void
     // 点额度圆环：「展开并排」时切这一家的显示范围（5 小时 / 本周 / 账单月…），「点击切换」时切来源。
     var onQuota: () -> Void
     var onQuotaRange: (String) -> Void
@@ -2289,7 +2666,7 @@ struct IslandView: View {
     // 点齿轮：打开主窗口的设置视图。
     var onSettings: () -> Void
     // 额度 / 设备 / 网络指示的悬停变化：满半秒由原生弹明细卡（见 Bobo.detailHoverChanged）。
-    var onDetail: (IslandDetailKind, Bool) -> Void
+    var onDetail: (IslandDetailTarget, Bool, IslandHoverRegion) -> Void
     var onQuit: () -> Void
     // 额度圆环的拖动排序：拖动期间按本地草稿顺序渲染（实时互换位置），松手把新顺序合并后提交给服务端；
     // 草稿保留到快照里的顺序与它一致（或超时兜底），中间不会闪回旧顺序。
@@ -2305,6 +2682,15 @@ struct IslandView: View {
                 if model.expanded {
                     Rectangle().fill(.white.opacity(0.14)).frame(height: 0.5).padding(.horizontal, 12)
                     list
+                    if let butler = model.butler, butler.enabled {
+                        IslandButlerList(butler: butler, avatarForProject: { model.avatarImage($0) }, viewportHeight: model.butlerListHeight,
+                            onSelect: onButler, onCompose: onButlerCompose, onFocus: onButlerFocus, onQuote: onButlerQuote,
+                            onMeasure: { height in if model.butlerContentHeight != height { model.butlerContentHeight = height } })
+                        if model.butlerReply.isOpen {
+                            IslandButlerComposer(draft: $model.butlerReply, onSend: onButlerSend, onClose: onButlerClose, onFocus: onButlerFocus,
+                                onMeasure: { height in if model.butlerComposerHeight != height { model.butlerComposerHeight = height } })
+                        }
+                    }
                 }
             }
             .frame(width: rect.width, height: geometry.size.height, alignment: .top)
@@ -2314,14 +2700,16 @@ struct IslandView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .offset(x: rect.minX)
         }
+        .onChange(of: model.butlerReply.height) { _ in onButlerResize() }
+        .onChange(of: model.butlerContentHeight) { _ in onButlerResize() }
+        .onChange(of: model.butlerComposerHeight) { _ in onButlerResize() }
     }
 
     // 额度圆环的悬停：明细卡跟着鼠标停的那一家换（并排显示时尤其重要）。移开时保留焦点——
     // 鼠标从圆环移到明细卡上时卡片内容不该跳回当前选中的那家（下一枚圆环悬停时会再覆盖）。
-    private func quotaHover(_ id: String) -> (Bool) -> Void {
-        { hovering in
-            if hovering { model.quotaFocus = id }
-            onDetail(.quota, hovering)
+    private func quotaHover(_ id: String) -> (Bool, IslandHoverRegion) -> Void {
+        { hovering, region in
+            onDetail(.quota(id), hovering, region)
         }
     }
 
@@ -2441,11 +2829,11 @@ struct IslandView: View {
                 }
                 // 额度右边的设备指示（CPU 压力灯 + 磁盘 / 内存双弧）：始终显示，不随悬停出现。
                 if let device = model.device {
-                    IslandDeviceChip(device: device, action: onDevice, onHover: { onDetail(.device, $0) })
+                    IslandDeviceChip(device: device, action: onDevice, onHover: { onDetail(.device, $0, $1) })
                 }
                 // 设备右边的网络指示（三段竖条：上 = 延迟、中 = 下载、下 = 上传）。
                 if let network = model.network {
-                    IslandNetworkChip(network: network, action: onNetwork, onHover: { onDetail(.network, $0) })
+                    IslandNetworkChip(network: network, action: onNetwork, onHover: { onDetail(.network, $0, $1) })
                 }
                 // 展开时一并显示操作按钮，布局也同时预留两格；跨越顶部栏不再改变宽度。
                 if model.expanded {
@@ -2483,6 +2871,489 @@ struct IslandView: View {
             .padding(.bottom, 9)
         }
         .frame(maxHeight: .infinity)
+    }
+}
+
+// 管家消息流：新进展追加气泡，头像打开原会话，消息打开引用回复。
+struct IslandButlerList: View {
+    var butler: IslandButler
+    var avatarImage: NSImage? = nil
+    var avatarForProject: ((String) -> NSImage?)? = nil
+    var viewportHeight: CGFloat? = nil
+    var onSelect: () -> Void
+    var onCompose: () -> Void = {}
+    var onFocus: (String) -> Void = { _ in }
+    var onQuote: (String) -> Void = { _ in }
+    var onMeasure: (CGFloat) -> Void = { _ in }
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var following = true
+    @State private var unread = 0
+    @State private var knownIds: Set<String> = []
+    private var listHeight: CGFloat { viewportHeight ?? butler.listHeight }
+    private static let tailID = "bobo-butler-tail"
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Button(action: onSelect) {
+                    HStack(spacing: 6) {
+                        Text("bobo 管家").fontWeight(.medium).foregroundStyle(.white.opacity(0.65))
+                        Text("\(butler.displayMessages.count)").monospacedDigit().foregroundStyle(.white.opacity(0.35))
+                    }
+                }
+                .buttonStyle(.plain).help(butler.message + "\n查看全部消息")
+                .accessibilityLabel("bobo 管家，\(butler.displayMessages.count) 条消息，查看全部消息")
+                Spacer(minLength: 0)
+                Button(action: onCompose) {
+                    Image(systemName: "square.and.pencil").font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.65)).frame(width: 24, height: 24).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).accessibilityLabel("在通知岛写消息")
+                .help("直接在通知岛输入新指令")
+            }
+            .font(.system(size: 10)).padding(.horizontal, 14)
+            .frame(maxWidth: .infinity, minHeight: IslandButler.headerHeight, maxHeight: IslandButler.headerHeight, alignment: .leading)
+            if butler.displayMessages.isEmpty {
+                Text("有新的进展时，bobo 会发来消息。 ").font(.system(size: 11)).foregroundStyle(.white.opacity(0.5))
+                    .frame(maxWidth: .infinity, minHeight: listHeight, maxHeight: listHeight, alignment: .leading)
+                    .padding(.horizontal, 14)
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical) {
+                        VStack(spacing: 0) {
+                            LazyVStack(spacing: IslandButler.rowSpacing) {
+                                ForEach(butler.displayMessages) { message in
+                                    IslandButlerMessageRow(message: message, avatarImage: avatarForProject?(message.projectId) ?? avatarImage,
+                                        onFocus: { butler.messages == nil ? onSelect() : onFocus(message.id) },
+                                        onQuote: { butler.messages == nil || message.role == "user" ? onSelect() : onQuote(message.id) })
+                                        .id(message.id)
+                                        .transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .opacity))
+                                }
+                            }
+                            .padding(.vertical, IslandButler.listPadding)
+                            Color.clear.frame(height: 0).background(GeometryReader { geometry in
+                                Color.clear.preference(key: IslandButlerTailKey.self, value: geometry.frame(in: .named("butlerMessages")).maxY)
+                            }).id(Self.tailID)
+                        }
+                    }
+                    .coordinateSpace(name: "butlerMessages")
+                    .onPreferenceChange(IslandButlerTailKey.self) { y in
+                        following = y <= listHeight + 6
+                        if following { unread = 0 }
+                    }
+                    .onAppear {
+                        knownIds = Set(butler.displayMessages.map(\.id))
+                        if !butler.displayMessages.isEmpty {
+                            DispatchQueue.main.async { proxy.scrollTo(Self.tailID, anchor: .bottom) }
+                        }
+                    }
+                    .onChange(of: butler.displayMessages) { messages in
+                        let ids = messages.map(\.id)
+                        let added = Set(ids).subtracting(knownIds)
+                        knownIds = Set(ids)
+                        guard let id = ids.last else { return }
+                        if following || (butler.displayMessages.last?.role == "user" && added.contains(id)) {
+                            DispatchQueue.main.async {
+                                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) { proxy.scrollTo(Self.tailID, anchor: .bottom) }
+                            }
+                        } else { unread += added.count }
+                    }
+                    .onChange(of: listHeight) { _ in
+                        if following { DispatchQueue.main.async { proxy.scrollTo(Self.tailID, anchor: .bottom) } }
+                    }
+                    .overlay(alignment: .bottomTrailing) {
+                        if unread > 0 {
+                            Button("\(unread) 条新消息 ↓") {
+                                proxy.scrollTo(Self.tailID, anchor: .bottom)
+                                unread = 0
+                            }
+                            .font(.system(size: 10, weight: .medium)).buttonStyle(.plain)
+                            .padding(.horizontal, 9).padding(.vertical, 5)
+                            .background(Color(red: 0.18, green: 0.35, blue: 0.60), in: Capsule())
+                            .padding(.trailing, 18).padding(.bottom, 3)
+                        }
+                    }
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: butler.displayMessages.map(\.id))
+                }
+                .frame(height: listHeight)
+                // 只量最近三条的自然高度，历史仍懒加载；窗口高度与实际排版保持一致。
+                .background(alignment: .top) {
+                    VStack(spacing: IslandButler.rowSpacing) {
+                        ForEach(Array(butler.displayMessages.suffix(IslandButler.maxVisibleRows))) { message in
+                            IslandButlerMessageRow(message: message, avatarImage: avatarForProject?(message.projectId) ?? avatarImage, onFocus: {}, onQuote: {})
+                        }
+                    }
+                    .padding(.vertical, IslandButler.listPadding)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .background(GeometryReader { geometry in
+                        Color.clear.preference(key: IslandButlerListHeightKey.self, value: ceil(geometry.size.height))
+                    })
+                    .hidden().allowsHitTesting(false).accessibilityHidden(true)
+                }
+            }
+        }
+        .padding(.bottom, IslandButler.bottomPadding)
+        .frame(height: IslandButler.headerHeight + listHeight + IslandButler.bottomPadding)
+        .background(.white.opacity(0.055))
+        .overlay(alignment: .top) { Rectangle().fill(.white.opacity(0.16)).frame(height: 1).padding(.horizontal, 14) }
+        .onPreferenceChange(IslandButlerListHeightKey.self) { height in
+            if height.isFinite && height > 0 { onMeasure(height) }
+        }
+    }
+}
+
+struct IslandButlerListHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+struct IslandButlerTailKey: PreferenceKey {
+    static var defaultValue: CGFloat = .infinity
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+// 保留 NSTextInputClient 的候选词生命周期；不在组合输入时回写 string 或拦截选词键。
+final class IslandReplyTextView: NSTextView {
+    var imagePasteboard = NSPasteboard.general
+    var lastInputAt = Date()
+    var onSend: () -> Void = {}
+    var onClose: () -> Void = {}
+    var onImages: ([Data]) -> Void = { _ in }
+    var onPasteError: (String) -> Void = { _ in }
+    override func keyDown(with event: NSEvent) {
+        lastInputAt = Date()
+        if event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "v" { paste(nil); return }
+        if !hasMarkedText() {
+            if event.keyCode == 53 { onClose(); return }
+            if event.keyCode == 36 && event.modifierFlags.contains(.command) { onSend(); return }
+        }
+        super.keyDown(with: event)
+    }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "v" {
+            paste(nil); return true
+        }
+        if event.keyCode == 36 && event.modifierFlags.contains(.command) {
+            if !hasMarkedText() { onSend() }
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)), imagePasteboard.canReadObject(forClasses: [NSImage.self, NSURL.self], options: [.urlReadingFileURLsOnly: true]) { return isEditable }
+        return super.validateUserInterfaceItem(item)
+    }
+    override func paste(_ sender: Any?) {
+        guard isEditable else { return }
+        lastInputAt = Date()
+        var images = imagePasteboard.readObjects(forClasses: [NSImage.self]) as? [NSImage] ?? []
+        if images.isEmpty, let files = imagePasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] {
+            images = files.filter { ["png", "jpg", "jpeg", "heic", "webp", "tiff", "gif"].contains($0.pathExtension.lowercased()) }.compactMap { NSImage(contentsOf: $0) }
+        }
+        if !images.isEmpty {
+            var payload: [Data] = []
+            for image in images {
+                guard let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
+                      bitmap.pixelsWide * bitmap.pixelsHigh <= 40_000_000,
+                      let png = bitmap.representation(using: .png, properties: [:]) else {
+                    onPasteError("无法读取这张图片，请复制 PNG 或 JPEG 图片后重试"); return
+                }
+                payload.append(png)
+            }
+            onImages(payload)
+        } else { pasteAsPlainText(sender) }
+    }
+}
+
+struct IslandReplyEditor: NSViewRepresentable {
+    @Binding var text: String
+    var enabled: Bool
+    var pasteRequest: Int = 0
+    var onSend: () -> Void
+    var onClose: () -> Void
+    var onImages: ([Data]) -> Void
+    var onPasteError: (String) -> Void
+    var onHeight: (CGFloat) -> Void
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        let editor = IslandReplyTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 38))
+        editor.isRichText = false
+        editor.isAutomaticQuoteSubstitutionEnabled = false
+        editor.isAutomaticDashSubstitutionEnabled = false
+        editor.allowsUndo = true
+        editor.drawsBackground = false
+        editor.font = .systemFont(ofSize: 13)
+        editor.textColor = .white.withAlphaComponent(0.92)
+        editor.insertionPointColor = .white
+        editor.textContainerInset = NSSize(width: 0, height: 6)
+        editor.textContainer?.lineFragmentPadding = 0
+        editor.isVerticallyResizable = true
+        editor.isHorizontallyResizable = false
+        editor.autoresizingMask = [.width]
+        editor.textContainer?.widthTracksTextView = true
+        editor.textContainer?.containerSize = NSSize(width: 400, height: CGFloat.greatestFiniteMagnitude)
+        editor.delegate = context.coordinator
+        editor.setAccessibilityLabel("回复内容，可粘贴图片")
+        scroll.documentView = editor
+        DispatchQueue.main.async { [weak editor] in
+            guard let editor else { return }
+            editor.window?.makeFirstResponder(editor)
+        }
+        return scroll
+    }
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        guard let editor = scroll.documentView as? IslandReplyTextView else { return }
+        context.coordinator.parent = self
+        editor.onSend = onSend; editor.onClose = onClose
+        editor.onImages = onImages; editor.onPasteError = onPasteError
+        editor.isEditable = enabled
+        if !editor.hasMarkedText(), editor.string != text { editor.string = text }
+        if context.coordinator.pasteRequest != pasteRequest {
+            context.coordinator.pasteRequest = pasteRequest
+            DispatchQueue.main.async { [weak editor] in editor?.paste(nil) }
+        }
+        context.coordinator.measure(editor)
+    }
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: IslandReplyEditor
+        var height: CGFloat = 0
+        var pasteRequest = 0
+        init(_ parent: IslandReplyEditor) { self.parent = parent }
+        func textDidChange(_ notification: Notification) {
+            guard let editor = notification.object as? IslandReplyTextView else { return }
+            // 候选词也同步到草稿，外部渲染绝不覆盖 marked text。
+            parent.text = editor.string
+            measure(editor)
+        }
+        func measure(_ editor: NSTextView) {
+            guard let container = editor.textContainer, let manager = editor.layoutManager else { return }
+            manager.ensureLayout(for: container)
+            let next = min(100, max(28, ceil(manager.usedRect(for: container).height + 12)))
+            guard next != height else { return }
+            height = next
+            DispatchQueue.main.async { [weak self] in self?.parent.onHeight(next) }
+        }
+    }
+}
+
+struct IslandButlerComposer: View {
+    @Binding var draft: IslandButlerReplyDraft
+    var onSend: () -> Void
+    var onClose: () -> Void
+    var onFocus: (String) -> Void
+    var onMeasure: (CGFloat) -> Void = { _ in }
+    @State private var editorHeight: CGFloat = 28
+    @State private var pasteRequest = 0
+    private var content: Binding<String> { Binding(get: { draft.text }, set: { draft.edit($0) }) }
+    private var selectedTarget: IslandButlerReplyTarget? { draft.candidates.first { $0.id == draft.targetId } }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let message = draft.message {
+                HStack(spacing: 7) {
+                    Image(systemName: "arrow.turn.down.right").font(.system(size: 10))
+                    Text("\(message.name) · \(message.text)").lineLimit(1)
+                    Spacer(minLength: 0)
+                    Button { draft.open(message: nil) } label: { Image(systemName: "xmark").font(.system(size: 9)) }
+                        .buttonStyle(.plain).disabled(draft.sending).accessibilityLabel("取消引用")
+                }
+                .font(.system(size: 11)).foregroundStyle(.white.opacity(0.55)).padding(.horizontal, 12).frame(height: 20)
+            }
+            if !draft.images.isEmpty {
+                HStack(spacing: 8) {
+                    ForEach(draft.images) { attachment in
+                        if let image = NSImage(data: attachment.data) {
+                            Image(nsImage: image).resizable().scaledToFill().frame(width: 48, height: 48)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                                .overlay(alignment: .topTrailing) {
+                                    Button { draft.removeImage(attachment.id) } label: {
+                                        Image(systemName: "xmark.circle.fill").symbolRenderingMode(.palette)
+                                            .foregroundStyle(.white, .black.opacity(0.8)).font(.system(size: 14))
+                                    }.buttonStyle(.plain).disabled(draft.sending).accessibilityLabel("移除图片")
+                                }
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }.padding(.horizontal, 12)
+            }
+            HStack(alignment: .center, spacing: 10) {
+                Menu {
+                    Button("粘贴图片") { pasteRequest += 1 }
+                    if let message = draft.message { Button("打开原对话") { onFocus(message.id) } }
+                    Button("复制指令") {
+                        let quote = draft.message.map { "以下是 bobo 的进展摘录，仅作为背景：\n> " + $0.text.replacingOccurrences(of: "\n", with: "\n> ") + "\n\n我的新指令：\n" } ?? ""
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(quote + draft.text, forType: .string)
+                    }.disabled(draft.text.isEmpty)
+                    Divider()
+                    Button("收起，保留草稿", action: onClose)
+                } label: { Image(systemName: "plus").font(.system(size: 16)).foregroundStyle(.white.opacity(0.7)) }
+                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                    .disabled(draft.sending).help("粘贴图片与更多操作")
+                ZStack(alignment: .topLeading) {
+                    IslandReplyEditor(text: content, enabled: !draft.sending, pasteRequest: pasteRequest, onSend: onSend, onClose: onClose,
+                        onImages: { draft.addImages($0) }, onPasteError: { draft.hint = $0 }, onHeight: { editorHeight = $0 })
+                    if draft.text.isEmpty {
+                        Text(draft.message == nil ? "输入指令…" : "回复 \(draft.message!.name)…")
+                            .font(.system(size: 13)).foregroundStyle(.white.opacity(0.5)).padding(.top, 6).allowsHitTesting(false)
+                    }
+                }.frame(height: editorHeight)
+                Button(action: onSend) {
+                    Image(systemName: draft.sending ? "ellipsis" : "arrow.up")
+                        .font(.system(size: 14, weight: .semibold)).frame(width: 30, height: 30)
+                        .foregroundStyle(draft.canSend ? Color.black : Color.white.opacity(0.35))
+                        .background(draft.canSend ? Color.white.opacity(0.95) : Color.white.opacity(0.12), in: Circle())
+                }.buttonStyle(.plain).disabled(!draft.canSend).accessibilityLabel("发送回复").help("发送（⌘ Return）")
+            }
+            .padding(.leading, 14).padding(.trailing, 8).padding(.vertical, 7)
+            .background(Color(white: 0.16), in: RoundedRectangle(cornerRadius: 23))
+            .overlay { RoundedRectangle(cornerRadius: 23).strokeBorder(.white.opacity(0.17), lineWidth: 1) }
+            if !draft.candidates.isEmpty {
+                Menu {
+                    ForEach(draft.candidates) { target in
+                        Button("\(target.name) · \(target.source) · \(target.title)") { draft.choose(target) }
+                    }
+                } label: { Text(selectedTarget.map { "\($0.name) · \($0.title)" } ?? "选择会话").lineLimit(1) }
+                    .menuStyle(.borderlessButton).font(.system(size: 11)).disabled(draft.sending).padding(.horizontal, 12)
+            }
+            if !draft.hint.isEmpty {
+                Text(draft.hint).font(.system(size: 10)).foregroundStyle(draft.uncertain || draft.hint.hasPrefix("未") ? .orange : .white.opacity(0.5))
+                    .lineLimit(2).fixedSize(horizontal: false, vertical: true).padding(.horizontal, 12)
+            }
+            if draft.uncertain {
+                Button("确认原会话未收到，重新发送") { draft.requestId = UUID().uuidString; draft.uncertain = false; onSend() }
+                    .buttonStyle(.plain).foregroundStyle(.orange).font(.system(size: 10)).disabled(draft.sending).padding(.horizontal, 12)
+            }
+            if draft.needsOttyInput {
+                HStack(spacing: 8) {
+                    Text("允许本机程序向 Otty 终端输入")
+                        .font(.system(size: 10)).foregroundStyle(.white.opacity(0.6))
+                    Spacer(minLength: 0)
+                    Button(draft.sending ? "正在开启…" : "开启并重试") { draft.enableOttyInput = true; onSend() }
+                        .buttonStyle(.plain).font(.system(size: 11, weight: .medium)).foregroundStyle(.white)
+                        .disabled(!draft.canSend)
+                        .accessibilityLabel("开启 Otty 程序输入并重试发送")
+                }.padding(.horizontal, 12)
+            }
+        }
+        .padding(.horizontal, 12).padding(.top, 4).padding(.bottom, 12)
+        .environment(\.colorScheme, .dark)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(GeometryReader { geometry in
+            Color.clear.preference(key: IslandButlerComposerHeightKey.self, value: ceil(geometry.size.height))
+        })
+        .onPreferenceChange(IslandButlerComposerHeightKey.self) { height in
+            if height.isFinite && height > 0 { onMeasure(height) }
+        }
+    }
+}
+
+struct IslandButlerComposerHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+struct IslandButlerMessageRow: View {
+    var message: IslandButlerMessage
+    var avatarImage: NSImage?
+    var onFocus: () -> Void
+    var onQuote: () -> Void
+    @State private var hovering = false
+    private let accent = Color(red: 0.48, green: 0.70, blue: 1)
+    private var outgoing: Bool { message.role == "user" }
+    var body: some View {
+        HStack(alignment: .top, spacing: 7) {
+            if outgoing { Spacer(minLength: 32) } else {
+                Button(action: onFocus) {
+                    IslandAvatarFace(image: avatarImage,
+                        logo: message.source.flatMap { IslandMetrics.icon(id: IslandMetrics.providerId(forSource: $0)) },
+                        badgeColor: IslandMetrics.providerBadgeColor(forSource: message.source), color: accent)
+                        .frame(width: 24, height: 24)
+                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous)).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).help("打开 \(message.name) 的原对话")
+                .accessibilityLabel("打开 \(message.name) 的原对话")
+            }
+            VStack(alignment: outgoing ? .trailing : .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(message.name).font(.system(size: 10.5, weight: .medium)).foregroundStyle(.white.opacity(0.75)).lineLimit(1)
+                    Text(Date(timeIntervalSince1970: message.at / 1000), style: .time)
+                        .font(.system(size: 9)).foregroundStyle(.white.opacity(0.35))
+                    if outgoing, message.delivery == "failed" {
+                        Image(systemName: "exclamationmark.circle").font(.system(size: 9)).foregroundStyle(.orange)
+                    }
+                }
+                .padding(.leading, outgoing ? 0 : 5).padding(.trailing, outgoing ? 5 : 0)
+                Button(action: onQuote) {
+                    IslandButlerMessageContent(message: message)
+                    .padding(.leading, outgoing ? 10 : 13).padding(.trailing, outgoing ? 13 : 10).padding(.vertical, 6)
+                    .background(IslandButlerBubble().fill(outgoing ? Color(red: 0.11, green: 0.22, blue: 0.37) : Color.white.opacity(hovering ? 0.10 : 0.065)).scaleEffect(x: outgoing ? -1 : 1, y: 1))
+                    .overlay(IslandButlerBubble().strokeBorder(.white.opacity(hovering ? 0.12 : 0.06), lineWidth: 0.5).scaleEffect(x: outgoing ? -1 : 1, y: 1))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).fixedSize(horizontal: false, vertical: true).onHover { hovering = $0 }
+                .help((message.summaryAt == 0 && !outgoing ? "本机摘录\n" : "") + message.text + (outgoing ? "\n点击查看完整指令" : "\n点击引用回复"))
+                .accessibilityLabel(outgoing ? message.text : "引用 \(message.name) 的消息：\(message.text)")
+                .contextMenu { if !outgoing { Button("引用回复", action: onQuote); Button("打开原对话", action: onFocus) } }
+            }
+            if outgoing {
+                Text("我").font(.system(size: 10, weight: .medium)).foregroundStyle(accent)
+                    .frame(width: 20, height: 20).background(accent.opacity(0.12), in: Circle()).padding(.top, 5)
+            } else { Spacer(minLength: 32) }
+        }
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+struct IslandButlerMessageContent: View {
+    var message: IslandButlerMessage
+    private var request: String { (message.request ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if message.role != "user", !request.isEmpty {
+                Text(request).font(.system(size: 10.5)).foregroundStyle(.white.opacity(0.55))
+                    .lineLimit(3).fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 7)
+                    .overlay(alignment: .leading) { Capsule().fill(.white.opacity(0.20)).frame(width: 1.5).padding(.vertical, 1) }
+                    .accessibilityLabel("原对话中的用户指令：" + request)
+            }
+            Text(message.text).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.9))
+                .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+// 收到的消息气泡：左下角留出小尾巴，与会话状态行区分。
+struct IslandButlerBubble: InsettableShape {
+    var insetAmount: CGFloat = 0
+    func inset(by amount: CGFloat) -> some InsettableShape {
+        var copy = self
+        copy.insetAmount += amount
+        return copy
+    }
+    func path(in rect: CGRect) -> Path {
+        let r = rect.insetBy(dx: insetAmount, dy: insetAmount)
+        let left = r.minX + 4, radius: CGFloat = 9
+        var p = Path()
+        p.move(to: CGPoint(x: left + radius, y: r.minY))
+        p.addLine(to: CGPoint(x: r.maxX - radius, y: r.minY))
+        p.addQuadCurve(to: CGPoint(x: r.maxX, y: r.minY + radius), control: CGPoint(x: r.maxX, y: r.minY))
+        p.addLine(to: CGPoint(x: r.maxX, y: r.maxY - radius))
+        p.addQuadCurve(to: CGPoint(x: r.maxX - radius, y: r.maxY), control: CGPoint(x: r.maxX, y: r.maxY))
+        p.addLine(to: CGPoint(x: left + radius, y: r.maxY))
+        p.addQuadCurve(to: CGPoint(x: left + 1, y: r.maxY - 5), control: CGPoint(x: left + 4, y: r.maxY))
+        p.addQuadCurve(to: CGPoint(x: r.minX, y: r.maxY - 2), control: CGPoint(x: left - 1, y: r.maxY - 2))
+        p.addQuadCurve(to: CGPoint(x: left, y: r.maxY - 16), control: CGPoint(x: left, y: r.maxY - 8))
+        p.addLine(to: CGPoint(x: left, y: r.minY + radius))
+        p.addQuadCurve(to: CGPoint(x: left + radius, y: r.minY), control: CGPoint(x: left, y: r.minY))
+        p.closeSubpath()
+        return p
     }
 }
 
@@ -2646,7 +3517,7 @@ struct IslandQuotaChip: View {
     let provider: IslandQuotaProvider
     let window: IslandQuotaWindow
     var selected = true
-    var onHover: ((Bool) -> Void)? = nil
+    var onHover: ((Bool, IslandHoverRegion) -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
@@ -2680,7 +3551,7 @@ struct IslandQuotaChip: View {
             .background(Capsule().fill(.white.opacity(hovering ? IslandMetrics.fillHover : (selected ? IslandMetrics.fillIdle : 0))))
             .contentShape(Capsule())
             .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovering)
-            .background(HoverReporter { hovering = $0; onHover?($0) })
+            .background(DetailHoverReporter { hovering = $0; onHover?($0, $1) })
     }
 }
 
@@ -2690,7 +3561,7 @@ struct IslandQuotaChip: View {
 struct IslandDeviceChip: View {
     let device: IslandDevice
     let action: () -> Void
-    var onHover: ((Bool) -> Void)? = nil
+    var onHover: ((Bool, IslandHoverRegion) -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
@@ -2733,7 +3604,7 @@ struct IslandDeviceChip: View {
         }
         .buttonStyle(.plain)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovering)
-        .background(HoverReporter { hovering = $0; onHover?($0) })
+        .background(DetailHoverReporter { hovering = $0; onHover?($0, $1) })
     }
 }
 
@@ -2743,7 +3614,7 @@ struct IslandDeviceChip: View {
 struct IslandNetworkChip: View {
     let network: IslandNetwork
     let action: () -> Void
-    var onHover: ((Bool) -> Void)? = nil
+    var onHover: ((Bool, IslandHoverRegion) -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
@@ -2778,7 +3649,7 @@ struct IslandNetworkChip: View {
         }
         .buttonStyle(.plain)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovering)
-        .background(HoverReporter { hovering = $0; onHover?($0) })
+        .background(DetailHoverReporter { hovering = $0; onHover?($0, $1) })
     }
 }
 
@@ -3164,30 +4035,14 @@ struct NotchIconButton: View {
 
 // 折叠态的头像：优先显示按会话 ID 稳定哈希选出的 bobo 图；缺少资源时回退为圆角方块脸。
 // 运行中 / 等你回答时下面的状态灯在可见展开态缓慢呼吸（见 IslandDot）；折叠常驻时静态。
-struct IslandAvatar: View {
+// 顶部会话头像和管家消息共用同一个盒面与来源标识，消息历史不显示实时状态灯。
+struct IslandAvatarFace: View {
     let image: NSImage?
     let logo: NSImage?
     let badgeColor: Color
     let color: Color
-    let state: String
-    let stateColor: Color
-    // 只在用户查看展开态时允许状态灯呼吸。
-    let animating: Bool
-
-    init(image: NSImage? = nil, logo: NSImage? = nil, badgeColor: Color = Color(white: 0.94), color: Color, state: String, stateColor: Color, animating: Bool = false) {
-        self.image = image
-        self.logo = logo
-        self.badgeColor = badgeColor
-        self.color = color
-        self.state = state
-        self.stateColor = stateColor
-        self.animating = animating
-    }
-
-    private var pulsing: Bool { animating && (state == "working" || state == "waiting") }
-
     @ViewBuilder
-    private var face: some View {
+    var body: some View {
         if let image {
             ZStack {
                 Image(nsImage: image)
@@ -3223,11 +4078,34 @@ struct IslandAvatar: View {
                 )
         }
     }
+}
+
+struct IslandAvatar: View {
+    let image: NSImage?
+    let logo: NSImage?
+    let badgeColor: Color
+    let color: Color
+    let state: String
+    let stateColor: Color
+    // 只在用户查看展开态时允许状态灯呼吸。
+    let animating: Bool
+
+    init(image: NSImage? = nil, logo: NSImage? = nil, badgeColor: Color = Color(white: 0.94), color: Color, state: String, stateColor: Color, animating: Bool = false) {
+        self.image = image
+        self.logo = logo
+        self.badgeColor = badgeColor
+        self.color = color
+        self.state = state
+        self.stateColor = stateColor
+        self.animating = animating
+    }
+
+    private var pulsing: Bool { animating && (state == "working" || state == "waiting") }
 
     var body: some View {
         // 脸与其它图标一样大（glyphSize），下面的状态灯只占 1pt 间距，整体不超过非刘海屏的 24pt 栏高。
         VStack(spacing: 1) {
-            face
+            IslandAvatarFace(image: image, logo: logo, badgeColor: badgeColor, color: color)
                 .frame(width: IslandMetrics.glyphSize, height: IslandMetrics.glyphSize)
                 .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             IslandDot(color: stateColor, pulsing: pulsing, size: 4)
