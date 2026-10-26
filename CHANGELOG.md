@@ -6,6 +6,12 @@ published: true
 
 本文件记录 bobo 面向用户的版本变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。发布在 [GitHub Releases](https://github.com/ohmyangboy/bobo/releases)。
 
+## [Unreleased]
+
+### 新增
+
+- Cursor 与 Grok (SuperGrok) 订阅额度，支持通知岛圆环、明细、启停与拖动排序，沿用额度重置提醒；只读官方 CLI 登录，失败时显示原因。
+
 ## [1.3.5] - 2026-10-10
 
 ### 改进

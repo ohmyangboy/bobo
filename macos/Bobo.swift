@@ -1806,8 +1806,9 @@ struct IslandNotice: Decodable, Equatable {
 // Claude Code 还可能有 opus / sonnet / week-<模型> 这些按模型的周窗口；本机估算与 Claude 的额外用量带金额（usedUSD / limitUSD）。
 struct IslandQuotaWindow: Decodable, Equatable {
     var key = "", label = "", status = "", usedPercent = 0.0, remainingPercent = 100.0, resetInSec = 0.0
+    var aside = false
     var usedUSD: Double?, limitUSD: Double?
-    private enum Keys: String, CodingKey { case key, label, status, usedUSD, limitUSD, usedPercent, remainingPercent, resetInSec }
+    private enum Keys: String, CodingKey { case key, label, status, usedUSD, limitUSD, usedPercent, remainingPercent, resetInSec, aside }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: Keys.self)
         key = (try? container.decode(String.self, forKey: .key)) ?? ""
@@ -1818,6 +1819,7 @@ struct IslandQuotaWindow: Decodable, Equatable {
         usedPercent = (try? container.decode(Double.self, forKey: .usedPercent)) ?? 0
         remainingPercent = (try? container.decode(Double.self, forKey: .remainingPercent)) ?? 100
         resetInSec = (try? container.decode(Double.self, forKey: .resetInSec)) ?? 0
+        aside = (try? container.decode(Bool.self, forKey: .aside)) ?? false
     }
 }
 
@@ -1845,9 +1847,9 @@ struct IslandQuotaProvider: Decodable, Equatable {
         windows = (try? container.decodeIfPresent([IslandQuotaWindow].self, forKey: .windows)) ?? []
     }
     // 折叠胶囊显示 5 小时窗口；没有就退回第一个窗口（例如只返回周窗口的套餐）。
-    var session: IslandQuotaWindow? { windows.first { $0.key == "session" } ?? windows.first }
+    var session: IslandQuotaWindow? { windows.first { !$0.aside && $0.key == "session" } ?? windows.first { !$0.aside } }
     // 圆环显示的那一档窗口：记住的 range 认得出就用它，认不出（没有这一档）退回 5 小时窗口、再退回第一档。
-    var displayWindow: IslandQuotaWindow? { windows.first { $0.key == range } ?? session }
+    var displayWindow: IslandQuotaWindow? { windows.first { !$0.aside && $0.key == range } ?? session }
     // 能参与刘海胶囊的来源：可用、在「用量」里开启、且有窗口可以画圆环（关掉的只在网页里看）。
     var showable: Bool { available && enabled && session != nil }
 }

@@ -1339,7 +1339,7 @@ function renderIsland(){
 }
 // 通知岛左侧分类（参考 magpie 的来源列表）：Agent 连接（会话）与额度来源两组，底部固定「通知岛设置」。
 // 行右侧是「圆点 + 状态文字」；分栏按 data-island-pane 切换，设置页内再用子页签（data-island-settings）切四个分页。
-const islandPanes=['opencode','codex','omp','claude','dsh','agy','butler','quota-codex','quota-claude','quota-opencode','quota-agy','settings'];
+const islandPanes=['opencode','codex','omp','claude','dsh','agy','butler','quota-codex','quota-claude','quota-opencode','quota-agy','quota-cursor','quota-grok','settings'];
 function showIslandPane(name){
  const next=islandPanes.includes(name)?name:islandPanes[0];
  for(const p of document.querySelectorAll('#islandWorkspace [data-island-pane-content]'))p.hidden=p.dataset.islandPaneContent!==next;
@@ -1371,7 +1371,7 @@ function islandSwitch(row,key,label,on){
 }
 // 「内容 → 额度显示顺序」：几枚来源图标按住拖动排序。写的是同一份 order（usage.json 的 order），
 // 所以通知岛里的这个顺序、左栏「额度来源」的顺序、刘海面板上圆环的顺序始终一致。
-const quotaSymbols={codex:'provider-codex',claude:'provider-claude','opencode-go':'provider-opencode',agy:'provider-agy'};
+const quotaSymbols={codex:'provider-codex',claude:'provider-claude','opencode-go':'provider-opencode',agy:'provider-agy',cursor:'provider-cursor',grok:'provider-grok'};
 let quotaOrderIds='';
 function renderQuotaOrder(usage){
  const box=$('#quotaOrderList');if(!box)return;
@@ -1571,6 +1571,7 @@ function renderQuotaSide(snapshot){
 }
 function usageCard(w){
  const card=document.createElement('div');card.className='usage-card';card.dataset.level=usageLevel(w.remainingPercent);
+ if(w.aside)card.dataset.aside='true';
  const head=document.createElement('div');head.className='usage-card-head';
  const title=document.createElement('span');title.textContent=w.label||'额度窗口';
  const remain=document.createElement('strong');remain.textContent='剩 '+fmtPercent(w.remainingPercent)+'%';
@@ -1611,14 +1612,16 @@ function usageSwitch(row,label,on,id){
 function renderUsage(){
  const data=usageData;
  const byId=id=>data?.providers?.find(p=>p.id===id)||null;
- const codex=byId('codex'),claude=byId('claude'),local=byId('opencode-go'),agy=byId('agy');
+ const codex=byId('codex'),claude=byId('claude'),local=byId('opencode-go'),agy=byId('agy'),cursor=byId('cursor'),grok=byId('grok');
  renderQuotaSide(data);
  $('#usageUpdated').textContent=data?.updatedAt?'更新于 '+new Date(data.updatedAt).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'每分钟刷新';
  usageSwitch('#rowUsageCodex','刘海胶囊可切换到此来源',codex?.enabled!==false,'codex');
  usageSwitch('#rowUsageClaude','刘海胶囊可切换到此来源',claude?.enabled!==false,'claude');
  usageSwitch('#rowUsageOpencode','刘海胶囊可切换到此来源',local?.enabled!==false,'opencode-go');
  usageSwitch('#rowUsageAgy','刘海胶囊可切换到此来源',agy?.enabled!==false,'agy');
- // 额度重置提醒：Codex 的窗口回到 100% 时提醒（服务端检测并走通知岛的提醒通道）。
+ usageSwitch('#rowUsageCursor','刘海胶囊可切换到此来源',cursor?.enabled!==false,'cursor');
+ usageSwitch('#rowUsageGrok','刘海胶囊可切换到此来源',grok?.enabled!==false,'grok');
+ // 额度重置提醒：订阅窗口回到 100% 时提醒（服务端检测并走通知岛的提醒通道）。
  const resetRow=$('#rowUsageResetNotify');
  resetRow.querySelector('.switch')?.remove();
  resetRow.append(toggleSwitch(data?.notifyReset!==false,'额度重置时提醒',async value=>{usageData=await api('usage/reset-notify',{enabled:value});renderUsage();}));
@@ -1635,6 +1638,10 @@ function renderUsage(){
  renderUsageWindows('#usageClaudeWindows',claude);
  renderUsageWindows('#usageOpencodeWindows',local);
  renderUsageWindows('#usageAgyWindows',agy);
+ renderUsageWindows('#usageCursorWindows',cursor);
+ renderUsageWindows('#usageGrokWindows',grok);
+ $('#usageCursorNote').textContent=cursor?.error?'⚠ '+cursor.error:cursor?.reason||('登录来源：'+(cursor?.keySource==='keychain'?'macOS 钥匙串（cursor-access-token）':'~/.cursor/auth.json')+'；Total 是补充明细，重置时间以 Cursor 账单周期为准。');
+ $('#usageGrokNote').textContent=grok?.error?'⚠ '+grok.error:grok?.reason||'只读 Grok CLI 登录（GROK_HOME，默认 ~/.grok/auth.json）；On-demand 是补充明细。登录过期时请在终端运行 grok models 或 grok login。';
  const codexBits=[];
  if(codex?.plan)codexBits.push('套餐：'+codex.plan);
  if(codex?.credits?.unlimited)codexBits.push('额度无上限（credits unlimited）');

@@ -1,4 +1,4 @@
-// 用量：四家额度。Codex 读 ~/.codex/auth.json 的 OAuth token，调 chatgpt.com 的
+// 用量：各家额度与余额。Codex 读 ~/.codex/auth.json 的 OAuth token，调 chatgpt.com 的
 // /backend-api/wham/usage，按 limit_window_seconds 归类窗口（18000 秒 = 5 小时、604800 秒 = 一周，
 // 与 CodexBar 的 CodexRateWindowNormalizer 一致）；Claude Code 读 ~/.claude/.credentials.json（或用户点
 // 「读取钥匙串」后读 macOS 钥匙串）里的 OAuth Token，调 api.anthropic.com 的 /api/oauth/usage
@@ -20,10 +20,14 @@ export const providers=[
  {id:'claude',name:'Claude Code',symbol:'sparkles'},
  {id:'opencode-go',name:'OpenCode Go',symbol:'terminal'},
  {id:'agy',name:'Antigravity',symbol:'sparkles'},
+ {id:'cursor',name:'Cursor',symbol:'cursorarrow'},
+ {id:'grok',name:'Grok (SuperGrok)',symbol:'sparkles'},
 ];
 const codexUsageURL='https://chatgpt.com/backend-api/wham/usage';
 const opencodeUsageURL='https://opencode.ai/zen/go/v1/usage';
 const claudeUsageURL='https://api.anthropic.com/api/oauth/usage';
+const cursorUsageURL='https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage';
+const grokUsageURL='https://cli-chat-proxy.grok.com/v1/billing?format=credits';
 // 用量接口对认不出的客户端限流更凶，User-Agent 要像 Claude Code 自己（CodexBar 同样固定成 claude-code/<版本>；
 // 版本号本身不是关键，没必要为了它去跑一次 claude --version）。
 const claudeUserAgent='claude-code/2.1.0';
@@ -72,7 +76,7 @@ function systemHTTPSProxy(){
 }
 // curl 遵循系统 HTTPS 代理：Node 的 fetch 不读 macOS 的系统代理，配了代理的来源都从这里走。
 // 凭据只从 stdin 送入 curl 配置，不出现在进程参数或错误信息中。
-export function curlUsage(proxy,headers,url=codexUsageURL){
+export function curlUsage(proxy,headers,url=codexUsageURL,{method='GET',body}={}){
  return new Promise((resolve,reject)=>{
   const child=spawn('/usr/bin/curl',['--config','-'],{shell:false,stdio:['pipe','pipe','pipe']});
   let out='',err='';
@@ -90,6 +94,7 @@ export function curlUsage(proxy,headers,url=codexUsageURL){
   });
   const quote=value=>'"'+String(value).replaceAll('\\','\\\\').replaceAll('"','\\"').replaceAll('\r','').replaceAll('\n','')+'"';
   const config=[`url = ${quote(url)}`,`proxy = ${quote(proxy)}`,'noproxy = ""','silent','show-error','max-time = 10','max-redirs = 0','write-out = "\\n%{http_code}"',
+   `request = ${quote(method)}`,...(body===undefined?[]:[`data = ${quote(body)}`]),
    ...Object.entries(headers).map(([key,value])=>`header = ${quote(`${key}: ${value}`)}`)].join('\n')+'\n';
   child.stdin.end(config);
  });
@@ -242,7 +247,41 @@ export function claudeSnapshot(body,nowMs){
  return {id:'claude',name:'Claude Code',symbol:'sparkles',available:true,estimated:false,source:'api',keySource:'',keyHint:'',plan:'',credits:null,windows,error:null,updatedAt:nowMs};
 }
 
-export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,notify=null,execFileImpl=execFile,claudeNetwork=null}={}){
+// magpie 的订阅窗口：Total / On-demand 是补充明细（aside），不参与圆环范围切换。
+function subscriptionWindow(key,label,used,resetsAt,nowMs,aside=false){
+ if(typeof used!=='number'||!Number.isFinite(used))throw userError('额度接口返回的百分比无效');
+ const usedPercent=clampPercent(used);
+ return {key,label,usedUSD:null,limitUSD:null,usedPercent,remainingPercent:round10(100-usedPercent),resetInSec:resetsAt?Math.max(0,Math.round((resetsAt-nowMs)/1000)):0,resetsAt:resetsAt||null,status:usedPercent>=100?'rate-limited':'ok',aside};
+}
+function subscriptionSnapshot(id,windows,nowMs){
+ return {...providers.find(p=>p.id===id),available:true,estimated:false,source:'api',keySource:'file',keyHint:'',plan:'',credits:null,windows,error:null,updatedAt:nowMs};
+}
+export function cursorSnapshot(body,nowMs){
+ if(!body||typeof body!=='object'||Array.isArray(body))throw userError('Cursor 额度接口响应无效');
+ const usage=body.planUsage,windows=[],end=Number(body.billingCycleEnd),resetsAt=end>0&&Number.isFinite(new Date(end).getTime())?end:null;
+ // 企业套餐只返回金额、不返回 planUsage，保留「没有额度窗口」而不是捏造百分比。
+ if(usage!=null){
+  if(typeof usage!=='object'||Array.isArray(usage))throw userError('Cursor 额度接口响应无效');
+  for(const [key,label,field,aside] of [['cursor-models','Cursor Models','autoPercentUsed',false],['other-models','Other Models','apiPercentUsed',false],['total','Total','totalPercentUsed',true]])windows.push(subscriptionWindow(key,label,usage[field]??0,resetsAt,nowMs,aside));
+ }
+ return subscriptionSnapshot('cursor',windows,nowMs);
+}
+export function grokSnapshot(body,nowMs){
+ const config=body?.config;
+ if(!config||typeof config!=='object'||Array.isArray(config))throw userError('Grok 额度接口没有返回有效的 config');
+ const period=config.currentPeriod,type=String(period?.type||'').replace(/^USAGE_PERIOD_TYPE_/,''),label={DAILY:'1 day',WEEKLY:'7 days',MONTHLY:'Month'}[type]||'Allowance';
+ const resetsAt=Date.parse((period?period.end:config.billingPeriodEnd)||'')||null;
+ const windows=[subscriptionWindow('allowance',label,config.creditUsagePercent??0,resetsAt,nowMs)];
+ const cap=config.onDemandCap?.val,used=config.onDemandUsed?.val??0;
+ if(cap>0){
+  if(typeof cap!=='number'||!Number.isFinite(cap))throw userError('Grok On-demand 上限无效');
+  if(typeof used!=='number'||!Number.isFinite(used))throw userError('Grok On-demand 用量无效');
+  windows.push(subscriptionWindow('on-demand','On-demand',100*used/cap,resetsAt,nowMs,true));
+ }
+ return subscriptionSnapshot('grok',windows,nowMs);
+}
+
+export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,notify=null,execFileImpl=execFile,claudeNetwork=null,cursorKeychain=process.platform==='darwin'&&!env.BOBO_HOME&&!home.startsWith(os.tmpdir())}={}){
  const dataDir=path.join(home,'.bobo'),settingsFile=path.join(dataDir,'usage.json');
  const opencodeDir=path.join(home,'.local/share/opencode'),dbFile=path.join(opencodeDir,'opencode.db'),authFile=path.join(opencodeDir,'auth.json');
  const codexDir=env.CODEX_HOME||path.join(home,'.codex');
@@ -270,7 +309,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
  const orderOf=list=>[...list].sort((a,b)=>order.indexOf(a.id)-order.indexOf(b.id));
  // 圆环显示这一家的哪一档窗口：认得出（这家真返回了这一档）就用记住的，否则退回 5 小时窗口、再退回第一档。
  function rangeFor(id,windows){
-  const keys=(windows||[]).map(w=>w.key);
+  const keys=(windows||[]).filter(w=>!w.aside).map(w=>w.key);
   if(keys.includes(settings.ranges[id]))return settings.ranges[id];
   return keys.includes('session')?'session':(keys[0]||'');
  }
@@ -405,6 +444,49 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   }
   return localSnapshot(list||[],nowMs,false,rowsError||null,'','');
  }
+
+ // ---- Cursor / Grok：只读 magpie 已使用的 CLI 登录位置，不扫其它凭据、不刷新或回写 token。 ----
+ async function cursorAuth(){
+  // 临时 HOME / BOBO_HOME 默认不碰真实钥匙串；测试可显式注入 cursorKeychain 与 execFileImpl。
+  if(cursorKeychain){
+   const key=await new Promise(resolve=>execFileImpl('/usr/bin/security',['find-generic-password','-s','cursor-access-token','-a','cursor-user','-w'],{timeout:15000,maxBuffer:65536},(error,stdout)=>resolve(error?'':String(stdout||'').trim())));
+   if(key)return {key,keySource:'keychain'};
+  }
+  try{
+   const raw=JSON.parse(await fs.readFile(path.join(home,'.cursor/auth.json'),'utf8'));
+   if(typeof raw?.accessToken==='string'&&raw.accessToken.trim())return {key:raw.accessToken.trim(),keySource:'file'};
+  }catch(e){if(e.code!=='ENOENT')throw userError('无法读取 ~/.cursor/auth.json，请检查权限或重新运行 cursor-agent login');}
+  throw userError('未找到 cursor-agent 登录，请运行 cursor-agent login'+(cursorKeychain?'；钥匙串未授权或没有条目时，可检查 ~/.cursor/auth.json':''));
+ }
+ async function grokAuth(nowMs){
+  const file=path.join(env.GROK_HOME||path.join(home,'.grok'),'auth.json');
+  let raw;
+  try{raw=JSON.parse(await fs.readFile(file,'utf8'));}
+  catch(e){throw userError(e.code==='ENOENT'?'未找到 Grok 登录，请运行 grok login（登录目录为 GROK_HOME，默认 ~/.grok）':'无法读取 Grok auth.json，请检查 GROK_HOME、文件权限或重新运行 grok login');}
+  // 与 readGrokCredential 一致：按账户键排序，取第一份有 key 的登录。
+  const cred=raw&&typeof raw==='object'&&!Array.isArray(raw)?Object.keys(raw).sort().map(k=>raw[k]).find(c=>typeof c?.key==='string'&&c.key.trim()):null;
+  if(!cred)throw userError('Grok auth.json 里没有可用的登录，请运行 grok login');
+  const expires=Date.parse(cred.expires_at||'');
+  if(cred.expires_at&&!Number.isFinite(expires))throw userError('Grok 登录的过期时间无效，请重新运行 grok login');
+  if(expires<=nowMs)throw userError('Grok 登录已过期，请在终端运行 grok models 刷新，或重新 grok login');
+  return {key:cred.key.trim(),keySource:'file'};
+ }
+ async function readSubscription(id,url,auth,nowMs,{method='GET',body}={}){
+  const name=providers.find(p=>p.id===id).name,controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),codexTimeoutMs);
+  try{
+   const headers={authorization:'Bearer '+auth.key,accept:'application/json',...(id==='cursor'?{'content-type':'application/json','Connect-Protocol-Version':'1'}:{})};
+   const proxy=fetchImpl===fetch&&process.platform==='darwin'&&!env.BOBO_HOME&&!home.startsWith(os.tmpdir())?await systemHTTPSProxy():'';
+   const response=proxy?await curlUsage(proxy,headers,url,{method,body}):await fetchImpl(url,{method,body,headers,redirect:'error',signal:controller.signal});
+   if(response.status===401||response.status===403)throw userError(name+' 登录被拒绝或已过期，请重新运行 '+(id==='cursor'?'cursor-agent login':'grok login'));
+   if(response.status===429)throw userError(name+' 额度接口请求受限，稍后会自动重试');
+   if(!response.ok)throw userError(name+' 额度接口返回 '+response.status);
+   let data;try{data=await response.json();}catch{throw userError(name+' 额度接口返回的不是 JSON');}
+   return {...(id==='cursor'?cursorSnapshot(data,nowMs):grokSnapshot(data,nowMs)),keySource:auth.keySource};
+  }catch(e){if(e?.userFacing)throw e;throw userError('无法连接 '+name+' 额度接口，请检查网络 / 代理后重试');}
+  finally{clearTimeout(timeout);}
+ }
+ const readCursor=async nowMs=>readSubscription('cursor',cursorUsageURL,await cursorAuth(),nowMs,{method:'POST',body:'{}'});
+ const readGrok=async nowMs=>readSubscription('grok',grokUsageURL,await grokAuth(nowMs),nowMs);
 
  // ---- Codex：~/.codex/auth.json + chatgpt.com（只读凭据，不刷新、不回写） ----
  async function readCodex(nowMs){
@@ -693,18 +775,18 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
  // ---- 刷新与推送 ----
  // 只在「有效数据」变化时推送：倒计时（resetInSec/resetsAt/updatedAt）每分钟都会变，不参与比较。
  const signatureOf=s=>JSON.stringify([s.selected,s.providers.map(p=>[p.id,p.available,p.enabled,p.range,p.keySource,p.keyHint,p.reason,p.error,p.plan,p.needsDirectConfirm,p.windows.map(w=>[w.key,w.usedPercent,w.usedUSD,w.status]),p.daily,p.models,p.totals,p.credits])]);
- // 额度重置提醒：Codex 的窗口从「用过」（剩余 < 100%）回到 100% 时提醒一次（5 小时窗口用满后恢复、
+ // 额度重置提醒：订阅窗口从「用过」（剩余 < 100%）回到 100% 时提醒一次（5 小时窗口用满后恢复、
  // 周窗口刷新都算）。只在前后两次都是有效读数时比较：服务刚启动、上一次不可用、这次降级都不报。
  // 开关在「用量 → Codex」里（settings.notifyReset），实际投递走通知岛的统一提醒通道（notify）。
  function detectResets(before,after){
   if(!settings.notifyReset||typeof notify!=='function')return;
   const previous=new Map();
   for(const p of before?.providers||[]){
-   if(!p.available)continue;
+   if(!p.available||p.estimated||p.error)continue;
    for(const w of p.windows||[])previous.set(p.id+':'+w.key,w.remainingPercent);
   }
   for(const p of after.providers){
-   if((p.id!=='codex'&&p.id!=='agy'&&p.id!=='claude')||!p.available)continue;
+   if(!['codex','agy','claude','cursor','grok'].includes(p.id)||!p.available||p.estimated||p.error)continue;
    for(const w of p.windows||[]){
     const was=previous.get(p.id+':'+w.key);
     if(typeof was==='number'&&was<100&&w.remainingPercent>=100)notify('reset',(p.name||p.id)+' 额度已重置',(w.label||w.key)+' 回到 100%');
@@ -730,11 +812,11 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
     if(cached&&nowMs<cached.hardNextAt&&!(claudeDirect&&id==='claude'))return stamp(cached.snapshot);
     if(cached&&!force&&nowMs<cached.nextAt)return stamp(cached.snapshot);
     let snapshot;
-    try{snapshot=id==='codex'?await readCodex(nowMs):id==='claude'?await readClaude(nowMs,{direct:claudeDirect}):id==='agy'?await readAgy(nowMs):await readOpenCodeGo(nowMs);}
+    try{snapshot=id==='codex'?await readCodex(nowMs):id==='claude'?await readClaude(nowMs,{direct:claudeDirect}):id==='agy'?await readAgy(nowMs):id==='cursor'?await readCursor(nowMs):id==='grok'?await readGrok(nowMs):await readOpenCodeGo(nowMs);}
     catch(e){
      const reason=describe(e,'读取用量失败：');
      const base=cached?.snapshot.available?{...cached.snapshot,error:reason}:{...p,available:false,reason,error:null,windows:[],keySource:'',keyHint:''};
-     snapshot={...base,needsDirectConfirm:e?.needsDirectConfirm===true,updatedAt:nowMs};
+     snapshot={...base,...(['cursor','grok'].includes(id)?{source:'api',estimated:false}:{}),needsDirectConfirm:e?.needsDirectConfirm===true,updatedAt:nowMs};
     }
     if(snapshot.error===undefined)snapshot.error=null;
     // 节奏：走网络（Codex / OpenCode 官方接口）3 分钟、最快 60 秒一次；纯本机读数每分钟都可以。
@@ -742,7 +824,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
     // 免得每分钟白试一次打不通的接口；手动强制刷新不受退避限制（网络类最多 60 秒试一次）。
     const api=snapshot.source==='api';
     const degraded=!api&&!!snapshot.error&&!!snapshot.keySource;
-    const failed=snapshot.available!==true||degraded;
+    const failed=snapshot.available!==true||degraded||(['cursor','grok'].includes(id)&&!!snapshot.error);
     let nextAt;
     if(failed){
      const attempts=(backoff.get(id)||0)+1;
@@ -802,7 +884,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
  // 在这家返回的窗口之间循环（5 小时 → 本周 → 账单月 → …），只有一档就不动，选择写进 usage.json。
  function cycleRange(id){
   const row=state.providers.find(p=>p.id===id);
-  const keys=(row?.windows||[]).map(w=>w.key);
+  const keys=(row?.windows||[]).filter(w=>!w.aside).map(w=>w.key);
   if(keys.length<2)return state;
   const current=rangeFor(id,row.windows)||keys[0];
   settings.ranges[id]=keys[(keys.indexOf(current)+1)%keys.length];
@@ -823,7 +905,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   signature=signatureOf(state);emit();
   return state;
  }
- // 额度重置提醒的开关（Codex 窗口回到 100% 时提醒一次）。
+ // 额度重置提醒的开关（订阅窗口回到 100% 时提醒一次）。
  function setNotifyReset(enabled){
   settings.notifyReset=enabled!==false;
   void saveSettings();

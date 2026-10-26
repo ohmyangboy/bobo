@@ -488,6 +488,18 @@ test('通知岛额度：圆环显示的范围与并排来源的取舍', {skip:pr
  precondition(quota.displayed?.id == "agy")
  precondition(quota.provider(id: "opencode-go") == nil, "关掉的来源不该出现在明细卡里")
  precondition(quota.provider(id: "agy")?.displayWindow?.key == "week")
+ // Cursor / Grok 沿用来源启停与顺序；Total / On-demand 留在明细，不画成订阅圆环。
+ let cursor = try! provider(#"{"id":"cursor","available":true,"range":"total","windows":[{"key":"cursor-models","remainingPercent":87.5},{"key":"other-models","remainingPercent":60},{"key":"total","remainingPercent":80,"aside":true}]}"#)
+ precondition(cursor.showable && cursor.displayWindow?.key == "cursor-models")
+ precondition(cursor.windows.last?.aside == true && !cursor.windows[0].aside)
+ let grok = try! provider(#"{"id":"grok","available":true,"range":"allowance","windows":[{"key":"allowance","remainingPercent":57.5},{"key":"on-demand","remainingPercent":75,"aside":true}]}"#)
+ precondition(grok.showable && grok.displayWindow?.key == "allowance")
+ var extended = quota
+ extended.providers = [grok, cursor]
+ extended.selected = "grok"
+ precondition(extended.subscriptions.map { $0.id } == ["grok", "cursor"] && extended.displayed?.id == "grok")
+ extended.providers[0].enabled = false
+ precondition(extended.subscriptions.map { $0.id } == ["cursor"] && extended.displayed?.id == "cursor")
 `);
 });
 
@@ -565,6 +577,7 @@ test('通知岛跳转：头像分栏与额度排序的合并顺序', {skip:proce
  // 草稿里多出来的 id 不会冒出来；空顺序也稳。
  precondition(IslandMetrics.mergedQuotaOrder(full: ["a","b"], shown: ["a","b","c"]) == ["a","b"])
  precondition(IslandMetrics.mergedQuotaOrder(full: [], shown: ["a"]) == [])
+ precondition(IslandMetrics.mergedQuotaOrder(full: ["codex","cursor","claude","grok"], shown: ["grok","cursor"]) == ["codex","grok","claude","cursor"])
 `);
 });
 

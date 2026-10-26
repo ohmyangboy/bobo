@@ -1,6 +1,6 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs/promises';import os from 'node:os';import path from 'node:path';import http from 'node:http';
 import {DatabaseSync} from 'node:sqlite';
-import {createUsage, agySnapshot, macHTTPSProxy, curlUsage, claudeSnapshot, claudeCredentials, keychainDecode, tunnelInterface} from '../src/usage.mjs';
+import {createUsage, agySnapshot, macHTTPSProxy, curlUsage, claudeSnapshot, claudeCredentials, keychainDecode, tunnelInterface, cursorSnapshot, grokSnapshot} from '../src/usage.mjs';
 // 每日历史按本地日历分桶，测试固定 UTC，让「天」的断言在任何时区都稳定。
 process.env.TZ='UTC';
 // 与 CodexBar 的 OpenCodeGoLocalUsageReader 测试同一基准：2026-03-06T12:00:00Z。
@@ -30,6 +30,20 @@ test('Codex：代理请求能带账号头读取额度响应',async()=>{
   assert.equal(response.status,200);
   assert.equal((await response.json()).rate_limit.primary_window.used_percent,42);
   assert.deepEqual(request,{url:'http://codex-usage.test/backend-api/wham/usage',authorization:'Bearer fake-token',account:'acct-test'});
+ }finally{await new Promise(resolve=>proxy.close(resolve));}
+});
+test('Cursor：系统代理通道保留 POST、JSON body 与 Connect 协议头',async()=>{
+ let request;
+ const proxy=http.createServer(async(req,res)=>{
+  let body='';for await(const chunk of req)body+=chunk;
+  request={method:req.method,body,authorization:req.headers.authorization,connect:req.headers['connect-protocol-version'],contentType:req.headers['content-type']};
+  res.writeHead(200,{'content-type':'application/json'});res.end('{"planUsage":{}}');
+ });
+ await new Promise(resolve=>proxy.listen(0,'127.0.0.1',resolve));
+ try{
+  const response=await curlUsage(`http://127.0.0.1:${proxy.address().port}`,{authorization:'Bearer fake-cursor','content-type':'application/json','Connect-Protocol-Version':'1'},'http://cursor-usage.test/current-period',{method:'POST',body:'{}'});
+  assert.equal(response.status,200);assert.deepEqual(await response.json(),{planUsage:{}});
+  assert.deepEqual(request,{method:'POST',body:'{}',authorization:'Bearer fake-cursor',connect:'1',contentType:'application/json'});
  }finally{await new Promise(resolve=>proxy.close(resolve));}
 });
 // 设置是异步写盘的（原子写 + 串行化），轮询等到它落盘，避免和并发负载抢时间。
@@ -65,6 +79,128 @@ const opencodeBody=({rolling={status:'ok',percent:23},weekly={status:'ok',percen
  monthly:{...monthly,resetsAt:new Date(NOW+7200e3).toISOString()}}});
 // 只对指定地址返回响应：测试里绝不允许真联网（别的地址直接抛错）。
 const routeFetch=(pattern,fn,calls)=>async(url,options)=>{if(!pattern.test(String(url)))throw Error('测试没有为该地址准备响应：'+url);calls?.();return fn(url,options);};
+
+const cursorBody=(used=12.5)=>({billingCycleEnd:String(NOW+3600e3),planUsage:{autoPercentUsed:used,apiPercentUsed:40,totalPercentUsed:20}});
+const grokBody=(used=42.5)=>({config:{creditUsagePercent:used,currentPeriod:{type:'USAGE_PERIOD_TYPE_WEEKLY',end:new Date(NOW+86400e3).toISOString()},onDemandCap:{val:2000},onDemandUsed:{val:500}}});
+async function writeSubscriptionAuth(home,id){
+ const file=path.join(home,id==='cursor'?'.cursor/auth.json':'.grok/auth.json');
+ await fs.mkdir(path.dirname(file),{recursive:true});
+ const raw=id==='cursor'?{accessToken:'cursor-file-token'}:{account:{key:'grok-file-token',email:'test@example.test',expires_at:new Date(NOW+30*86400e3).toISOString()}};
+ await fs.writeFile(file,JSON.stringify(raw));
+ return file;
+}
+const subscriptionBody=(id,used)=>id==='cursor'?cursorBody(used):grokBody(used);
+
+test('Cursor：按 magpie 解析两池与 Total 明细，毫秒账单时间、百分比与限额状态',()=>{
+ const p=cursorSnapshot(cursorBody(),NOW);
+ assert.equal(p.source,'api');assert.equal(p.estimated,false);
+ assert.deepEqual(p.windows.map(w=>[w.key,w.label,w.usedPercent,w.remainingPercent,w.aside]),[['cursor-models','Cursor Models',12.5,87.5,false],['other-models','Other Models',40,60,false],['total','Total',20,80,true]]);
+ for(const w of p.windows){assert.equal(w.resetInSec,3600);assert.equal(w.resetsAt,NOW+3600e3);assert.equal(w.status,'ok');assert.equal(w.usedUSD,null);}
+ const p2=cursorSnapshot({planUsage:{autoPercentUsed:120,apiPercentUsed:-1,totalPercentUsed:100}},NOW);
+ assert.equal(p2.windows[0].usedPercent,100);assert.equal(p2.windows[0].status,'rate-limited');assert.equal(p2.windows[1].remainingPercent,100);assert.equal(p2.windows[0].resetsAt,null);
+ assert.deepEqual(cursorSnapshot({billingCycleEnd:'123'},NOW).windows,[],'企业套餐不捏造百分比窗口');
+ assert.throws(()=>cursorSnapshot({planUsage:{autoPercentUsed:'bad'}},NOW),/百分比无效/);
+});
+test('Grok：周期名称、未用过的缺省百分比、账单时间与可选 On-demand',()=>{
+ const p=grokSnapshot(grokBody(),NOW);
+ assert.deepEqual(p.windows.map(w=>[w.key,w.label,w.usedPercent,w.remainingPercent,w.aside]),[['allowance','7 days',42.5,57.5,false],['on-demand','On-demand',25,75,true]]);
+ for(const w of p.windows){assert.equal(w.resetsAt,NOW+86400e3);assert.equal(w.resetInSec,86400);}
+ for(const [type,label] of [['DAILY','1 day'],['USAGE_PERIOD_TYPE_WEEKLY','7 days'],['MONTHLY','Month'],['unknown','Allowance']]){
+  const windows=grokSnapshot({config:{currentPeriod:{type,end:new Date(NOW+60000).toISOString()},onDemandCap:{val:0}}},NOW).windows;
+  assert.equal(windows.length,1);assert.equal(windows[0].label,label);assert.equal(windows[0].remainingPercent,100);assert.equal(windows[0].resetInSec,60);
+ }
+ assert.equal(grokSnapshot({config:{billingPeriodEnd:new Date(NOW+60000).toISOString()}},NOW).windows[0].resetsAt,NOW+60000);
+ assert.throws(()=>grokSnapshot({},NOW),/config/);
+ assert.throws(()=>grokSnapshot({config:{creditUsagePercent:null,onDemandCap:{val:2},onDemandUsed:{val:'bad'}}},NOW),/On-demand 用量无效/);
+});
+test('Cursor：读取文件登录并按 Connect 协议 POST，不改写凭据或保存 token',async()=>{
+ const home=await makeHome(),file=await writeSubscriptionAuth(home,'cursor'),original=await fs.readFile(file,'utf8'),requests=[];
+ const usage=createUsage({home,now:()=>NOW,env:{},fetchImpl:routeFetch(/^https:\/\/api2\.cursor\.sh\//,async(url,options)=>{requests.push({url,options});return fakeFetch(cursorBody());})});
+ try{
+  const p=provider(await usage.refresh(),'cursor');assert.equal(p.available,true);assert.equal(p.keySource,'file');assert.equal(requests.length,1);
+  const {url,options}=requests[0];assert.equal(url,'https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage');assert.equal(options.method,'POST');assert.equal(options.body,'{}');assert.equal(options.redirect,'error');
+  assert.equal(options.headers.authorization,'Bearer cursor-file-token');assert.equal(options.headers['content-type'],'application/json');assert.equal(options.headers['Connect-Protocol-Version'],'1');
+  assert.equal(await fs.readFile(file,'utf8'),original);assert.doesNotMatch(JSON.stringify(usage.snapshot()),/cursor-file-token/);
+  assert.equal(p.range,'cursor-models');assert.equal(usage.cycleRange('cursor').providers.find(p=>p.id==='cursor').range,'other-models');assert.equal(usage.cycleRange('cursor').providers.find(p=>p.id==='cursor').range,'cursor-models','Total 不参与圆环切换');
+ }finally{await usage.stop();await cleanup(home);}
+});
+test('Cursor：钥匙串优先，只请求约定条目；授权失败退回文件，没有两者时明确报未登录',async()=>{
+ const home=await makeHome();await writeSubscriptionAuth(home,'cursor');
+ for(const denied of [false,true]){
+  const commands=[],tokens=[];
+  const usage=createUsage({home,now:()=>NOW,env:{},cursorKeychain:true,execFileImpl:(file,args,options,cb)=>{commands.push([file,...args]);cb(denied?Error('denied'):null,'cursor-keychain-token\n','');},fetchImpl:routeFetch(/api2\.cursor\.sh/,async(url,options)=>{tokens.push(options.headers.authorization);return fakeFetch(cursorBody());})});
+  try{
+   const p=provider(await usage.refresh(),'cursor');assert.equal(p.keySource,denied?'file':'keychain');assert.deepEqual(tokens,['Bearer '+(denied?'cursor-file-token':'cursor-keychain-token')]);
+   assert.deepEqual(commands,[['/usr/bin/security','find-generic-password','-s','cursor-access-token','-a','cursor-user','-w']]);
+  }finally{await usage.stop();}
+ }
+ await fs.rm(path.join(home,'.cursor/auth.json'));
+ const usage=createUsage({home,now:()=>NOW,env:{},cursorKeychain:true,execFileImpl:(file,args,options,cb)=>cb(Error('denied'),'',''),fetchImpl:async()=>assert.fail('未登录不能请求网络')});
+ try{const p=provider(await usage.refresh(),'cursor');assert.equal(p.available,false);assert.match(p.reason,/cursor-agent login.*钥匙串未授权/);}finally{await usage.stop();await cleanup(home);}
+});
+test('Grok：GROK_HOME 的账户按键排序读取，只读 access token，不执行 CLI 或请求其它端点',async()=>{
+ const home=await makeHome(),grokHome=path.join(home,'grok-login');await fs.mkdir(grokHome);
+ const file=path.join(grokHome,'auth.json'),raw=JSON.stringify({z:{key:'z-token'},a:{key:'a-token',expires_at:new Date(NOW+3600e3).toISOString()}});await fs.writeFile(file,raw);
+ const calls=[],usage=createUsage({home,now:()=>NOW,env:{GROK_HOME:grokHome},execFileImpl:()=>assert.fail('不执行 Grok CLI'),fetchImpl:routeFetch(/^https:\/\/cli-chat-proxy\.grok\.com\/v1\/billing\?format=credits$/,async(url,options)=>{calls.push(options);return fakeFetch(grokBody());})});
+ try{
+  const p=provider(await usage.refresh(),'grok');assert.equal(p.available,true);assert.equal(p.keySource,'file');assert.equal(calls.length,1);assert.equal(calls[0].headers.authorization,'Bearer a-token');assert.equal(calls[0].headers.accept,'application/json');assert.equal(calls[0].method,'GET');assert.equal(calls[0].redirect,'error');
+  assert.equal(await fs.readFile(file,'utf8'),raw);assert.equal(p.range,'allowance');assert.equal(provider(usage.cycleRange('grok'),'grok').range,'allowance','On-demand 只作明细');assert.doesNotMatch(JSON.stringify(usage.snapshot()),/a-token|z-token/);
+ }finally{await usage.stop();await cleanup(home);}
+});
+test('Cursor / Grok：缺登录、文件损坏及 Grok 过期都在本地给可读原因',async()=>{
+ for(const id of ['cursor','grok']){
+  const home=await makeHome(),usage=createUsage({home,now:()=>NOW,env:{},fetchImpl:async()=>assert.fail('没有有效登录不能联网')});
+  try{
+   let p=provider(await usage.refresh(),id);assert.equal(p.available,false);assert.match(p.reason,/未找到.*登录/);
+   const file=await writeSubscriptionAuth(home,id);await fs.writeFile(file,'broken');
+   await usage.stop();
+   const broken=createUsage({home,now:()=>NOW,env:{},fetchImpl:async()=>assert.fail('损坏登录不能联网')});
+   try{assert.match(provider(await broken.refresh(),id).reason,/无法读取/);}finally{await broken.stop();}
+   if(id==='grok'){
+    await fs.writeFile(file,JSON.stringify({account:{key:'expired',expires_at:new Date(NOW-1).toISOString()}}));
+    const expired=createUsage({home,now:()=>NOW,env:{},fetchImpl:async()=>assert.fail('过期登录不能联网')});
+    try{assert.match(provider(await expired.refresh(),'grok').reason,/登录已过期.*grok models/);}finally{await expired.stop();}
+   }
+  }finally{await usage.stop();await cleanup(home);}
+ }
+});
+test('Cursor / Grok：网络拒绝、限流、非 JSON 与异常响应给可读错误',async()=>{
+ for(const id of ['cursor','grok'])for(const [response,pattern] of [[fakeFetch({}, {status:401}),/登录被拒绝或已过期/],[fakeFetch({}, {status:403}),/登录被拒绝或已过期/],[fakeFetch({}, {status:429}),/请求受限/],[fakeFetch({}, {status:500}),/返回 500/],[{ok:true,status:200,json:async()=>{throw Error('secret-body');}},/不是 JSON/],[Error('secret-token'),/无法连接/]]){
+  const home=await makeHome();await writeSubscriptionAuth(home,id);
+  const usage=createUsage({home,now:()=>NOW,env:{},fetchImpl:async()=>{if(response instanceof Error)throw response;return response;}});
+  try{const p=provider(await usage.refresh(),id);assert.equal(p.available,false);assert.match(p.reason,pattern);assert.doesNotMatch(p.reason,/secret/);}finally{await usage.stop();await cleanup(home);}
+ }
+});
+test('Cursor / Grok：成功缓存三分钟、手动刷新至少一分钟，失败保留旧窗口并退避',async()=>{
+ for(const id of ['cursor','grok']){
+  const home=await makeHome();await writeSubscriptionAuth(home,id);let clock=NOW,calls=0,fail=false;
+  const usage=createUsage({home,now:()=>clock,env:{},fetchImpl:async()=>{calls++;if(fail)throw Error('network');return fakeFetch(subscriptionBody(id,35));}});
+  try{
+   await usage.refresh();assert.equal(calls,1);await usage.refresh(true);assert.equal(calls,1);
+   clock+=60000;await usage.refresh();assert.equal(calls,1);await usage.refresh(true);assert.equal(calls,2);
+   fail=true;clock+=180000;const failed=provider(await usage.refresh(),id);assert.equal(calls,3);assert.equal(failed.available,true);assert.equal(failed.windows[0].usedPercent,35);assert.match(failed.error,/无法连接/);
+   clock+=60000;await usage.refresh();assert.equal(calls,3);clock+=60000;await usage.refresh();assert.equal(calls,4);
+   clock+=120000;await usage.refresh();assert.equal(calls,4,'第二次失败退避四分钟');clock+=120000;fail=false;await usage.refresh();assert.equal(calls,5);
+   clock+=60000;await usage.refresh();assert.equal(calls,5);clock+=120000;assert.equal(provider(await usage.refresh(),id).error,null);assert.equal(calls,6,'成功恢复三分钟节奏');
+  }finally{await usage.stop();await cleanup(home);}
+ }
+});
+test('额度重置提醒：Cursor / Grok 首次、未登录、失败与估算不比较，回到 100% 各窗口只报一次，共用持久化开关',async()=>{
+ for(const id of ['cursor','grok']){
+  const home=await makeHome(),notes=[];let clock=NOW,used=0,fail=false;
+  const usage=createUsage({home,now:()=>clock,env:{},notify:(...note)=>notes.push(note),fetchImpl:async()=>{if(fail)throw Error('offline');return fakeFetch(subscriptionBody(id,used));}});
+  const step=async value=>{used=value;clock+=200000;return provider(await usage.refresh(true),id);};
+  try{
+   await usage.refresh();await writeSubscriptionAuth(home,id);await step(0);assert.equal(notes.length,0,'未登录转可用、首次 100% 不报');
+   await step(40);await step(0);assert.equal(notes.length,1);assert.equal(notes[0][0],'reset');assert.match(notes[0][1],id==='cursor'?/Cursor 额度已重置/:/Grok \(SuperGrok\) 额度已重置/);assert.match(notes[0][2],/回到 100%/);
+   await step(0);assert.equal(notes.length,1,'连续 100% 不重复');
+   await step(35);fail=true;await step(0);assert.equal(notes.length,1);fail=false;await step(0);assert.equal(notes.length,1,'失败后的旧读数不用于恢复提醒');
+   await step(25);provider(usage.snapshot(),id).estimated=true;await step(0);assert.equal(notes.length,1,'估算读数不作为上次有效额度');
+   usage.setNotifyReset(false);await step(20);await step(0);assert.equal(notes.length,1);const saved=JSON.parse(await fs.readFile(path.join(home,'.bobo/usage.json'),'utf8'));assert.equal(saved.notifyReset,false);
+   usage.setNotifyReset(true);await step(20);await step(0);assert.equal(notes.length,2);
+  }finally{await usage.stop();await cleanup(home);}
+ }
+});
 
 test('OpenCode Go：官方用量接口优先（percent 是已用百分比，重置按 resetsAt），历史仍用本机数据',async()=>{
  const {home}=await makeHomeWithDb({authKey:'sk-test-opencode',build:({message})=>message('m1',at(NOW,-60000),2.0)});
@@ -230,21 +366,21 @@ test('Codex：正常读取 5 小时 + 周两个窗口，selected 点击后循环
   // 写盘是异步的：等到文件里的顺序就是当前顺序（而不是更早那一次），避免和下一次切换赛跑。
   const readSettings=async()=>JSON.parse(await fs.readFile(path.join(home,'.bobo/usage.json'),'utf8'));
   const waitOrder=want=>waitFor(async()=>{const r=await readSettings();if((r.order||[]).join()!==want)throw Error('顺序还没写到 '+want);return r;});
-  const saved=await waitOrder('claude,agy,codex,opencode-go');
-  assert.equal(saved.order.join(),'claude,agy,codex,opencode-go','两次点击切换把前两家依次挪到了末尾');
+  const saved=await waitOrder('claude,agy,cursor,grok,codex,opencode-go');
+  assert.equal(saved.order.join(),'claude,agy,cursor,grok,codex,opencode-go','两次点击切换把前两家依次挪到了末尾');
   // 新进程读同一份设置：顺序被记住，折叠胶囊显示顺序里第一个可用的那家。
   usage.selectProvider('opencode-go');
-  await waitOrder('opencode-go,claude,agy,codex');
+  await waitOrder('opencode-go,claude,agy,cursor,grok,codex');
   const again=createUsage({home,now:()=>NOW,env:{},fetchImpl:async()=>fakeFetch(codexBody())});
   try{
    const s2=await again.refresh();
    assert.equal(s2.selected,'opencode-go');
-   assert.deepEqual(s2.providers.map(p=>p.id),['opencode-go','claude','agy','codex'],'快照按用户排的顺序返回');
+   assert.deepEqual(s2.providers.map(p=>p.id),['opencode-go','claude','agy','cursor','grok','codex'],'快照按用户排的顺序返回');
   }finally{await again.stop();}
   // 拖动排序（setOrder）：认不出的 id 忽略、没提到的按默认顺序补在后面；agy 不可用时显示下一个可用的。
-  assert.deepEqual(usage.setOrder(['agy','codex']).providers.map(p=>p.id),['agy','codex','claude','opencode-go']);
+  assert.deepEqual(usage.setOrder(['agy','codex']).providers.map(p=>p.id),['agy','codex','claude','opencode-go','cursor','grok']);
   assert.equal(usage.snapshot().selected,'codex','顺序里第一家不可用就显示下一家');
-  await waitOrder('agy,codex,claude,opencode-go');
+  await waitOrder('agy,codex,claude,opencode-go,cursor,grok');
   assert.equal(usage.selectProvider('不存在的来源'),usage.snapshot(),'认不出的来源不动任何状态');
  }finally{await usage.stop();await cleanup(home);}
 });
