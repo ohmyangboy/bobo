@@ -75,6 +75,7 @@ nav{grid-column:3;justify-self:end}
 /* SF Symbols 图标（内联 SVG 精灵，见 index.html 顶部的 .sf-sprite）：用 currentColor 描边，跟随文字颜色与深浅色自动适配。 */
 .sf-sprite{position:absolute;width:0;height:0;overflow:hidden}
 .sf{width:15px;height:15px;flex:none;display:block}
+img.sf{object-fit:cover;border-radius:4px}
 
 /* 「更多」菜单：工具栏只留当前视图的主要动作，低频与破坏性操作收进这里；删除类操作在面板底部独立成行。 */
 .menu{position:relative}

@@ -40,6 +40,7 @@ cp -R "$project_dir/public" "$app_dir/Contents/Resources/public"
 # 通知岛头像与额度 / 会话行的来源图标（来源图标与 index.html 的 SVG 精灵同源）。
 cp "$project_dir"/macos/assets/bobo-island-avatar-*.png "$app_dir/Contents/Resources/"
 cp "$project_dir"/macos/assets/bobo-provider-*.svg "$app_dir/Contents/Resources/"
+cp "$project_dir"/macos/assets/bobo-provider-*.png "$app_dir/Contents/Resources/"
 echo "$node_path" > "$app_dir/Contents/Resources/node-path"
 
 # 3. 应用图标。

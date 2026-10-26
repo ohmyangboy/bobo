@@ -2145,12 +2145,19 @@ enum IslandMetrics {
         if !provider.symbol.isEmpty { return provider.symbol }
         return provider.id == "opencode-go" ? "terminal" : "sparkles"
     }
-    // 来源图标：update.sh 把 bobo-provider-<id>.svg 复制进 App bundle（codex / opencode-go 来自 CodexBar 的
-    // MIT 资源，omp 取自 can1357/oh-my-pi 的 MIT 品牌图标，agy 是自绘的 Antigravity 反重力拱门），
-    // 加载成模板图后按白色渲染；加载不到（旧系统或资源缺失）就退回 SF Symbol。
+    // 来源图标：update.sh 把 bobo-provider-<id>.{png,svg} 复制进 App bundle（codex / opencode-go 来自 CodexBar 的
+    // MIT 资源，omp 取自 can1357/oh-my-pi 的 MIT 品牌图标，agy 是自绘的 Antigravity 反重力拱门，
+    // grok 用 Grok Bot.app 彩色头像 PNG），优先 PNG（非模板，保留原色），否则 SVG 模板按白色渲染；
+    // 加载不到（旧系统或资源缺失）就退回 SF Symbol。
     nonisolated(unsafe) private static var iconCache: [String: NSImage?] = [:]
     static func icon(id: String) -> NSImage? {
         if let cached = iconCache[id] { return cached }
+        if let png = Bundle.main.url(forResource: "bobo-provider-\(id)", withExtension: "png")
+            .flatMap({ NSImage(contentsOf: $0) }) {
+            png.isTemplate = false
+            iconCache[id] = png
+            return png
+        }
         let image = Bundle.main.url(forResource: "bobo-provider-\(id)", withExtension: "svg")
             .flatMap { NSImage(contentsOf: $0) }
         image?.isTemplate = true
@@ -3541,7 +3548,9 @@ struct IslandQuotaChip: View {
 
     @ViewBuilder private var providerIcon: some View {
         if let icon = IslandMetrics.icon(for: provider) {
-            Image(nsImage: icon).resizable().renderingMode(.template).interpolation(.high).scaledToFit()
+            Image(nsImage: icon).resizable()
+                .renderingMode(icon.isTemplate ? .template : .original)
+                .interpolation(.high).scaledToFit()
         } else {
             Image(systemName: IslandMetrics.symbol(for: provider)).font(.system(size: 10, weight: .medium))
         }
@@ -3780,7 +3789,9 @@ private struct IslandQuotaProviderBlock: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 if let icon = IslandMetrics.icon(for: provider) {
-                    Image(nsImage: icon).resizable().renderingMode(.template).interpolation(.high).scaledToFit()
+                    Image(nsImage: icon).resizable()
+                        .renderingMode(icon.isTemplate ? .template : .original)
+                        .interpolation(.high).scaledToFit()
                         .frame(width: 13, height: 13).foregroundStyle(.white.opacity(0.9))
                 } else {
                     Image(systemName: IslandMetrics.symbol(for: provider)).font(.system(size: 10, weight: .medium)).foregroundStyle(.white.opacity(0.9))

@@ -746,6 +746,10 @@ async function loadAgentProviders(){
 // 来源图标：只认真实品牌图标（index.html 的内联 SVG 精灵），没有图标的来源干脆不放图标，不做首字母占位。
 function providerGlyph(p){
  if(!p.icon)return null;
+ // Colorful brand avatars (e.g. Grok Bot) are PNGs served under /provider-*.png; keep .sf sizing.
+ if(typeof p.icon==='string'&&(p.icon.startsWith('/')||p.icon.endsWith('.png'))){
+  const img=document.createElement('img');img.className='sf';img.src=p.icon;img.alt='';return img;
+ }
  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('class','sf');
  const use=document.createElementNS('http://www.w3.org/2000/svg','use');use.setAttribute('href','#'+p.icon);svg.append(use);return svg;
 }
@@ -1371,7 +1375,7 @@ function islandSwitch(row,key,label,on){
 }
 // 「内容 → 额度显示顺序」：几枚来源图标按住拖动排序。写的是同一份 order（usage.json 的 order），
 // 所以通知岛里的这个顺序、左栏「额度来源」的顺序、刘海面板上圆环的顺序始终一致。
-const quotaSymbols={codex:'provider-codex',claude:'provider-claude','opencode-go':'provider-opencode',agy:'provider-agy',cursor:'provider-cursor',grok:'provider-grok'};
+const quotaSymbols={codex:'provider-codex',claude:'provider-claude','opencode-go':'provider-opencode',agy:'provider-agy',cursor:'provider-cursor',grok:'/provider-grok.png'};
 let quotaOrderIds='';
 function renderQuotaOrder(usage){
  const box=$('#quotaOrderList');if(!box)return;
