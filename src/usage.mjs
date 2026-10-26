@@ -9,6 +9,7 @@
 // Codex 与 Claude Code 走的都是官方账号自己的接口、不改任何凭据（不刷新 token、不回写钥匙串）；本地库只读
 // （没有 sidecar 时用 immutable 直读，不创建文件）。
 import {execFile,spawn} from 'node:child_process';
+import {pbkdf2Sync,createDecipheriv} from 'node:crypto';
 import dns from 'node:dns/promises';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -21,13 +22,13 @@ export const providers=[
  {id:'opencode-go',name:'OpenCode Go',symbol:'terminal'},
  {id:'agy',name:'Antigravity',symbol:'sparkles'},
  {id:'cursor',name:'Cursor',symbol:'cursorarrow'},
- {id:'grok',name:'Grok (SuperGrok)',symbol:'sparkles'},
+ {id:'grok',name:'Grok Bot',symbol:'sparkles'},
 ];
 const codexUsageURL='https://chatgpt.com/backend-api/wham/usage';
 const opencodeUsageURL='https://opencode.ai/zen/go/v1/usage';
 const claudeUsageURL='https://api.anthropic.com/api/oauth/usage';
 const cursorUsageURL='https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage';
-const grokUsageURL='https://cli-chat-proxy.grok.com/v1/billing?format=credits';
+const grokUsageURL='https://cursor.com/api/dashboard/get-sand-usage-status';
 // 用量接口对认不出的客户端限流更凶，User-Agent 要像 Claude Code 自己（CodexBar 同样固定成 claude-code/<版本>；
 // 版本号本身不是关键，没必要为了它去跑一次 claude --version）。
 const claudeUserAgent='claude-code/2.1.0';
@@ -247,7 +248,7 @@ export function claudeSnapshot(body,nowMs){
  return {id:'claude',name:'Claude Code',symbol:'sparkles',available:true,estimated:false,source:'api',keySource:'',keyHint:'',plan:'',credits:null,windows,error:null,updatedAt:nowMs};
 }
 
-// magpie 的订阅窗口：Total / On-demand 是补充明细（aside），不参与圆环范围切换。
+// 订阅窗口：Cursor Total 是补充明细（aside），不参与圆环范围切换。
 function subscriptionWindow(key,label,used,resetsAt,nowMs,aside=false){
  if(typeof used!=='number'||!Number.isFinite(used))throw userError('额度接口返回的百分比无效');
  const usedPercent=clampPercent(used);
@@ -267,27 +268,54 @@ export function cursorSnapshot(body,nowMs){
  return subscriptionSnapshot('cursor',windows,nowMs);
 }
 export function grokSnapshot(body,nowMs){
- const config=body?.config;
- if(!config||typeof config!=='object'||Array.isArray(config))throw userError('Grok 额度接口没有返回有效的 config');
- const period=config.currentPeriod,type=String(period?.type||'').replace(/^USAGE_PERIOD_TYPE_/,''),label={DAILY:'1 day',WEEKLY:'7 days',MONTHLY:'Month'}[type]||'Allowance';
- const resetsAt=Date.parse((period?period.end:config.billingPeriodEnd)||'')||null;
- const windows=[subscriptionWindow('allowance',label,config.creditUsagePercent??0,resetsAt,nowMs)];
- const cap=config.onDemandCap?.val,used=config.onDemandUsed?.val??0;
- if(cap>0){
-  if(typeof cap!=='number'||!Number.isFinite(cap))throw userError('Grok On-demand 上限无效');
-  if(typeof used!=='number'||!Number.isFinite(used))throw userError('Grok On-demand 用量无效');
-  windows.push(subscriptionWindow('on-demand','On-demand',100*used/cap,resetsAt,nowMs,true));
- }
- return subscriptionSnapshot('grok',windows,nowMs);
+ if(!body||typeof body!=='object'||Array.isArray(body))throw userError('Grok Bot 额度接口响应无效');
+ const hasLimit=body.includedLimitZero===false||body.hasNonZeroIncludedLimit===true;
+ const hasTrial=!hasLimit&&Date.parse(body.sandTrialExpiresAt||'')>nowMs;
+ const resetsAt=hasTrial?null:Date.parse(body.nextResetTimestampUtc||'')||null;
+ const windows=(hasLimit||hasTrial)&&typeof body.usagePercent==='number'&&Number.isFinite(body.usagePercent)?[subscriptionWindow('allowance','Grok Bot',body.usagePercent,resetsAt,nowMs)]:[];
+ return {...subscriptionSnapshot('grok',windows,nowMs),...(!windows.length?{reason:'当前没有 Grok Bot 可用额度窗口'}:{})};
 }
 
-export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,notify=null,execFileImpl=execFile,claudeNetwork=null,cursorKeychain=process.platform==='darwin'&&!env.BOBO_HOME&&!home.startsWith(os.tmpdir())}={}){
+const cursorJWT=value=>typeof value==='string'&&/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value);
+export function cursorSessionCookie(jwt){
+ try{
+  if(!cursorJWT(jwt))throw Error();
+  const {sub}=JSON.parse(Buffer.from(jwt.split('.')[1],'base64url').toString('utf8'));
+  const userId=typeof sub==='string'?sub.split('|').at(-1):'';
+  if(!/^[A-Za-z0-9._-]+$/.test(userId))throw Error();
+  return 'WorkosCursorSessionToken='+userId+'%3A%3A'+jwt;
+ }catch{throw userError('Cursor / Grok Bot 登录凭据不是有效的 JWT 或缺少用户 ID，请打开 Grok Bot 或 Cursor 并重新登录');}
+}
+export function decryptGrokBotToken(value,password){
+ try{
+  if(typeof value!=='string'||!value||!/^[A-Za-z0-9+/]+={0,2}$/.test(value)||typeof password!=='string'||!password)throw Error();
+  const encrypted=Buffer.from(value,'base64');
+  if(encrypted.subarray(0,3).toString('ascii')!=='v10')throw Error();
+  const key=pbkdf2Sync(password,'saltysalt',1003,16,'sha1'),decipher=createDecipheriv('aes-128-cbc',key,Buffer.alloc(16,0x20));
+  const jwt=Buffer.concat([decipher.update(encrypted.subarray(3)),decipher.final()]).toString('utf8');
+  cursorSessionCookie(jwt);
+  return jwt;
+ }catch{throw userError('无法解密 Grok Bot 登录凭据（钥匙串未授权或格式无效）');}
+}
+export async function readCursorAppAccessToken(home){
+ const file=path.join(home,'Library/Application Support/Cursor/User/globalStorage/state.vscdb');
+ await fs.access(file);
+ const {DatabaseSync}=await import('node:sqlite');
+ // 只取主库的只读快照，不创建 WAL / SHM；尚在 WAL 的登录由其它来源兜底，等待应用合并到主库。
+ const uri='file:'+encodeURI(file).replace(/[?#]/g,c=>'%'+c.charCodeAt(0).toString(16).toUpperCase())+'?immutable=1';
+ const db=new DatabaseSync(uri,{readOnly:true});
+ try{return db.prepare('SELECT value FROM ItemTable WHERE key = ?').get('cursorAuth/accessToken')?.value||'';}
+ finally{db.close();}
+}
+
+export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,notify=null,execFileImpl=execFile,claudeNetwork=null,cursorKeychain=process.platform==='darwin'&&!env.BOBO_HOME&&!home.startsWith(os.tmpdir()),grokBotKeychain=cursorKeychain,readCursorAppAccessTokenImpl=readCursorAppAccessToken}={}){
  const dataDir=path.join(home,'.bobo'),settingsFile=path.join(dataDir,'usage.json');
  const opencodeDir=path.join(home,'.local/share/opencode'),dbFile=path.join(opencodeDir,'opencode.db'),authFile=path.join(opencodeDir,'auth.json');
  const codexDir=env.CODEX_HOME||path.join(home,'.codex');
  const claudeDir=env.CLAUDE_CONFIG_DIR||path.join(home,'.claude');
  let sqlite=null,order=providers.map(p=>p.id),state=empty(),signature='',listeners=new Set(),timer=null,reading=null,closed=false,localRowsCache=null,localDbStamp='';
  const cache=new Map(),backoff=new Map();
+ let cursorAuthReading=null;
  // 持久化设置（~/.bobo/usage.json）：各来源的显示顺序（order，折叠胶囊显示顺序里第一个可用且开启的）、
  // 各来源的启停、手动填的 API Key、额度重置提醒、各来源圆环显示哪一档窗口（ranges，见 cycleRange）；
  // keychain 记「用户允许读过 macOS 钥匙串里的 Claude Code 登录」，没答应过就一次都不读（见 claudeAuth）；
@@ -445,39 +473,40 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   return localSnapshot(list||[],nowMs,false,rowsError||null,'','');
  }
 
- // ---- Cursor / Grok：只读 magpie 已使用的 CLI 登录位置，不扫其它凭据、不刷新或回写 token。 ----
- async function cursorAuth(){
-  // 临时 HOME / BOBO_HOME 默认不碰真实钥匙串；测试可显式注入 cursorKeychain 与 execFileImpl。
+ // ---- Cursor / Grok Bot：每轮共用一次只读登录，不刷新或回写任何凭据。 ----
+ const keychainPassword=(service,account)=>new Promise(resolve=>execFileImpl('/usr/bin/security',['find-generic-password','-s',service,'-a',account,'-w'],{timeout:15000,maxBuffer:65536},(error,stdout)=>resolve(error?'':String(stdout||'').replace(/\r?\n$/,''))));
+ function cursorAuth(){return cursorAuthReading??=(async()=>{
+  const reasons=[];
+  try{
+   const raw=JSON.parse(await fs.readFile(path.join(home,'Library/Application Support/Grok Bot/sand-secrets.json'),'utf8'));
+   const accounts=JSON.parse(raw['cursor-accounts']),value=accounts?.accounts?.[accounts.active]?.['cursor-access-token'];
+   // 临时 HOME / BOBO_HOME 默认不碰真实钥匙串；测试必须显式开启并注入命令。
+   if(!grokBotKeychain)throw userError('无法解密 Grok Bot 登录凭据（钥匙串未授权或格式无效）');
+   const password=await keychainPassword('Grok Bot Safe Storage','Grok Bot Key');
+   return {key:decryptGrokBotToken(value,password),keySource:'grok-bot'};
+  }catch(e){if(e.code!=='ENOENT')reasons.push(e?.userFacing?e.message:'无法读取 Grok Bot 登录，请打开 Grok Bot 并登录');}
+  try{
+   const key=await readCursorAppAccessTokenImpl(home);
+   if(cursorJWT(key))return {key,keySource:'cursor-app'};
+   if(key)reasons.push('Cursor.app 登录不是 JWT（可能是 cursor-safe 加密格式），请打开 Grok Bot 并登录');
+  }catch(e){if(e.code!=='ENOENT')reasons.push('无法读取 Cursor.app 登录，请打开 Cursor 并登录');}
   if(cursorKeychain){
-   const key=await new Promise(resolve=>execFileImpl('/usr/bin/security',['find-generic-password','-s','cursor-access-token','-a','cursor-user','-w'],{timeout:15000,maxBuffer:65536},(error,stdout)=>resolve(error?'':String(stdout||'').trim())));
-   if(key)return {key,keySource:'keychain'};
+   try{const key=(await keychainPassword('cursor-access-token','cursor-user')).trim();if(key)return {key,keySource:'keychain'};}
+   catch{reasons.push('无法读取 cursor-agent 钥匙串登录');}
   }
   try{
    const raw=JSON.parse(await fs.readFile(path.join(home,'.cursor/auth.json'),'utf8'));
    if(typeof raw?.accessToken==='string'&&raw.accessToken.trim())return {key:raw.accessToken.trim(),keySource:'file'};
-  }catch(e){if(e.code!=='ENOENT')throw userError('无法读取 ~/.cursor/auth.json，请检查权限或重新运行 cursor-agent login');}
-  throw userError('未找到 cursor-agent 登录，请运行 cursor-agent login'+(cursorKeychain?'；钥匙串未授权或没有条目时，可检查 ~/.cursor/auth.json':''));
- }
- async function grokAuth(nowMs){
-  const file=path.join(env.GROK_HOME||path.join(home,'.grok'),'auth.json');
-  let raw;
-  try{raw=JSON.parse(await fs.readFile(file,'utf8'));}
-  catch(e){throw userError(e.code==='ENOENT'?'未找到 Grok 登录，请运行 grok login（登录目录为 GROK_HOME，默认 ~/.grok）':'无法读取 Grok auth.json，请检查 GROK_HOME、文件权限或重新运行 grok login');}
-  // 与 readGrokCredential 一致：按账户键排序，取第一份有 key 的登录。
-  const cred=raw&&typeof raw==='object'&&!Array.isArray(raw)?Object.keys(raw).sort().map(k=>raw[k]).find(c=>typeof c?.key==='string'&&c.key.trim()):null;
-  if(!cred)throw userError('Grok auth.json 里没有可用的登录，请运行 grok login');
-  const expires=Date.parse(cred.expires_at||'');
-  if(cred.expires_at&&!Number.isFinite(expires))throw userError('Grok 登录的过期时间无效，请重新运行 grok login');
-  if(expires<=nowMs)throw userError('Grok 登录已过期，请在终端运行 grok models 刷新，或重新 grok login');
-  return {key:cred.key.trim(),keySource:'file'};
- }
- async function readSubscription(id,url,auth,nowMs,{method='GET',body}={}){
+  }catch(e){if(e.code!=='ENOENT')reasons.push('无法读取 ~/.cursor/auth.json，请检查权限或重新运行 cursor-agent login');}
+  throw userError(reasons.length?reasons.join('；'):'未找到 Cursor / Grok Bot 登录，请打开 Grok Bot 或 Cursor 并登录，或运行 cursor-agent login'+(cursorKeychain?'；钥匙串未授权或没有条目时，可检查 ~/.cursor/auth.json':''));
+ })();}
+ async function readSubscription(id,url,auth,nowMs){
   const name=providers.find(p=>p.id===id).name,controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),codexTimeoutMs);
   try{
-   const headers={authorization:'Bearer '+auth.key,accept:'application/json',...(id==='cursor'?{'content-type':'application/json','Connect-Protocol-Version':'1'}:{})};
+   const method='POST',body='{}',headers={accept:'application/json','content-type':'application/json',...(id==='cursor'?{authorization:'Bearer '+auth.key,'Connect-Protocol-Version':'1'}:{cookie:cursorSessionCookie(auth.key),origin:'https://cursor.com'})};
    const proxy=fetchImpl===fetch&&process.platform==='darwin'&&!env.BOBO_HOME&&!home.startsWith(os.tmpdir())?await systemHTTPSProxy():'';
    const response=proxy?await curlUsage(proxy,headers,url,{method,body}):await fetchImpl(url,{method,body,headers,redirect:'error',signal:controller.signal});
-   if(response.status===401||response.status===403)throw userError(name+' 登录被拒绝或已过期，请重新运行 '+(id==='cursor'?'cursor-agent login':'grok login'));
+   if(response.status===401||response.status===403)throw userError(name+' 登录被拒绝或已过期，请打开 Grok Bot 或 Cursor 重新登录；使用 cursor-agent 时运行 cursor-agent login');
    if(response.status===429)throw userError(name+' 额度接口请求受限，稍后会自动重试');
    if(!response.ok)throw userError(name+' 额度接口返回 '+response.status);
    let data;try{data=await response.json();}catch{throw userError(name+' 额度接口返回的不是 JSON');}
@@ -485,8 +514,8 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   }catch(e){if(e?.userFacing)throw e;throw userError('无法连接 '+name+' 额度接口，请检查网络 / 代理后重试');}
   finally{clearTimeout(timeout);}
  }
- const readCursor=async nowMs=>readSubscription('cursor',cursorUsageURL,await cursorAuth(),nowMs,{method:'POST',body:'{}'});
- const readGrok=async nowMs=>readSubscription('grok',grokUsageURL,await grokAuth(nowMs),nowMs);
+ const readCursor=async nowMs=>readSubscription('cursor',cursorUsageURL,await cursorAuth(),nowMs);
+ const readGrok=async nowMs=>readSubscription('grok',grokUsageURL,await cursorAuth(),nowMs);
 
  // ---- Codex：~/.codex/auth.json + chatgpt.com（只读凭据，不刷新、不回写） ----
  async function readCodex(nowMs){
@@ -801,6 +830,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   reading=(async()=>{
    const nowMs=now();
    await loadSettings();
+   cursorAuthReading=null;
    const results=await Promise.all(providers.map(async p=>{
     const id=p.id,cached=cache.get(id);
     const stamp=snapshot=>{snapshot.enabled=isEnabled(id);snapshot.range=rangeFor(id,snapshot.windows);return snapshot;};

@@ -10,7 +10,7 @@ published: true
 
 ### 新增
 
-- Cursor 与 Grok (SuperGrok) 订阅额度，支持通知岛圆环、明细、启停与拖动排序，沿用额度重置提醒；只读官方 CLI 登录，失败时显示原因。
+- Cursor 与 Grok Bot（Sand）额度，支持通知岛圆环、明细、启停与拖动排序，沿用额度重置提醒；共用 Grok Bot / Cursor.app / cursor-agent 的只读登录，不刷新或写回凭据，接口失败互不影响，移除旧 Grok CLI 路径识别。
 
 ## [1.3.5] - 2026-10-10
 

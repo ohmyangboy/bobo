@@ -7,6 +7,11 @@ import {cursorSnapshot,grokSnapshot} from '../src/usage.mjs';
 const source=await fs.readFile(new URL('../public/app.js',import.meta.url),'utf8');
 const html=await fs.readFile(new URL('../public/index.html',import.meta.url),'utf8');
 const slice=(start,end)=>{const from=source.indexOf(start),to=source.indexOf(end,from);assert.ok(from>=0&&to>from);return source.slice(from,to);};
+test('Cursor / Grok Bot：源码与功能文档不保留旧 CLI 额度路径或文案',async()=>{
+ const src=new URL('../src/',import.meta.url),files=(await fs.readdir(src)).filter(name=>name.endsWith('.mjs')).map(name=>new URL(name,src));
+ files.push(...['public/app.js','public/index.html','docs/features.md','AGENTS.md','CHANGELOG.md'].map(name=>new URL('../'+name,import.meta.url)));
+ for(const file of files)assert.doesNotMatch(await fs.readFile(file,'utf8'),/cli-chat-proxy|GROK_HOME|grok login|grok models|SuperGrok|\.grok\//,file.pathname);
+});
 class Element{
  constructor(){this.children=[];this.textContent='';this.dataset={};this.style={};this.classList={toggle(){}};}
  append(...children){for(const c of children){if(c.parent)c.remove();c.parent=this;this.children.push(c);}}
@@ -39,7 +44,7 @@ function page(providers){
  return {nodes,status,calls,panes,buttons,context,run:code=>vm.runInContext(code,context)};
 }
 const snapshots=()=>[
- {...grokSnapshot({config:{creditUsagePercent:42.5,currentPeriod:{type:'WEEKLY'},onDemandCap:{val:100},onDemandUsed:{val:5}}},1),enabled:true},
+ {...grokSnapshot({usagePercent:5,includedLimitZero:false},1),enabled:true,keySource:'grok-bot'},
  {...cursorSnapshot({planUsage:{autoPercentUsed:12.5,apiPercentUsed:40,totalPercentUsed:20}},1),enabled:true,keySource:'keychain'}
 ];
 test('额度 UI：Cursor / Grok 分栏可导航，窗口与补充明细按真实快照渲染，启停写对应 id',async()=>{
@@ -48,8 +53,9 @@ test('额度 UI：Cursor / Grok 分栏可导航，窗口与补充明细按真实
  assert.equal(p.panes[0].hidden,false);assert.equal(p.panes[1].hidden,true);
  assert.match(flatten(p.nodes['#usageCursorWindows']),/Cursor Models.*剩 87.5%.*Other Models.*剩 60%.*Total.*剩 80%/);
  assert.equal(p.nodes['#usageCursorWindows'].children[2].dataset.aside,'true');
- assert.match(flatten(p.nodes['#usageGrokWindows']),/7 days.*剩 57.5%.*On-demand.*剩 95%/);
- assert.match(p.nodes['#usageCursorNote'].textContent,/钥匙串/);
+ assert.match(flatten(p.nodes['#usageGrokWindows']),/Grok Bot.*剩 95%/);
+ assert.match(p.nodes['#usageCursorNote'].textContent,/钥匙串/);assert.match(p.nodes['#usageGrokNote'].textContent,/Grok Bot 本机登录/);
+ assert.match(html,/<h2>Grok Bot<\/h2>/);assert.doesNotMatch(html,/SuperGrok|Grok CLI/);assert.equal(p.nodes['#usageGrokWindows'].children.length,1);
  assert.equal(p.status['quota-grok'].text,'已连接');
  await p.nodes['#rowUsageGrok'].querySelector('.switch').change(false);
  assert.equal(p.calls[0].route,'usage/enabled');assert.equal(p.calls[0].body.id,'grok');assert.equal(p.calls[0].body.enabled,false);assert.equal(p.status['quota-grok'].text,'已关闭');
@@ -62,7 +68,7 @@ test('额度 UI：来源图标与侧栏按快照顺序排列，失败原因和�
  assert.deepEqual(p.nodes['#quotaNav'].children.map(b=>b.dataset.islandPane),['quota-grok','quota-cursor']);
  assert.deepEqual(p.nodes['#quotaOrderList'].children.map(b=>b.dataset.provider),['grok','cursor']);
  assert.equal(p.nodes['#quotaOrderList'].children[1].dataset.state,'off');
- assert.match(flatten(p.nodes['#usageGrokWindows']),/7 days.*57.5%/);assert.match(p.nodes['#usageGrokNote'].textContent,/网络拒绝/);
+ assert.match(flatten(p.nodes['#usageGrokWindows']),/Grok Bot.*95%/);assert.match(p.nodes['#usageGrokNote'].textContent,/网络拒绝/);
  assert.match(flatten(p.nodes['#usageCursorWindows']),/cursor-agent login/);assert.equal(p.status['quota-cursor'].text,'未连接');
  for(const id of ['cursor','grok']){
   assert.ok(html.includes('data-island-pane="quota-'+id+'" draggable="true"'));

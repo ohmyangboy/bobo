@@ -1640,8 +1640,9 @@ function renderUsage(){
  renderUsageWindows('#usageAgyWindows',agy);
  renderUsageWindows('#usageCursorWindows',cursor);
  renderUsageWindows('#usageGrokWindows',grok);
- $('#usageCursorNote').textContent=cursor?.error?'⚠ '+cursor.error:cursor?.reason||('登录来源：'+(cursor?.keySource==='keychain'?'macOS 钥匙串（cursor-access-token）':'~/.cursor/auth.json')+'；Total 是补充明细，重置时间以 Cursor 账单周期为准。');
- $('#usageGrokNote').textContent=grok?.error?'⚠ '+grok.error:grok?.reason||'只读 Grok CLI 登录（GROK_HOME，默认 ~/.grok/auth.json）；On-demand 是补充明细。登录过期时请在终端运行 grok models 或 grok login。';
+ const cursorAuthSources={'grok-bot':'Grok Bot 本机登录（钥匙串解密）','cursor-app':'Cursor.app 本机 JWT 登录',keychain:'macOS 钥匙串（cursor-access-token）',file:'~/.cursor/auth.json'};
+ $('#usageCursorNote').textContent=cursor?.error?'⚠ '+cursor.error:cursor?.reason||('登录来源：'+(cursorAuthSources[cursor?.keySource]||'Cursor / Grok Bot')+'；Total 是补充明细，重置时间以 Cursor 账单周期为准。');
+ $('#usageGrokNote').textContent=grok?.error?'⚠ '+grok.error:grok?.reason||('登录来源：'+(cursorAuthSources[grok?.keySource]||'Cursor / Grok Bot')+'；显示 Sand 订阅或试用额度，试用到期不作为周期重置。');
  const codexBits=[];
  if(codex?.plan)codexBits.push('套餐：'+codex.plan);
  if(codex?.credits?.unlimited)codexBits.push('额度无上限（credits unlimited）');

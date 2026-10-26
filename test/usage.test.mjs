@@ -1,6 +1,7 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs/promises';import os from 'node:os';import path from 'node:path';import http from 'node:http';
 import {DatabaseSync} from 'node:sqlite';
-import {createUsage, agySnapshot, macHTTPSProxy, curlUsage, claudeSnapshot, claudeCredentials, keychainDecode, tunnelInterface, cursorSnapshot, grokSnapshot} from '../src/usage.mjs';
+import {pbkdf2Sync,createCipheriv} from 'node:crypto';
+import {createUsage, agySnapshot, macHTTPSProxy, curlUsage, claudeSnapshot, claudeCredentials, keychainDecode, tunnelInterface, cursorSnapshot, grokSnapshot, cursorSessionCookie, decryptGrokBotToken, readCursorAppAccessToken} from '../src/usage.mjs';
 // 每日历史按本地日历分桶，测试固定 UTC，让「天」的断言在任何时区都稳定。
 process.env.TZ='UTC';
 // 与 CodexBar 的 OpenCodeGoLocalUsageReader 测试同一基准：2026-03-06T12:00:00Z。
@@ -81,13 +82,20 @@ const opencodeBody=({rolling={status:'ok',percent:23},weekly={status:'ok',percen
 const routeFetch=(pattern,fn,calls)=>async(url,options)=>{if(!pattern.test(String(url)))throw Error('测试没有为该地址准备响应：'+url);calls?.();return fn(url,options);};
 
 const cursorBody=(used=12.5)=>({billingCycleEnd:String(NOW+3600e3),planUsage:{autoPercentUsed:used,apiPercentUsed:40,totalPercentUsed:20}});
-const grokBody=(used=42.5)=>({config:{creditUsagePercent:used,currentPeriod:{type:'USAGE_PERIOD_TYPE_WEEKLY',end:new Date(NOW+86400e3).toISOString()},onDemandCap:{val:2000},onDemandUsed:{val:500}}});
-async function writeSubscriptionAuth(home,id){
- const file=path.join(home,id==='cursor'?'.cursor/auth.json':'.grok/auth.json');
- await fs.mkdir(path.dirname(file),{recursive:true});
- const raw=id==='cursor'?{accessToken:'cursor-file-token'}:{account:{key:'grok-file-token',email:'test@example.test',expires_at:new Date(NOW+30*86400e3).toISOString()}};
- await fs.writeFile(file,JSON.stringify(raw));
- return file;
+const grokBody=(used=5)=>({usagePercent:used,hasAvailableUsage:true,includedLimitZero:false,currentPeriodStart:new Date(NOW-6*86400e3).toISOString(),nextResetTimestampUtc:new Date(NOW+86400e3).toISOString(),grokPlanLabel:'Grok Bot Plan',isUnified:true});
+const cursorJWT=(sub='auth0|fixture-user_1.2',extra={})=>[Buffer.from('{"alg":"HS256"}').toString('base64url'),Buffer.from(JSON.stringify({sub,exp:NOW/1000+30*86400,...extra})).toString('base64url'),'fixture-signature'].join('.');
+const fileJWT=cursorJWT();
+const subscriptionURL=id=>id==='cursor'?/^https:\/\/api2\.cursor\.sh\//:/^https:\/\/cursor\.com\/api\/dashboard\/get-sand-usage-status$/;
+async function writeSubscriptionAuth(home){
+ const file=path.join(home,'.cursor/auth.json');
+ await fs.mkdir(path.dirname(file),{recursive:true});await fs.writeFile(file,JSON.stringify({accessToken:fileJWT}));return file;
+}
+async function writeSandAuth(home,{token=fileJWT,password='fixture safe storage 密码 ',active='active',ciphertext}={}){
+ const cipher=createCipheriv('aes-128-cbc',pbkdf2Sync(password,'saltysalt',1003,16,'sha1'),Buffer.alloc(16,0x20));
+ const encrypted=Buffer.concat([Buffer.from('v10'),cipher.update(token,'utf8'),cipher.final()]).toString('base64');
+ const file=path.join(home,'Library/Application Support/Grok Bot/sand-secrets.json');
+ const raw=JSON.stringify({'cursor-accounts':JSON.stringify({active,accounts:{ignored:{'cursor-access-token':'invalid'},[active]:{'cursor-access-token':ciphertext??encrypted}}})});
+ await fs.mkdir(path.dirname(file),{recursive:true});await fs.writeFile(file,raw);return {file,raw,password,encrypted};
 }
 const subscriptionBody=(id,used)=>id==='cursor'?cursorBody(used):grokBody(used);
 
@@ -101,80 +109,113 @@ test('Cursor：按 magpie 解析两池与 Total 明细，毫秒账单时间、�
  assert.deepEqual(cursorSnapshot({billingCycleEnd:'123'},NOW).windows,[],'企业套餐不捏造百分比窗口');
  assert.throws(()=>cursorSnapshot({planUsage:{autoPercentUsed:'bad'}},NOW),/百分比无效/);
 });
-test('Grok：周期名称、未用过的缺省百分比、账单时间与可选 On-demand',()=>{
- const p=grokSnapshot(grokBody(),NOW);
- assert.deepEqual(p.windows.map(w=>[w.key,w.label,w.usedPercent,w.remainingPercent,w.aside]),[['allowance','7 days',42.5,57.5,false],['on-demand','On-demand',25,75,true]]);
- for(const w of p.windows){assert.equal(w.resetsAt,NOW+86400e3);assert.equal(w.resetInSec,86400);}
- for(const [type,label] of [['DAILY','1 day'],['USAGE_PERIOD_TYPE_WEEKLY','7 days'],['MONTHLY','Month'],['unknown','Allowance']]){
-  const windows=grokSnapshot({config:{currentPeriod:{type,end:new Date(NOW+60000).toISOString()},onDemandCap:{val:0}}},NOW).windows;
-  assert.equal(windows.length,1);assert.equal(windows[0].label,label);assert.equal(windows[0].remainingPercent,100);assert.equal(windows[0].resetInSec,60);
- }
- assert.equal(grokSnapshot({config:{billingPeriodEnd:new Date(NOW+60000).toISOString()}},NOW).windows[0].resetsAt,NOW+60000);
- assert.throws(()=>grokSnapshot({},NOW),/config/);
- assert.throws(()=>grokSnapshot({config:{creditUsagePercent:null,onDemandCap:{val:2},onDemandUsed:{val:'bad'}}},NOW),/On-demand 用量无效/);
+test('Grok Bot：Sand included / trial 窗口，缺字段不捏造额度或试用重置',()=>{
+ const p=grokSnapshot(grokBody(),NOW),w=p.windows[0];
+ assert.equal(p.name,'Grok Bot');assert.deepEqual([w.key,w.label,w.usedPercent,w.remainingPercent,w.aside],['allowance','Grok Bot',5,95,false]);
+ assert.equal(w.resetsAt,NOW+86400e3);assert.equal(w.resetInSec,86400);
+ assert.equal(grokSnapshot({usagePercent:12,hasNonZeroIncludedLimit:true},NOW).windows.length,1);
+ const trial={usagePercent:25,includedLimitZero:true,sandTrialExpiresAt:new Date(NOW+60000).toISOString(),nextResetTimestampUtc:new Date(NOW+120000).toISOString()};
+ assert.equal(grokSnapshot(trial,NOW).windows[0].resetsAt,null,'试用到期不是周期重置');
+ assert.equal(grokSnapshot({...trial,sandTrialExpiresAt:new Date(NOW).toISOString()},NOW).windows.length,0);
+ for(const body of [{},{usagePercent:5,hasAvailableUsage:true},{includedLimitZero:false},...['5',null,NaN,Infinity].map(usagePercent=>({includedLimitZero:false,usagePercent}))])assert.deepEqual(grokSnapshot(body,NOW).windows,[]);
+ assert.equal(grokSnapshot({...grokBody(120),hasAvailableUsage:false},NOW).windows[0].status,'rate-limited');
+ assert.equal(grokSnapshot(grokBody(-1),NOW).windows[0].remainingPercent,100);
+ assert.equal(grokSnapshot({...grokBody(),nextResetTimestampUtc:'invalid'},NOW).windows[0].resetsAt,null);
+ for(const body of [null,[],42])assert.throws(()=>grokSnapshot(body,NOW),/响应无效/);
 });
-test('Cursor：读取文件登录并按 Connect 协议 POST，不改写凭据或保存 token',async()=>{
- const home=await makeHome(),file=await writeSubscriptionAuth(home,'cursor'),original=await fs.readFile(file,'utf8'),requests=[];
- const usage=createUsage({home,now:()=>NOW,env:{},fetchImpl:routeFetch(/^https:\/\/api2\.cursor\.sh\//,async(url,options)=>{requests.push({url,options});return fakeFetch(cursorBody());})});
+test('Cursor session cookie：JWT sub 取最后一段，拒绝无效格式与用户 ID',()=>{
+ assert.equal(cursorSessionCookie(fileJWT),'WorkosCursorSessionToken=fixture-user_1.2%3A%3A'+fileJWT);
+ for(const token of ['cursor-safe-encrypted',cursorJWT(''),cursorJWT('user;secret'),cursorJWT('user\r\nCookie:bad'),cursorJWT(null),'abc.def.ghi',cursorJWT('user|')])assert.throws(()=>cursorSessionCookie(token),/JWT|用户 ID/);
+});
+test('Grok Bot：base64 v10 解密、活动账户选择、共用一次钥匙串和 JWT，只读凭据',async()=>{
+ const home=await makeHome(),fixture=await writeSandAuth(home),commands=[],requests=[];
+ const usage=createUsage({home,now:()=>NOW,env:{},grokBotKeychain:true,cursorKeychain:false,
+  execFileImpl:(file,args,options,cb)=>{commands.push([file,...args]);cb(null,fixture.password+'\n','');},
+  fetchImpl:async(url,options)=>{requests.push({url,options});return fakeFetch(url.includes('api2.cursor.sh')?cursorBody():grokBody());}});
  try{
-  const p=provider(await usage.refresh(),'cursor');assert.equal(p.available,true);assert.equal(p.keySource,'file');assert.equal(requests.length,1);
-  const {url,options}=requests[0];assert.equal(url,'https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage');assert.equal(options.method,'POST');assert.equal(options.body,'{}');assert.equal(options.redirect,'error');
-  assert.equal(options.headers.authorization,'Bearer cursor-file-token');assert.equal(options.headers['content-type'],'application/json');assert.equal(options.headers['Connect-Protocol-Version'],'1');
-  assert.equal(await fs.readFile(file,'utf8'),original);assert.doesNotMatch(JSON.stringify(usage.snapshot()),/cursor-file-token/);
-  assert.equal(p.range,'cursor-models');assert.equal(usage.cycleRange('cursor').providers.find(p=>p.id==='cursor').range,'other-models');assert.equal(usage.cycleRange('cursor').providers.find(p=>p.id==='cursor').range,'cursor-models','Total 不参与圆环切换');
+  assert.equal(decryptGrokBotToken(fixture.encrypted,fixture.password),fileJWT);
+  for(const value of ['v10-not-base64',Buffer.from('v11invalid').toString('base64'),fixture.encrypted.slice(0,-8)])assert.throws(()=>decryptGrokBotToken(value,fixture.password),/无法解密 Grok Bot/);
+  assert.throws(()=>decryptGrokBotToken(fixture.encrypted,'wrong password'),/无法解密 Grok Bot/);
+  const s=await usage.refresh();assert.equal(provider(s,'cursor').keySource,'grok-bot');assert.equal(provider(s,'grok').keySource,'grok-bot');
+  assert.deepEqual(commands,[['/usr/bin/security','find-generic-password','-s','Grok Bot Safe Storage','-a','Grok Bot Key','-w']]);assert.equal(requests.length,2);
+  for(const {url,options:o} of requests){
+   assert.equal(o.method,'POST');assert.equal(o.body,'{}');assert.equal(o.redirect,'error');assert.equal(o.headers.accept,'application/json');assert.equal(o.headers['content-type'],'application/json');
+   if(url.includes('api2.cursor.sh')){assert.equal(o.headers.authorization,'Bearer '+fileJWT);assert.equal(o.headers['Connect-Protocol-Version'],'1');assert.equal(o.headers.cookie,undefined);}
+   else{assert.equal(url,'https://cursor.com/api/dashboard/get-sand-usage-status');assert.equal(o.headers.cookie,cursorSessionCookie(fileJWT));assert.equal(o.headers.origin,'https://cursor.com');assert.equal(o.headers.authorization,undefined);}
+  }
+  assert.equal(await fs.readFile(fixture.file,'utf8'),fixture.raw);assert.equal(provider(s,'grok').range,'allowance');
+  const snapshot=JSON.stringify(s);for(const secret of [fileJWT,fixture.encrypted,fixture.password])assert.equal(snapshot.includes(secret),false);
+  assert.equal(JSON.stringify(await fs.readdir(path.dirname(fixture.file))),JSON.stringify(['sand-secrets.json']));
  }finally{await usage.stop();await cleanup(home);}
 });
-test('Cursor：钥匙串优先，只请求约定条目；授权失败退回文件，没有两者时明确报未登录',async()=>{
- const home=await makeHome();await writeSubscriptionAuth(home,'cursor');
+test('Cursor.app：缺 Sand 登录时只读 state.vscdb 的 JWT，保留文件与目录',async()=>{
+ const home=await makeHome(),file=path.join(home,'Library/Application Support/Cursor/User/globalStorage/state.vscdb');
+ await fs.mkdir(path.dirname(file),{recursive:true});const db=new DatabaseSync(file);db.exec('CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)');db.prepare('INSERT INTO ItemTable VALUES (?,?)').run('cursorAuth/accessToken',fileJWT);db.close();
+ const original=await fs.readFile(file),files=await fs.readdir(path.dirname(file)),requests=[];
+ const usage=createUsage({home,now:()=>NOW,env:{},execFileImpl:()=>assert.fail('临时 HOME 不能碰真实钥匙串'),fetchImpl:async(url,o)=>{requests.push(o);return fakeFetch(url.includes('api2.cursor.sh')?cursorBody():grokBody());}});
+ try{
+  assert.equal(await readCursorAppAccessToken(home),fileJWT);const s=await usage.refresh();
+  for(const id of ['cursor','grok']){assert.equal(provider(s,id).available,true);assert.equal(provider(s,id).keySource,'cursor-app');}
+  assert.equal(requests.length,2);assert.deepEqual(await fs.readFile(file),original);assert.deepEqual(await fs.readdir(path.dirname(file)),files);assert.equal(JSON.stringify(s).includes(fileJWT),false);
+ }finally{await usage.stop();await cleanup(home);}
+});
+test('Cursor / Grok Bot：损坏、未授权或无法解密的 Sand 退回 Cursor.app，非 JWT 再退回 cursor-agent',async()=>{
+ const home=await makeHome();
+ for(const kind of ['broken','denied','bad-ciphertext','non-jwt']){
+  const fixture=await writeSandAuth(home,{...(kind==='bad-ciphertext'?{ciphertext:'invalid'}:kind==='non-jwt'?{token:'not-jwt'}:{})});if(kind==='broken')await fs.writeFile(fixture.file,'broken');
+  let reads=0;const usage=createUsage({home,now:()=>NOW,env:{},grokBotKeychain:true,cursorKeychain:false,execFileImpl:(f,a,o,cb)=>cb(kind==='denied'?Error('secret-password'):null,fixture.password+'\n'),readCursorAppAccessTokenImpl:async()=>{reads++;return fileJWT;},fetchImpl:async url=>fakeFetch(url.includes('api2.cursor.sh')?cursorBody():grokBody())});
+  try{const s=await usage.refresh();assert.equal(reads,1);for(const id of ['cursor','grok'])assert.equal(provider(s,id).keySource,'cursor-app');}finally{await usage.stop();}
+ }
+ await fs.rm(path.join(home,'Library/Application Support/Grok Bot/sand-secrets.json'));
  for(const denied of [false,true]){
-  const commands=[],tokens=[];
-  const usage=createUsage({home,now:()=>NOW,env:{},cursorKeychain:true,execFileImpl:(file,args,options,cb)=>{commands.push([file,...args]);cb(denied?Error('denied'):null,'cursor-keychain-token\n','');},fetchImpl:routeFetch(/api2\.cursor\.sh/,async(url,options)=>{tokens.push(options.headers.authorization);return fakeFetch(cursorBody());})});
+  const file=await writeSubscriptionAuth(home),original=await fs.readFile(file,'utf8'),commands=[],requests=[];
+  const usage=createUsage({home,now:()=>NOW,env:{},cursorKeychain:true,readCursorAppAccessTokenImpl:async()=> 'cursor-safe-encrypted-secret',execFileImpl:(f,a,o,cb)=>{commands.push([f,...a]);cb(denied?Error('secret'):null,fileJWT+'\n');},fetchImpl:async(url,o)=>{requests.push({url,o});return fakeFetch(url.includes('api2.cursor.sh')?cursorBody():grokBody());}});
   try{
-   const p=provider(await usage.refresh(),'cursor');assert.equal(p.keySource,denied?'file':'keychain');assert.deepEqual(tokens,['Bearer '+(denied?'cursor-file-token':'cursor-keychain-token')]);
+   const s=await usage.refresh();for(const id of ['cursor','grok'])assert.equal(provider(s,id).keySource,denied?'file':'keychain');
    assert.deepEqual(commands,[['/usr/bin/security','find-generic-password','-s','cursor-access-token','-a','cursor-user','-w']]);
+   assert.equal(requests.find(r=>r.url.includes('api2.cursor.sh')).o.headers.authorization,'Bearer '+fileJWT);assert.equal(await fs.readFile(file,'utf8'),original);assert.equal(JSON.stringify(s).includes(fileJWT),false);
   }finally{await usage.stop();}
  }
- await fs.rm(path.join(home,'.cursor/auth.json'));
- const usage=createUsage({home,now:()=>NOW,env:{},cursorKeychain:true,execFileImpl:(file,args,options,cb)=>cb(Error('denied'),'',''),fetchImpl:async()=>assert.fail('未登录不能请求网络')});
- try{const p=provider(await usage.refresh(),'cursor');assert.equal(p.available,false);assert.match(p.reason,/cursor-agent login.*钥匙串未授权/);}finally{await usage.stop();await cleanup(home);}
+ await cleanup(home);
 });
-test('Grok：GROK_HOME 的账户按键排序读取，只读 access token，不执行 CLI 或请求其它端点',async()=>{
- const home=await makeHome(),grokHome=path.join(home,'grok-login');await fs.mkdir(grokHome);
- const file=path.join(grokHome,'auth.json'),raw=JSON.stringify({z:{key:'z-token'},a:{key:'a-token',expires_at:new Date(NOW+3600e3).toISOString()}});await fs.writeFile(file,raw);
- const calls=[],usage=createUsage({home,now:()=>NOW,env:{GROK_HOME:grokHome},execFileImpl:()=>assert.fail('不执行 Grok CLI'),fetchImpl:routeFetch(/^https:\/\/cli-chat-proxy\.grok\.com\/v1\/billing\?format=credits$/,async(url,options)=>{calls.push(options);return fakeFetch(grokBody());})});
+test('Cursor / Grok Bot：缺登录、文件损坏、cursor-safe 与钥匙串拒绝均显示脱敏原因',async()=>{
+ const home=await makeHome();
+ for(const kind of ['missing','broken','cursor-safe','keychain','ciphertext']){
+  const fixture=await writeSandAuth(home);if(kind==='missing'||kind==='cursor-safe')await fs.rm(fixture.file);if(kind==='broken')await fs.writeFile(fixture.file,'broken');
+  const usage=createUsage({home,now:()=>NOW,env:{},grokBotKeychain:kind==='ciphertext',cursorKeychain:false,execFileImpl:(f,a,o,cb)=>cb(null,'secret-password\n'),readCursorAppAccessTokenImpl:async()=>kind==='cursor-safe'?'cursor-safe-secret':'',fetchImpl:async()=>assert.fail('未登录不能请求网络')});
+  try{const s=await usage.refresh();for(const id of ['cursor','grok']){const p=provider(s,id);assert.equal(p.available,false);assert.match(p.reason,kind==='missing'?/未找到.*登录/:kind==='broken'?/无法读取 Grok Bot/:kind==='cursor-safe'?/不是 JWT.*cursor-safe/:/无法解密 Grok Bot.*钥匙串/);assert.doesNotMatch(p.reason,/secret-password|cursor-safe-secret/);}}finally{await usage.stop();}
+ }
+ await cleanup(home);
+});
+test('Cursor / Grok Bot：临时 HOME 或 BOBO_HOME 不访问钥匙串',async()=>{
+ const home=await makeHome();await writeSandAuth(home);
+ for(const env of [{},{BOBO_HOME:home}]){
+  const usage=createUsage({home,now:()=>NOW,env,execFileImpl:()=>assert.fail('禁止访问钥匙串'),fetchImpl:async()=>assert.fail('未登录不能请求网络')});
+  try{assert.match(provider(await usage.refresh(),'grok').reason,/无法解密.*钥匙串未授权/);}finally{await usage.stop();}
+ }
+ await cleanup(home);
+});
+test('Cursor：保留 cursor-agent 文件的 Bearer 行为，非 JWT 不发送 Sand Cookie',async()=>{
+ const home=await makeHome(),file=await writeSubscriptionAuth(home),requests=[];
+ await fs.writeFile(file,JSON.stringify({accessToken:'opaque-fixture-token'}));
+ const usage=createUsage({home,now:()=>NOW,env:{},fetchImpl:async(url,o)=>{requests.push({url,o});return fakeFetch(cursorBody());}});
  try{
-  const p=provider(await usage.refresh(),'grok');assert.equal(p.available,true);assert.equal(p.keySource,'file');assert.equal(calls.length,1);assert.equal(calls[0].headers.authorization,'Bearer a-token');assert.equal(calls[0].headers.accept,'application/json');assert.equal(calls[0].method,'GET');assert.equal(calls[0].redirect,'error');
-  assert.equal(await fs.readFile(file,'utf8'),raw);assert.equal(p.range,'allowance');assert.equal(provider(usage.cycleRange('grok'),'grok').range,'allowance','On-demand 只作明细');assert.doesNotMatch(JSON.stringify(usage.snapshot()),/a-token|z-token/);
+  const s=await usage.refresh();assert.equal(provider(s,'cursor').available,true);assert.equal(provider(s,'grok').available,false);assert.match(provider(s,'grok').reason,/不是有效的 JWT/);
+  assert.equal(requests.length,1);assert.equal(requests[0].o.headers.authorization,'Bearer opaque-fixture-token');assert.equal(JSON.stringify(s).includes('opaque-fixture-token'),false);
+  assert.equal(usage.cycleRange('cursor').providers.find(p=>p.id==='cursor').range,'other-models');assert.equal(usage.cycleRange('cursor').providers.find(p=>p.id==='cursor').range,'cursor-models');
  }finally{await usage.stop();await cleanup(home);}
 });
-test('Cursor / Grok：缺登录、文件损坏及 Grok 过期都在本地给可读原因',async()=>{
- for(const id of ['cursor','grok']){
-  const home=await makeHome(),usage=createUsage({home,now:()=>NOW,env:{},fetchImpl:async()=>assert.fail('没有有效登录不能联网')});
-  try{
-   let p=provider(await usage.refresh(),id);assert.equal(p.available,false);assert.match(p.reason,/未找到.*登录/);
-   const file=await writeSubscriptionAuth(home,id);await fs.writeFile(file,'broken');
-   await usage.stop();
-   const broken=createUsage({home,now:()=>NOW,env:{},fetchImpl:async()=>assert.fail('损坏登录不能联网')});
-   try{assert.match(provider(await broken.refresh(),id).reason,/无法读取/);}finally{await broken.stop();}
-   if(id==='grok'){
-    await fs.writeFile(file,JSON.stringify({account:{key:'expired',expires_at:new Date(NOW-1).toISOString()}}));
-    const expired=createUsage({home,now:()=>NOW,env:{},fetchImpl:async()=>assert.fail('过期登录不能联网')});
-    try{assert.match(provider(await expired.refresh(),'grok').reason,/登录已过期.*grok models/);}finally{await expired.stop();}
-   }
-  }finally{await usage.stop();await cleanup(home);}
- }
-});
-test('Cursor / Grok：网络拒绝、限流、非 JSON 与异常响应给可读错误',async()=>{
+test('Cursor / Grok Bot：网络拒绝、限流、非 JSON 与异常响应给可读错误，两家互不影响',async()=>{
  for(const id of ['cursor','grok'])for(const [response,pattern] of [[fakeFetch({}, {status:401}),/登录被拒绝或已过期/],[fakeFetch({}, {status:403}),/登录被拒绝或已过期/],[fakeFetch({}, {status:429}),/请求受限/],[fakeFetch({}, {status:500}),/返回 500/],[{ok:true,status:200,json:async()=>{throw Error('secret-body');}},/不是 JSON/],[Error('secret-token'),/无法连接/]]){
-  const home=await makeHome();await writeSubscriptionAuth(home,id);
-  const usage=createUsage({home,now:()=>NOW,env:{},fetchImpl:async()=>{if(response instanceof Error)throw response;return response;}});
-  try{const p=provider(await usage.refresh(),id);assert.equal(p.available,false);assert.match(p.reason,pattern);assert.doesNotMatch(p.reason,/secret/);}finally{await usage.stop();await cleanup(home);}
+  const home=await makeHome();await writeSubscriptionAuth(home);
+  const usage=createUsage({home,now:()=>NOW,env:{},fetchImpl:async url=>{if(!subscriptionURL(id).test(url))return fakeFetch(subscriptionBody(id==='cursor'?'grok':'cursor'));if(response instanceof Error)throw response;return response;}});
+  try{const s=await usage.refresh(),p=provider(s,id);assert.equal(p.available,false);assert.match(p.reason,pattern);assert.doesNotMatch(p.reason,/secret/);assert.equal(provider(s,id==='cursor'?'grok':'cursor').available,true);}finally{await usage.stop();await cleanup(home);}
  }
 });
 test('Cursor / Grok：成功缓存三分钟、手动刷新至少一分钟，失败保留旧窗口并退避',async()=>{
  for(const id of ['cursor','grok']){
   const home=await makeHome();await writeSubscriptionAuth(home,id);let clock=NOW,calls=0,fail=false;
-  const usage=createUsage({home,now:()=>clock,env:{},fetchImpl:async()=>{calls++;if(fail)throw Error('network');return fakeFetch(subscriptionBody(id,35));}});
+  const usage=createUsage({home,now:()=>clock,env:{},fetchImpl:routeFetch(subscriptionURL(id),async()=>{calls++;if(fail)throw Error('network');return fakeFetch(subscriptionBody(id,35));})});
   try{
    await usage.refresh();assert.equal(calls,1);await usage.refresh(true);assert.equal(calls,1);
    clock+=60000;await usage.refresh();assert.equal(calls,1);await usage.refresh(true);assert.equal(calls,2);
@@ -188,11 +229,11 @@ test('Cursor / Grok：成功缓存三分钟、手动刷新至少一分钟，失�
 test('额度重置提醒：Cursor / Grok 首次、未登录、失败与估算不比较，回到 100% 各窗口只报一次，共用持久化开关',async()=>{
  for(const id of ['cursor','grok']){
   const home=await makeHome(),notes=[];let clock=NOW,used=0,fail=false;
-  const usage=createUsage({home,now:()=>clock,env:{},notify:(...note)=>notes.push(note),fetchImpl:async()=>{if(fail)throw Error('offline');return fakeFetch(subscriptionBody(id,used));}});
+  const usage=createUsage({home,now:()=>clock,env:{},notify:(...note)=>notes.push(note),fetchImpl:routeFetch(subscriptionURL(id),async()=>{if(fail)throw Error('offline');return fakeFetch(subscriptionBody(id,used));})});
   const step=async value=>{used=value;clock+=200000;return provider(await usage.refresh(true),id);};
   try{
    await usage.refresh();await writeSubscriptionAuth(home,id);await step(0);assert.equal(notes.length,0,'未登录转可用、首次 100% 不报');
-   await step(40);await step(0);assert.equal(notes.length,1);assert.equal(notes[0][0],'reset');assert.match(notes[0][1],id==='cursor'?/Cursor 额度已重置/:/Grok \(SuperGrok\) 额度已重置/);assert.match(notes[0][2],/回到 100%/);
+   await step(40);await step(0);assert.equal(notes.length,1);assert.equal(notes[0][0],'reset');assert.match(notes[0][1],id==='cursor'?/Cursor 额度已重置/:/Grok Bot 额度已重置/);assert.match(notes[0][2],/回到 100%/);
    await step(0);assert.equal(notes.length,1,'连续 100% 不重复');
    await step(35);fail=true;await step(0);assert.equal(notes.length,1);fail=false;await step(0);assert.equal(notes.length,1,'失败后的旧读数不用于恢复提醒');
    await step(25);provider(usage.snapshot(),id).estimated=true;await step(0);assert.equal(notes.length,1,'估算读数不作为上次有效额度');

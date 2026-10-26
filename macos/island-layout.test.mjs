@@ -488,11 +488,11 @@ test('通知岛额度：圆环显示的范围与并排来源的取舍', {skip:pr
  precondition(quota.displayed?.id == "agy")
  precondition(quota.provider(id: "opencode-go") == nil, "关掉的来源不该出现在明细卡里")
  precondition(quota.provider(id: "agy")?.displayWindow?.key == "week")
- // Cursor / Grok 沿用来源启停与顺序；Total / On-demand 留在明细，不画成订阅圆环。
+ // Cursor / Grok Bot 沿用来源启停与顺序；Cursor Total 留在明细，不画成订阅圆环。
  let cursor = try! provider(#"{"id":"cursor","available":true,"range":"total","windows":[{"key":"cursor-models","remainingPercent":87.5},{"key":"other-models","remainingPercent":60},{"key":"total","remainingPercent":80,"aside":true}]}"#)
  precondition(cursor.showable && cursor.displayWindow?.key == "cursor-models")
  precondition(cursor.windows.last?.aside == true && !cursor.windows[0].aside)
- let grok = try! provider(#"{"id":"grok","available":true,"range":"allowance","windows":[{"key":"allowance","remainingPercent":57.5},{"key":"on-demand","remainingPercent":75,"aside":true}]}"#)
+ let grok = try! provider(#"{"id":"grok","name":"Grok Bot","available":true,"range":"allowance","windows":[{"key":"allowance","label":"Grok Bot","remainingPercent":95}]}"#)
  precondition(grok.showable && grok.displayWindow?.key == "allowance")
  var extended = quota
  extended.providers = [grok, cursor]
