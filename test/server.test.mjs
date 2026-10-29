@@ -1,4 +1,27 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs/promises';import os from 'node:os';import path from 'node:path';import {spawn} from 'node:child_process';
+test('主窗入口及其模块依赖都能通过 HTTP 加载，避免整页点击事件未绑定',async()=>{
+ const home=await fs.mkdtemp(path.join(os.tmpdir(),'bobo-page-modules-'));
+ const base='http://127.0.0.1:14330';
+ const child=spawn(process.execPath,['../src/server.mjs'],{cwd:import.meta.dirname,env:{...process.env,BOBO_HOME:home,PORT:'14330'},stdio:'pipe'});
+ try{
+  await new Promise((resolve,reject)=>{child.stdout.once('data',resolve);child.once('error',reject);child.once('exit',c=>reject(Error('server exit '+c)));});
+  const html=await(await fetch(base+'/?app=1')).text();
+  const entries=[...html.matchAll(/<script\b[^>]*type="module"[^>]*src="([^"]+)"/g)].map(match=>new URL(match[1],base).href);
+  assert.ok(entries.length,'主窗必须有模块入口');
+  const visited=new Set();
+  for(const url of entries){
+   if(visited.has(url))continue;visited.add(url);
+   const response=await fetch(url);
+   assert.equal(response.status,200,`模块加载失败：${url}`);
+   assert.match(response.headers.get('content-type')||'',/javascript/,`模块 MIME 错误：${url}`);
+   const source=await response.text();
+   assert.equal(source,await fs.readFile(new URL('../public'+new URL(url).pathname,import.meta.url),'utf8'));
+   for(const match of source.matchAll(/(?:\bfrom\s*|\bimport\s*(?:\(\s*)?)['"](\.[^'"]+)['"]/g))entries.push(new URL(match[1],url).href);
+  }
+  assert.ok(visited.has(base+'/todo.js'),'Todo 必须包含在真实入口依赖检查中');
+  assert.equal((await fetch(base+'/not-a-public-file.js')).status,404,'静态资源仍使用白名单');
+ }finally{child.kill();await new Promise(r=>child.once('exit',r));await fs.rm(home,{recursive:true,force:true});}
+});
 test('隔离环境：列表、文件增删改、冲突保护、路径保护、本机更新删除及备份',async()=>{
  const home=await fs.mkdtemp(path.join(os.tmpdir(),'bobo-test-')),root=path.join(home,'.agents/skills/demo');await fs.mkdir(root,{recursive:true});await fs.writeFile(path.join(root,'SKILL.md'),'---\nname: demo\ndescription: Demo\n---\nHello');await fs.writeFile(path.join(home,'secret.txt'),'private');await fs.symlink(path.join(home,'secret.txt'),path.join(root,'link.txt'));
  await fs.writeFile(path.join(home,'package.json'),'{"type":"module"}');

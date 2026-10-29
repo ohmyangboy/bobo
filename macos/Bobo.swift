@@ -26,6 +26,9 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     private var notchWindow: NotchPanel!
     private var islandHosting: NSHostingView<IslandView>?
     private let islandModel = IslandModel()
+    private let todoStore = TodoStore(repository: EventKitTodoRepository(), defaults: .standard)
+    private var todoBridge: TodoWebBridge?
+    private var todoObserver: AnyCancellable?
     private var islandLayoutScheduled = false
     private var islandFrameTarget: NSRect?
     private var islandBarTarget: IslandBarLayout?
@@ -105,6 +108,13 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         setupStatusMenu()
         setupWindow()
         setupNotch()
+        todoObserver = todoStore.$snapshot.sink { [weak self] snapshot in
+            guard let self else { return }
+            self.islandModel.todoContentHeight = snapshot.height
+            self.islandModel.todoHasItems = snapshot.enabled && snapshot.count > 0
+            self.scheduleIslandLayout()
+        }
+        todoStore.refresh()
         requestNotificationAuth()
         webView.loadHTMLString("<body style='font:14px -apple-system;color-scheme:light dark;color:graytext;background:canvas;display:grid;place-items:center;height:95vh;margin:0'>正在启动 bobo…</body>", baseURL: nil)
         probe(startIfNeeded: true)
@@ -212,6 +222,9 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         webView = WKWebView(frame: .zero)
         webView.uiDelegate = self
         webView.navigationDelegate = self
+        let todoBridge = TodoWebBridge(webView: webView, store: todoStore)
+        self.todoBridge = todoBridge
+        webView.configuration.userContentController.add(todoBridge, name: "boboTodo")
         let size = NSSize(width: 960, height: 760)
         window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         window.title = "bobo"
@@ -260,6 +273,8 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         notchWindow.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         let hosting = IslandHostingView(rootView: IslandView(
             model: islandModel,
+            todo: todoStore,
+            onTodo: { [weak self] in self?.openInApp(tab: "islandTab", pane: ("island", "todo")) },
             onSelect: { [weak self] session in self?.focusIsland(session) },
             onActivate: { [weak self] in self?.showIslandStatus() },
             onAvatar: { [weak self] source in self?.showIslandStatus(source: source) },
@@ -492,7 +507,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         // 展开高度按设置里的条数算（会话不足时跟着变矮），装不下的会话在列表里滚动查看。
         let visibleRows = max(1, min(islandModel.settings.rows, islandModel.listed.count))
         let listHeight: CGFloat = islandModel.expanded ? (islandModel.listed.isEmpty ? 42 : 13.5 + CGFloat(visibleRows) * 38) : 0
-        return NSSize(width: width, height: islandBarHeight(screen) + listHeight + islandModel.butlerHeight)
+        return NSSize(width: width, height: islandBarHeight(screen) + listHeight + islandModel.butlerHeight + islandModel.todoHeight)
     }
 
     // 顶部栏该画几枚额度圆环（写进 IslandModel.quotaChipLimit，SwiftUI 只按它渲染前几家）：
@@ -1278,10 +1293,11 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     }
 
     private func postNotice(_ notice: IslandNotice) {
-        let content = UNMutableNotificationContent()
-        content.title = notice.title.isEmpty ? "bobo" : notice.title
-        if !notice.message.isEmpty { content.body = notice.message }
-        // 声音交给服务端的 afplay（按事件区分音效），通知本身不再响一次。
+        guard let content = IslandNotifications.content(
+            title: notice.title, message: notice.message,
+            notify: (notice.notify ?? true) && islandModel.settings.notify,
+            sound: islandModel.settings.sound ? notice.sound : nil
+        ) else { return }
         let request = UNNotificationRequest(identifier: "bobo-notice-\(notice.seq)", content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request) { error in
             if let error { self.notifLog("add failed: \(error)") } else { self.notifLog("posted seq=\(notice.seq)") }
@@ -1290,7 +1306,10 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
 
     // 应用在前台时也把横幅显示出来（否则用户在看 bobo 窗口时收不到提醒）。
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([.banner])
+        completionHandler(IslandNotifications.presentation(
+            notification.request.content,
+            notify: islandModel.settings.notify, sound: islandModel.settings.sound
+        ))
     }
 
     @objc private func showOpenCodeStatus() {
@@ -1441,7 +1460,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         webView.evaluateJavaScript("window.__boboSetWindowActive?.(\(window.isVisible && !window.isMiniaturized && NSApp.isActive))")
     }
 
-    func applicationDidBecomeActive(_ notification: Notification) { syncWindowActivity() }
+    func applicationDidBecomeActive(_ notification: Notification) { syncWindowActivity(); todoStore.refresh() }
     func applicationDidResignActive(_ notification: Notification) {
         webView?.evaluateJavaScript("window.__boboSetWindowActive?.(false)")
     }
@@ -1800,6 +1819,9 @@ struct IslandNotice: Decodable, Equatable {
     var title: String
     var message: String
     var at: Double
+    // 旧服务没有这两个字段时仍显示无声横幅；新服务支持只响声音、不显示横幅。
+    var notify: Bool?
+    var sound: String?
 }
 
 // 额度窗口：服务端归好类的窗口（key = session / week / month，Codex / Claude Code 可能只有其中一两档，
@@ -2521,6 +2543,8 @@ final class IslandModel: ObservableObject {
     @Published var butlerReply = IslandButlerReplyDraft()
     @Published var butlerContentHeight: CGFloat? = nil
     @Published var butlerComposerHeight: CGFloat? = nil
+    @Published var todoContentHeight: CGFloat = 0
+    @Published var todoHasItems = false
     // 悬停明细卡：nil 为不显示；detailMetrics 由 SwiftUI 上报，原生用它定窗口尺寸（见 Bobo.applyDetail）。
     @Published var detail: IslandDetailKind?
     @Published var detailMetrics = DetailMetrics()
@@ -2555,7 +2579,8 @@ final class IslandModel: ObservableObject {
         let composer = butlerReply.isOpen ? (butlerComposerHeight ?? butlerReply.height) : 0
         return IslandButler.headerHeight + butlerListHeight + IslandButler.bottomPadding + composer
     }
-    var visible: Bool { settings.notch && (!settings.hideWhenIdle || !busy.isEmpty || butlerReply.isOpen) }
+    var todoHeight: CGFloat { expanded ? todoContentHeight : 0 }
+    var visible: Bool { settings.notch && (!settings.hideWhenIdle || !busy.isEmpty || butlerReply.isOpen || todoHasItems) }
     // 折叠常驻保留静态状态色；只有可见展开态才运行呼吸动画。
     var onScreen: Bool { visible && !yielding }
     var motionActive: Bool { onScreen && screenAwake && expanded }
@@ -2642,6 +2667,8 @@ final class IslandModel: ObservableObject {
 // 形状与层级参考 CodeIsland（NotchPanelShape）：顶部贴屏幕边，底部连续曲率圆角。
 struct IslandView: View {
     @ObservedObject var model: IslandModel
+    @ObservedObject var todo: TodoStore
+    var onTodo: () -> Void
     var onSelect: (IslandSession) -> Void
     // 点顶部栏空白：打开主窗口，落在默认的第一个 tab（通知岛）。
     var onActivate: () -> Void
@@ -2682,6 +2709,9 @@ struct IslandView: View {
                 if model.expanded {
                     Rectangle().fill(.white.opacity(0.14)).frame(height: 0.5).padding(.horizontal, 12)
                     list
+                    if todo.snapshot.enabled {
+                        IslandTodoView(snapshot: todo.snapshot, onManage: onTodo, onOpen: { TodoNavigation.open($0) })
+                    }
                     if let butler = model.butler, butler.enabled {
                         IslandButlerList(butler: butler, avatarForProject: { model.avatarImage($0) }, viewportHeight: model.butlerListHeight,
                             onSelect: onButler, onCompose: onButlerCompose, onFocus: onButlerFocus, onQuote: onButlerQuote,

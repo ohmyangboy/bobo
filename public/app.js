@@ -1,7 +1,9 @@
 import {responseLines} from './stream.js';
 import {splitMarkdown,renderBlock,renderMarkdown} from './markdown.js';
+import {installTodoPage} from './todo.js';
 if(new URLSearchParams(location.search).has('app'))document.body.classList.add('app');
 const $=s=>document.querySelector(s), token=$('meta[name=token]').content;
+const todoPage=installTodoPage();
 // 单行原生顶栏：只把可见按钮的范围交给拖拽层，按钮点击仍由 WKWebView 处理。
 // 没有原生桥时（普通浏览器）直接跳过；尺寸或显示状态变化时按帧合并，不轮询。
 function initTitlebar(){
@@ -1339,7 +1341,7 @@ function renderIsland(){
 }
 // 通知岛左侧分类（参考 magpie 的来源列表）：Agent 连接（会话）与额度来源两组，底部固定「通知岛设置」。
 // 行右侧是「圆点 + 状态文字」；分栏按 data-island-pane 切换，设置页内再用子页签（data-island-settings）切四个分页。
-const islandPanes=['opencode','codex','omp','claude','dsh','agy','butler','quota-codex','quota-claude','quota-opencode','quota-agy','settings'];
+const islandPanes=['opencode','codex','omp','claude','dsh','agy','butler','todo','quota-codex','quota-claude','quota-opencode','quota-agy','settings'];
 function showIslandPane(name){
  const next=islandPanes.includes(name)?name:islandPanes[0];
  for(const p of document.querySelectorAll('#islandWorkspace [data-island-pane-content]'))p.hidden=p.dataset.islandPaneContent!==next;
@@ -1347,6 +1349,7 @@ function showIslandPane(name){
  // 右下角的「刷新额度」只在额度分栏出现（CSS 按 data-island-kind 显示）。
  document.body.dataset.islandKind=next.startsWith('quota-')?'quota':next==='settings'?'settings':'session';
  document.body.dataset.islandPane=next;
+ if(next==='todo')todoPage.refresh();
  if(next==='butler')loadButler().catch(e=>$('#butlerStatus').textContent=e.message);
 }
 for(const b of document.querySelectorAll('#islandWorkspace [data-island-pane]'))b.onclick=()=>showIslandPane(b.dataset.islandPane);

@@ -567,6 +567,15 @@ body[data-view=island][data-island-kind=quota] #quotaActions{display:flex}
 .settings-row code{flex:0 1 auto;min-width:0;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--text-2);background:var(--hover);border-radius:6px;padding:4px 8px;overflow-wrap:anywhere;text-align:right}
 .settings-value{flex:none;max-width:60%;text-align:right;color:var(--text-2);font-size:12px}
 .settings-actions{display:flex;justify-content:flex-end;gap:8px;margin:18px 0 0;max-width:780px}
+.todo-toolbar{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0}
+.todo-board{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;max-width:900px;margin:24px 0}
+.todo-column{min-width:0;padding:12px;background:var(--hover);border-radius:12px;border-top:2px solid var(--muted)}
+.todo-column[data-bucket=week]{border-top-color:#45a6c6}.todo-column[data-bucket=today]{border-top-color:#dc9345}
+.todo-column h3{display:flex;align-items:center;gap:8px;margin:0 0 12px;font-size:13px}
+.todo-count{font-size:11px;font-weight:400;color:var(--text-2)}
+.todo-item{display:flex;flex-direction:column;gap:6px;width:100%;padding:10px;margin:0 0 8px;text-align:left;white-space:normal;border:0;border-radius:8px;background:var(--bg);color:var(--text)}
+.todo-title{overflow-wrap:anywhere;font-size:13px}.todo-item small,.todo-empty{font-size:11px;color:var(--text-2);overflow-wrap:anywhere}.todo-item .todo-overdue{color:#c98532}
+.todo-empty{margin:14px 0}.todo-form{max-width:780px}.todo-form .settings-actions{margin-top:12px}
 .settings-pane .hint{margin:11px 0 0;max-width:780px}
 /* 子页签：「设置」与「通知岛设置」共用；选中项是浮起的白底，不用整块淡蓝。 */
 .pane-tabs{flex:none;padding:18px 32px 4px}
