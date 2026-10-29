@@ -17,7 +17,7 @@ const quotaViews=['cycle','expand'],quotaCounts=[0,3,5,7];
 // 每 RECONCILE_TICK_MS 拿一次 /api/session/active 核对，不在跑的就按正常「结束」落定。
 const RECONCILE_MS=90*1000,RECONCILE_TICK_MS=30*1000;
 
-export function createOpenCode({home,reconcileMs=RECONCILE_MS,reconcileTick=RECONCILE_TICK_MS}){
+export function createOpenCode({home,reconcileMs=RECONCILE_MS,reconcileTick=RECONCILE_TICK_MS,platform=process.platform,soundPlayer=playSound}){
  const dataDir=path.join(home,'.bobo'),settingsFile=path.join(dataDir,'opencode.json');
  const sessions=new Map(),listeners=new Set();
  // 子 agent 的子会话不上面板：会话列表与 session.created 里的 parentID 标出父子关系（task 工具派生），
@@ -82,15 +82,15 @@ export function createOpenCode({home,reconcileMs=RECONCILE_MS,reconcileTick=RECO
   try{await fs.mkdir(dataDir,{recursive:true});await fs.writeFile(settingsFile,JSON.stringify(settings));}catch{}
   emit();return settings;
  }
- // 提醒：声音在服务端播放（macOS 用 afplay 播系统音，Windows 映射到 SystemSounds，浏览器场景也有效）；
- // 系统通知交给原生 app / 桌面壳发（放进快照的 notice 字段），这样通知归属 bobo、图标也是 bobo。
+ // macOS 的声音与横幅统一交给原生通知中心，由系统在播放时执行专注策略。
+ // sound 与 notify 独立：只开声音时也发 notice，但原生不填横幅的标题与正文。
+ // Windows 的声音仍在服务端映射到 SystemSounds。
  function remind(kind,title,message){
-  if(settings.sound){
-   const sound=sounds[kind];
-   if(sound)playSound(sound);
-  }
-  if(settings.notify){
-   notice={seq:++noticeSeq,kind,title,message:message||'',at:Date.now()};
+  const sound=settings.sound?sounds[kind]:null;
+  const nativeSound=platform==='darwin'?(sound||null):null;
+  if(sound&&platform!=='darwin')soundPlayer(sound);
+  if(settings.notify||nativeSound){
+   notice={seq:++noticeSeq,kind,title,message:message||'',notify:settings.notify,sound:nativeSound,at:Date.now()};
    emit();
   }
  }
