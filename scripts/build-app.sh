@@ -31,7 +31,7 @@ icon_work="$(mktemp -d)"
 trap 'rm -rf "$icon_work"' EXIT
 
 # 1. 编译 Swift 壳（AppKit + WebKit）。
-xcrun swiftc -parse-as-library -O "$project_dir/macos/Bobo.swift" -o "$app_dir/Contents/MacOS/Bobo" -framework AppKit -framework WebKit
+xcrun swiftc -parse-as-library -O "$project_dir/macos/Bobo.swift" "$project_dir/macos/Todo.swift" -o "$app_dir/Contents/MacOS/Bobo" -framework AppKit -framework WebKit -framework EventKit
 
 # 2. 服务端与网页资源：src/ 与 public/ 原样保留结构，Bobo.swift 启动 Resources/src/server.mjs。
 cp "$project_dir/package.json" "$app_dir/Contents/Resources/"
@@ -62,6 +62,8 @@ cat > "$app_dir/Contents/Info.plist" <<PLIST
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSRemindersUsageDescription</key><string>bobo 在通知岛显示你的待办，并将你新建的事项保存到系统提醒事项。</string>
+<key>NSRemindersFullAccessUsageDescription</key><string>bobo 需要读取提醒事项以在通知岛显示待办，并将你新建的事项同步到系统提醒事项。</string>
 <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
 </dict></plist>
 PLIST
@@ -71,7 +73,7 @@ if [[ -n "$identity" ]]; then
   # 时间戳服务偶发不可用（"The timestamp service is not available"），重试几次再放弃。
   signed=false
   for attempt in 1 2 3 4 5; do
-    if codesign --force --options runtime --timestamp --sign "$identity" "$app_dir"; then signed=true; break; fi
+    if codesign --force --options runtime --timestamp --entitlements "$project_dir/macos/Bobo.entitlements" --sign "$identity" "$app_dir"; then signed=true; break; fi
     echo "codesign 第 $attempt 次失败，1.5 秒后重试…" >&2
     sleep 1.5
   done
@@ -82,6 +84,6 @@ if [[ -n "$identity" ]]; then
   echo "签名：$identity"
 else
   echo "警告：未找到 Developer ID Application 证书，使用 ad-hoc 签名（仅本机可用，无法公证）" >&2
-  codesign --force --sign - "$app_dir"
+  codesign --force --entitlements "$project_dir/macos/Bobo.entitlements" --sign - "$app_dir"
 fi
 echo "$app_dir"

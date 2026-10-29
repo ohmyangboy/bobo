@@ -69,6 +69,27 @@ precondition(!model.motionActive)
 `);
 });
 
+test('Todo 展开高度与空闲隐藏：事项可保留入口，刷新不能自动展开岛', {skip:process.platform!=='darwin'}, async()=>{
+ const declarations=await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {');
+ const model=await swiftSlice('enum IslandDetailKind:','// 通知岛面板：黑色卡片贴住刘海');
+ await checkSwift(declarations+'\n'+model,`
+let model = IslandModel()
+model.settings.hideWhenIdle = true
+precondition(!model.visible)
+model.todoContentHeight = 192
+model.todoHasItems = true
+precondition(model.visible && !model.expanded && model.todoHeight == 0, "新待办不应自动展开岛")
+model.hovering = true
+precondition(model.todoHeight == 192)
+model.todoContentHeight = 0
+model.todoHasItems = false
+precondition(!model.visible && model.todoHeight == 0, "关闭 Todo 后恢复既有空闲隐藏规则")
+model.todoHasItems = true
+model.settings.notch = false
+precondition(!model.visible, "Todo 不应绕过通知岛总开关")
+`);
+});
+
 test('管家多项目列表：兼容旧快照，紧凑视口不随历史增长，全部项目可滚动查看', {skip:process.platform!=='darwin'}, async()=>{
  const declarations=await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','// 悬停明细卡的内容类型');
  const model=await swiftSlice('enum IslandDetailKind:','// 通知岛面板：黑色卡片贴住刘海');
