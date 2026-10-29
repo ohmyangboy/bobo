@@ -48,7 +48,8 @@ export async function removeLink(link){
 }
 
 // ---- 提示音 ----
-// macOS 播 /System/Library/Sounds 下的系统音；Windows 没有同名音效，按共享音名映射到 SystemSounds。
+// macOS 的提示音随 notice 交给原生通知中心，受系统专注与通知声音设置控制。
+// 这里不再用 afplay 绕过系统策略；Windows 没有同名音效，映射到 SystemSounds。
 const winSounds={question:'Asterisk',done:'Asterisk',error:'Hand',Ping:'Beep',Glass:'Asterisk',Basso:'Hand'};
 export function playSound(name){
  const file=String(name||'').trim();
@@ -57,8 +58,6 @@ export function playSound(name){
   const mapped=winSounds[file.replace(/\.aiff?$/i,'')]||'Asterisk';
   return fire('powershell.exe',['-NoProfile','-WindowStyle','Hidden','-Command',`[System.Media.SystemSounds]::${mapped}.Play()`]);
  }
- if(!isMac)return;
- fire('afplay',['/System/Library/Sounds/'+file]);
 }
 
 // ---- 系统通知 ----

@@ -1293,10 +1293,11 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     }
 
     private func postNotice(_ notice: IslandNotice) {
-        let content = UNMutableNotificationContent()
-        content.title = notice.title.isEmpty ? "bobo" : notice.title
-        if !notice.message.isEmpty { content.body = notice.message }
-        // 声音交给服务端的 afplay（按事件区分音效），通知本身不再响一次。
+        guard let content = IslandNotifications.content(
+            title: notice.title, message: notice.message,
+            notify: (notice.notify ?? true) && islandModel.settings.notify,
+            sound: islandModel.settings.sound ? notice.sound : nil
+        ) else { return }
         let request = UNNotificationRequest(identifier: "bobo-notice-\(notice.seq)", content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request) { error in
             if let error { self.notifLog("add failed: \(error)") } else { self.notifLog("posted seq=\(notice.seq)") }
@@ -1305,7 +1306,10 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
 
     // 应用在前台时也把横幅显示出来（否则用户在看 bobo 窗口时收不到提醒）。
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([.banner])
+        completionHandler(IslandNotifications.presentation(
+            notification.request.content,
+            notify: islandModel.settings.notify, sound: islandModel.settings.sound
+        ))
     }
 
     @objc private func showOpenCodeStatus() {
@@ -1815,6 +1819,9 @@ struct IslandNotice: Decodable, Equatable {
     var title: String
     var message: String
     var at: Double
+    // 旧服务没有这两个字段时仍显示无声横幅；新服务支持只响声音、不显示横幅。
+    var notify: Bool?
+    var sound: String?
 }
 
 // 额度窗口：服务端归好类的窗口（key = session / week / month，Codex / Claude Code 可能只有其中一两档，
