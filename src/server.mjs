@@ -487,7 +487,7 @@ const server=http.createServer(async(req,res)=>{
     return json({ok:true});
    }fail('不存在的接口：'+req.method+' '+url.pathname,404);
   }
-  const assets={'/stream.js':['stream.js','text/javascript'],'/markdown.js':['markdown.js','text/javascript'],'/agent-format.js':['agent-format.js','text/javascript'],'/codex-format.js':['codex-format.js','text/javascript'],'/icon.png':['icon.png','image/png'],'/bobo-avatar.png':['bobo-avatar.png','image/png'],'/':['index.html','text/html'],'/app.js':['app.js','text/javascript'],'/style.css':['style.css','text/css'],
+  const assets={'/stream.js':['stream.js','text/javascript'],'/markdown.js':['markdown.js','text/javascript'],'/todo.js':['todo.js','text/javascript'],'/agent-format.js':['agent-format.js','text/javascript'],'/codex-format.js':['codex-format.js','text/javascript'],'/icon.png':['icon.png','image/png'],'/bobo-avatar.png':['bobo-avatar.png','image/png'],'/':['index.html','text/html'],'/app.js':['app.js','text/javascript'],'/style.css':['style.css','text/css'],
    // 通知岛面板：独立的小页面，给桌面壳的透明悬浮窗用（浏览器访问也正常）。
    '/panel.html':['panel.html','text/html'],'/panel.css':['panel.css','text/css'],'/panel.js':['panel.js','text/javascript']};
   const asset=assets[url.pathname];if(!asset)fail('Not found',404);
