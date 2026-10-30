@@ -526,8 +526,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         let barWidth = IslandBarGeometry.envelope(layout)
         let width = IslandBarGeometry.width(layout, minWidth: max(minWidth, barWidth), maxWidth: screen.frame.width - IslandMetrics.screenEdgeMargin * 2)
         // 展开高度按设置里的条数算（会话不足时跟着变矮），装不下的会话在列表里滚动查看。
-        let listHeight: CGFloat = islandModel.expanded ? islandModel.sessionListHeight : 0
-        return NSSize(width: width, height: islandBarHeight(screen) + listHeight + islandModel.butlerHeight + islandModel.todoHeight)
+        return NSSize(width: width, height: islandBarHeight(screen) + islandModel.expandedContentHeight)
     }
 
     // 顶部栏该画几枚额度圆环（写进 IslandModel.quotaChipLimit，SwiftUI 只按它渲染前几家）：
@@ -2634,7 +2633,7 @@ final class IslandModel: ObservableObject {
         return true
     }
     // 内容使用目标高度，由窗口从顶部裁切展开；不随补间中的剩余空间再次伸长。
-    var sessionListHeight: CGFloat { listed.isEmpty ? 42 : 13.5 + CGFloat(max(1, min(settings.rows, listed.count))) * 38 }
+    var sessionListHeight: CGFloat { listed.isEmpty ? 0 : 13.5 + CGFloat(max(1, min(settings.rows, listed.count))) * 38 }
     var butlerListHeight: CGFloat { butler?.visibleListHeight(measured: butlerContentHeight, replying: butlerReply.isOpen) ?? 0 }
     var butlerHeight: CGFloat {
         guard expanded, butler?.enabled == true else { return 0 }
@@ -2642,6 +2641,7 @@ final class IslandModel: ObservableObject {
         return IslandButler.headerHeight + butlerListHeight + IslandButler.bottomPadding + composer
     }
     var todoHeight: CGFloat { expanded ? todoContentHeight : 0 }
+    var expandedContentHeight: CGFloat { expanded ? sessionListHeight + butlerHeight + todoHeight : 0 }
     var visible: Bool { settings.notch && (!settings.hideWhenIdle || !busy.isEmpty || butlerReply.isOpen || todoHasItems) }
     // 折叠常驻保留静态状态色；只有可见展开态才运行呼吸动画。
     var onScreen: Bool { visible && !yielding }
@@ -2769,7 +2769,7 @@ struct IslandView: View {
             let rect = IslandLayoutTween.barFrame(width: geometry.size.width, height: model.barHeight, layout: model.barLayout)
             VStack(spacing: 0) {
                 bar
-                if model.expanded {
+                if model.expanded && model.sessionListHeight > 0 {
                     Rectangle().fill(.white.opacity(0.14)).frame(height: 0.5).padding(.horizontal, 12)
                     list
                 }
@@ -2958,9 +2958,6 @@ struct IslandView: View {
     private var list: some View {
         ScrollView(.vertical, showsIndicators: false) {
             LazyVStack(spacing: 2) {
-                if model.listed.isEmpty {
-                    Text("还没有会话记录").font(.system(size: 11)).foregroundStyle(.white.opacity(0.45)).padding(.vertical, 6)
-                }
                 ForEach(model.listed) { session in
                     IslandRow(model: model, session: session, onSelect: onSelect).frame(height: 36)
                 }

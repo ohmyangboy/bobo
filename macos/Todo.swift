@@ -500,9 +500,9 @@ struct IslandTodoView: View {
         HStack(spacing: 8) {
             Button(action: onManage) { TodoRemindersMark(size: 16) }.help("打开 Todo 看板").accessibilityLabel("Todo").accessibilityIdentifier("island-todo-manage")
             Button { begin(.later) } label: {
-                Text("接下来要做什么？").font(.system(size: 12)).foregroundStyle(Color(white: 0.68))
+                Text("todo？tobo！").font(.system(size: 12)).foregroundStyle(Color(white: 0.68))
                     .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-            }.accessibilityLabel("接下来要做什么？").help("添加提醒事项")
+            }.accessibilityLabel("todo？tobo！").help("添加提醒事项")
             TodoMoreMenu(showCompleted: snapshot.showCompleted, onManage: onManage, onShowCompleted: { onShowCompleted(!snapshot.showCompleted) })
         }.padding(.horizontal, 14).padding(.vertical, 10)
     }
@@ -632,7 +632,7 @@ private struct IslandTodoCreateCard: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Button(action: onManage) { TodoRemindersMark(size: 16) }.help("打开 Todo 看板").accessibilityLabel("Todo")
-                field("接下来要做什么？", $draft.title, title: true).focused($titleFocused).accessibilityLabel("任务标题")
+                field("todo？tobo！", $draft.title, title: true).focused($titleFocused).accessibilityLabel("任务标题")
                 TodoMoreMenu(showCompleted: showCompleted, onManage: onManage, onShowCompleted: onShowCompleted, onCancel: onCancel)
             }
                 VStack(alignment: .leading, spacing: 8) {
