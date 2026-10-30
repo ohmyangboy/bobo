@@ -121,7 +121,7 @@ export function installTodoPage(doc=document,host=window){
     for(const item of rows){
      const card=node('div',`todo-item${item.completed?' is-completed':''}`),copy=node('button','todo-item-copy'),check=node('button','todo-check',item.completed?'✓':'');
      copy.type=check.type='button';check.disabled=item.editable===false;check.setAttribute('aria-label',`${item.completed?'标记未完成':'完成'}：${item.title}`);
-     check.onclick=()=>{const complete=()=>send({action:'complete',id:item.id,completed:!item.completed});if(inlineContext?.id===item.id)leaveInline(complete);else complete();};
+     check.onclick=()=>{const removing=inlineContext?.id===item.id&&emptyContent(),complete=()=>{if(!removing)send({action:'complete',id:item.id,completed:!item.completed});};if(inlineContext?.id===item.id)leaveInline(complete);else complete();};
      copy.title=`${item.title} · ${item.list}；${item.editable===false?"在 tobo 中查看":"点击原位编辑"}`;
      copy.append(node('span','todo-title',item.title));
      if(item.dateText&&!['今天','未设日期'].includes(item.dateText))copy.append(node('small',item.overdue?'todo-overdue':'',item.dateText));
@@ -171,7 +171,7 @@ export function installTodoPage(doc=document,host=window){
  $('#todoConnect').onclick=()=>send({action:'connect'});$('#todoPermissionSettings').onclick=()=>send({action:'settings'});
  $('#todoEnabled').onchange=event=>send({action:'enabled',enabled:event.target.checked});
  $('#todoShowCompleted').onchange=event=>send({action:'showCompleted',show:event.target.checked});
- $('#todoOpen').onclick=()=>{const id=inlineContext?.id;const open=()=>send(id?{action:'openSystem',id}:{action:'openSystem'});if(inlineContext)leaveInline(open);else open();};$('#todoRefresh').onclick=()=>send({action:'get'});
+ $('#todoOpen').onclick=()=>{const id=inlineContext&&!emptyContent()?inlineContext.id:null;const open=()=>send(id?{action:'openSystem',id}:{action:'openSystem'});if(inlineContext)leaveInline(open);else open();};$('#todoRefresh').onclick=()=>send({action:'get'});
  $('#todoOpenTobo').onclick=()=>{$('#todoSettings').open=false;send({action:'openTobo'});};
  $('#todoNew').onclick=()=>openCreate();$('#todoCancel').onclick=()=>{if(inlineContext)leaveInline(()=>{});else if(!pending)close('#todoComposer');};
  $('#todoComposer').onkeydown=event=>{if(event.key==='Escape'&&!pending)close('#todoComposer');};

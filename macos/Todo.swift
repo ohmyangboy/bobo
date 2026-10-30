@@ -537,7 +537,8 @@ struct IslandTodoView: View {
                         IslandTodoColumn(column: column, editing: editing, error: snapshot.error, lists: snapshot.lists, inputMonitor: inputMonitor,
                             onEdit: { beginEdit($0, bucket: column.bucket) }, onEditChange: { if editing?.draft.id == $0.id { editing?.draft = $0 } },
                             onSaveEdit: saveEdit, onCancelEdit: { finishEdit(save: false) }, onComplete: { id, completed in
-                                if editing?.itemID != id || finishEdit(save: true) { onComplete(id, completed) }
+                                let removing = editing?.itemID == id && editing?.draft.isEmpty == true
+                                if (editing?.itemID != id || finishEdit(save: true)) && !removing { onComplete(id, completed) }
                             }, onAdd: { begin(column.bucket) })
                             .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
                             .overlay(alignment: .leading) {

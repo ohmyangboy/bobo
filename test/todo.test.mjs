@@ -129,6 +129,10 @@ test('tobo 清空内容后离开自动删除，失败保留；备注或链接仍
  p.clickOutside();assert.deepEqual(p.sent.at(-1),{action:'remove',id:'real-id'});p.host.__boboTodoCreated(false);assert.equal(p.$('#todoComposer').hidden,false);assert.equal(p.$('#todoTitle').value,'');
  p.clickOutside();p.host.__boboTodoCreated(true);assert.equal(p.$('#todoComposer').hidden,true);
  const count=p.sent.length;p.$('#todoNew').onclick();p.$('#todoForm').onsubmit({preventDefault(){}});assert.equal(p.sent.length,count);
+ const q=page();q.host.__boboTodoReceive(data());q.host.__boboTodoOpen('real-id');
+ for(const id of ['Title','Notes','URL'])q.$('#todo'+id).value='';
+ q.$('#todoBoard').children[0].children[1].children[0].children[0].onclick();q.host.__boboTodoCreated(true);
+ assert.deepEqual(q.sent,[{action:'get'},{action:'remove',id:'real-id'}],'空白项删除后不能再向已删除事项发送完成请求');
 });
 test('Todo 创建卡片按需展开设置，切换面板保留字段，清除日期同时清除时间',()=>{
  const p=page();p.host.__boboTodoReceive(data());p.$('#todoNew').onclick();
