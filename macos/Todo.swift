@@ -631,7 +631,6 @@ private struct IslandTodoCreateCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Button(action: onManage) { TodoRemindersMark(size: 16) }.help("打开 Todo 看板").accessibilityLabel("Todo")
                 field("todo？tobo！", $draft.title, title: true).focused($titleFocused).accessibilityLabel("任务标题")
                 TodoMoreMenu(showCompleted: showCompleted, onManage: onManage, onShowCompleted: onShowCompleted, onCancel: onCancel)
             }
@@ -660,9 +659,10 @@ private struct IslandTodoCreateCard: View {
                     }
                     if !error.isEmpty { Text(error).font(.system(size: 11)).foregroundStyle(.orange) }
                     if lists.isEmpty { Text("没有可写列表，请在提醒事项中先创建列表。").font(.system(size: 11)).foregroundStyle(.orange) }
-                }.font(.system(size: 11)).padding(.leading, 24)
+                }.font(.system(size: 11))
             HStack {
                 HStack(spacing: 6) {
+                    Button(action: onManage) { TodoRemindersMark(size: 16).frame(width: 24, height: 24) }.help("打开 Todo 看板").accessibilityLabel("Todo")
                     tool(.date, "calendar", "日期与时间", active: dateEnabled)
                     tool(.alarm, "bell", "提醒时间", active: alarmEnabled)
                     tool(.organize, "list.bullet", "列表与优先级", active: draft.details.priority > 0)
@@ -672,7 +672,7 @@ private struct IslandTodoCreateCard: View {
                 Button(action: save) { Image(systemName: "return").font(.system(size: 11)).foregroundStyle(Color.white).frame(width: 28, height: 24).background(Color.blue.opacity(0.65), in: Capsule()) }
                     .disabled(draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || lists.isEmpty).accessibilityIdentifier("island-todo-create")
                     .accessibilityLabel("添加提醒事项").help("回车添加")
-            }.padding(.leading, 24)
+            }
         }.padding(.horizontal, 16).padding(.vertical, 12)
             .animation(reduceMotion ? nil : .timingCurve(0.2, 0.8, 0.2, 1, duration: 0.18), value: option)
             .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: dateEnabled)
