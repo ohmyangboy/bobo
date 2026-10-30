@@ -38,9 +38,9 @@ test('隔离环境：列表、文件增删改、冲突保护、路径保护、�
   assert.equal((await req('ai/settings',null,{Origin:'https://evil.example'})).status,403);
   assert.equal((await req('ai/settings',{keySource:'manual',baseUrl:'http://127.0.0.1:1/v1',model:'test',clearKey:true})).status,200);
   assert.equal((await req('skills',null,{Origin:'https://evil.example'})).status,403);
-  // 用量接口：隔离环境里没有 OpenCode 数据库、Codex / Claude Code 登录与 agy 会话，四家都不可用但接口本身要正常。
+  // 用量接口：隔离环境里没有 OpenCode 数据库、Codex / Claude Code 登录与 agy 会话，所有额度来源都不可用但接口本身要正常。
   const usage=(await req('usage')).data;
-  assert.equal(usage.available,false);assert.equal(usage.providers.length,4);assert.equal(usage.providers[0].id,'codex');assert.equal(usage.providers[1].id,'claude');assert.equal(usage.providers[2].id,'opencode-go');assert.equal(usage.providers[3].id,'agy');
+  assert.equal(usage.available,false);assert.deepEqual(usage.providers.map(p=>p.id),['codex','claude','opencode-go','agy','cursor','grok']);
   const island=(await req('opencode')).data;
   assert.ok(island.agy);
   assert.equal(island.butler.enabled,false);

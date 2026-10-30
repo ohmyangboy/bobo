@@ -44,6 +44,7 @@ cp "$project_dir"/macos/assets/bobo-provider-*.svg "$app_dir/Contents/Resources/
 for sound in Ping Glass Basso Hero; do
   cp "/System/Library/Sounds/$sound.aiff" "$app_dir/Contents/Resources/"
 done
+cp "$project_dir"/macos/assets/bobo-provider-*.png "$app_dir/Contents/Resources/"
 echo "$node_path" > "$app_dir/Contents/Resources/node-path"
 
 # 3. 应用图标。
