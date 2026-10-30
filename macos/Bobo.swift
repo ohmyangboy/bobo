@@ -259,6 +259,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     private func setupNotch() {
         let width: CGFloat = 220, height: CGFloat = 30
         notchWindow = NotchPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: height), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        notchWindow.title = "bobo 通知岛"
         notchWindow.isFloatingPanel = true
         notchWindow.becomesKeyOnlyIfNeeded = true
         notchWindow.hidesOnDeactivate = false
@@ -274,7 +275,24 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         let hosting = IslandHostingView(rootView: IslandView(
             model: islandModel,
             todo: todoStore,
-            onTodo: { [weak self] in self?.openInApp(tab: "islandTab", pane: ("island", "todo")) },
+            onTodo: { [weak self] id in
+                guard let self else { return }
+                self.islandModel.todoComposing = false
+                self.openInApp(tab: "islandTab", pane: ("island", "todo"))
+                if let id, let data = try? JSONEncoder().encode(id), let json = String(data: data, encoding: .utf8) {
+                    self.webView.evaluateJavaScript("window.__boboTodoOpen?.(\(json))")
+                }
+            },
+            onTodoCompose: { [weak self] composing in
+                guard let self else { return }
+                self.islandModel.todoComposing = composing
+                if composing {
+                    self.islandCollapse?.cancel(); self.islandAutoCollapse?.cancel()
+                    self.menuBarYielding = false; self.setIslandYielding(false)
+                    self.notchWindow?.makeKey()
+                }
+                self.scheduleIslandLayout()
+            },
             onSelect: { [weak self] session in self?.focusIsland(session) },
             onActivate: { [weak self] in self?.showIslandStatus() },
             onAvatar: { [weak self] source in self?.showIslandStatus(source: source) },
@@ -362,7 +380,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     private func chosenScreen() -> NSScreen? {
         let screens = NSScreen.screens
         guard let primary = screens.first else { return nil }
-        if islandModel.butlerReply.isOpen, let current = screen(withSignature: currentScreenSignature) { return current }
+        if islandModel.butlerReply.isOpen || islandModel.todoComposing, let current = screen(withSignature: currentScreenSignature) { return current }
         switch islandModel.settings.display {
         case "builtin": return screens.first { Self.hasNotch($0) } ?? primary
         case "main": return primary
@@ -499,7 +517,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             network: islandModel.network != nil,
             actionButtons: islandModel.expanded)
         // 刘海屏上下同宽，列表沿用顶部内容宽度；外接屏保留原有展开宽度。
-        let minWidth: CGFloat = islandModel.expanded ? min(480, screen.frame.width - IslandMetrics.screenEdgeMargin * 2) : 0
+        let minWidth: CGFloat = islandModel.expanded ? min(todoStore.snapshot.enabled ? 620 : 480, screen.frame.width - IslandMetrics.screenEdgeMargin * 2) : 0
         let layout = IslandBarGeometry.layout(left: widths.left, right: widths.right, notch: notch, minWidth: minWidth)
         islandModel.barLayout = layout
         let barWidth = IslandBarGeometry.envelope(layout)
@@ -559,7 +577,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         // 防遮挡：前台应用全屏、或鼠标停在菜单栏上时让位。不再整块收起（那样是生硬的出现 / 消失），
         // 改为缩成一只 bobo 躲进刘海区域，回来时同样淡入 + 尺寸补间（见 setIslandYielding）。
         // 输入法候选窗会改变前台窗口与鼠标位置；编辑中的面板不能因此让位 / 被销毁。
-        let yielding = !islandModel.butlerReply.isOpen && (menuBarYielding || frontmostFullScreenCached())
+        let yielding = !islandModel.butlerReply.isOpen && !islandModel.todoComposing && (menuBarYielding || frontmostFullScreenCached())
         if yielding {
             islandCollapse?.cancel()
             islandAutoCollapse?.cancel()
@@ -742,6 +760,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
                 }
                 self.closeButlerReply()
             }
+            if self.islandModel.todoComposing { return }
             if self.islandModel.hovering {
                 self.islandModel.hovering = false
                 self.scheduleIslandLayout()
@@ -1035,7 +1054,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     }
 
     private func updateMenuBarYield() {
-        if islandModel.butlerReply.isOpen { menuBarYielding = false; menuBarLeftAt = nil; return }
+        if islandModel.butlerReply.isOpen || islandModel.todoComposing { menuBarYielding = false; menuBarLeftAt = nil; return }
         // 在动画 / 鼠标 / 窗口可见性 guard 之前复查：全屏让位的透明窗口也必须能自己恢复。
         recheckFullScreenYield()
         guard !islandDragging, !isHopping, islandLayoutTimer == nil, islandDisplayDriver == nil, let panel = notchWindow, panel.isVisible, let screen = panel.screen else { return }
@@ -2554,6 +2573,7 @@ final class IslandModel: ObservableObject {
     @Published var butlerComposerHeight: CGFloat? = nil
     @Published var todoContentHeight: CGFloat = 0
     @Published var todoHasItems = false
+    @Published var todoComposing = false
     // 悬停明细卡：nil 为不显示；detailMetrics 由 SwiftUI 上报，原生用它定窗口尺寸（见 Bobo.applyDetail）。
     @Published var detail: IslandDetailKind?
     @Published var detailMetrics = DetailMetrics()
@@ -2581,7 +2601,7 @@ final class IslandModel: ObservableObject {
     }
     var top: IslandSession? { waiting ?? sessions.first { $0.state == "working" } ?? sessions.first }
     // 展开：鼠标悬停，或（设置允许时）状态变化自动亮起（等你回答 3 秒、结束/终止 2 秒，见 revealIslandTemporarily）。
-    var expanded: Bool { butlerReply.isOpen || hovering || (settings.autoExpand && autoRevealed) }
+    var expanded: Bool { todoComposing || butlerReply.isOpen || hovering || (settings.autoExpand && autoRevealed) }
     var butlerListHeight: CGFloat { butler?.visibleListHeight(measured: butlerContentHeight, replying: butlerReply.isOpen) ?? 0 }
     var butlerHeight: CGFloat {
         guard expanded, butler?.enabled == true else { return 0 }
@@ -2677,7 +2697,8 @@ final class IslandModel: ObservableObject {
 struct IslandView: View {
     @ObservedObject var model: IslandModel
     @ObservedObject var todo: TodoStore
-    var onTodo: () -> Void
+    var onTodo: (String?) -> Void
+    var onTodoCompose: (Bool) -> Void
     var onSelect: (IslandSession) -> Void
     // 点顶部栏空白：打开主窗口，落在默认的第一个 tab（通知岛）。
     var onActivate: () -> Void
@@ -2719,7 +2740,9 @@ struct IslandView: View {
                     Rectangle().fill(.white.opacity(0.14)).frame(height: 0.5).padding(.horizontal, 12)
                     list
                     if todo.snapshot.enabled {
-                        IslandTodoView(snapshot: todo.snapshot, onManage: onTodo, onOpen: { TodoNavigation.open($0) })
+                        IslandTodoView(snapshot: todo.snapshot, onManage: { onTodo(nil) }, onOpen: { onTodo($0) }, onCreate: { draft in
+                            todo.create(title: draft.title, date: draft.date, listID: draft.listID, bucket: draft.bucket, details: draft.details)
+                        }, onCompose: onTodoCompose, onShowCompleted: { todo.setShowCompleted($0) }, onComplete: { todo.complete(id: $0, completed: $1) })
                     }
                     if let butler = model.butler, butler.enabled {
                         IslandButlerList(butler: butler, avatarForProject: { model.avatarImage($0) }, viewportHeight: model.butlerListHeight,

@@ -23,8 +23,14 @@ import SwiftUI
     var failure = false
     var pending: [CheckedContinuation<[TodoReminder], any Error>] = []
     var writes: [(String, DateComponents?, String)] = []
+    var savedDetails = TodoDetails()
+    var requestedCompleted = false
+    var updates: [String] = []
+    var completions: [(String, Bool)] = []
+    var preservedDue = false
     func requestAccess() async throws -> Bool { requests += 1; authorization = permissionResult; return authorization == .allowed }
-    func fetch() async throws -> [TodoReminder] {
+    func fetch(includeCompleted: Bool) async throws -> [TodoReminder] {
+        requestedCompleted = includeCompleted
         reads += 1
         if failure { throw TodoError.message("测试读取失败") }
         if let items { return items }
@@ -32,10 +38,15 @@ import SwiftUI
     }
     func writableLists() -> [TodoList] { [TodoList(id: "inbox", title: "收件箱")] }
     func defaultListID() -> String { "inbox" }
-    func create(title: String, due: DateComponents?, listID: String) throws {
+    func create(title: String, due: DateComponents?, listID: String, details: TodoDetails) throws {
         guard listID == "inbox" else { throw TodoError.message("列表已删除") }
-        writes.append((title, due, listID))
+        writes.append((title, due, listID)); savedDetails = details
     }
+    func update(id: String, title: String, due: DateComponents?, listID: String, details: TodoDetails, preserveDue: Bool) throws {
+        guard listID == "inbox" else { throw TodoError.message("列表已删除") }
+        updates.append(id); savedDetails = details; preservedDue = preserveDue
+    }
+    func complete(id: String, completed: Bool) throws { completions.append((id, completed)) }
     func finish(_ items: [TodoReminder]) { pending.removeFirst().resume(returning: items) }
 }
 
@@ -47,33 +58,35 @@ import SwiftUI
         func date(_ value: String) -> DateComponents { TodoGrouping.dateComponents(value, calendar: calendar)! }
         let now = calendar.date(from: DateComponents(year: 2026, month: 10, day: 29, hour: 12))!
         func reminder(_ id: String, _ due: String? = nil, priority: Int = 0, completed: Bool = false) -> TodoReminder {
-            TodoReminder(id: id, title: id, list: "收件箱", due: due.map(date), priority: priority, completed: completed)
+            TodoReminder(id: id, title: id, list: "收件箱", due: due.map(date), priority: priority, completed: completed, listID: "inbox")
         }
         let input = [reminder("none"), reminder("past", "2026-10-28"), reminder("today", "2026-10-29"), reminder("tomorrow", "2026-10-30"), reminder("sunday", "2026-11-01"), reminder("next-week", "2026-11-02"), reminder("done", "2026-10-29", completed: true)]
         let board = TodoGrouping.columns(input, now: now, calendar: calendar)
-        precondition(board.map(\.bucket) == [.later, .week, .today])
-        precondition(board[0].items.map(\.id) == ["next-week", "none"])
-        precondition(board[1].items.map(\.id) == ["tomorrow", "sunday"])
-        precondition(board[2].items.map(\.id) == ["past", "today"])
-        precondition(board[2].items[0].overdue && !board[2].items[1].overdue, "全天提醒直到跨天才算逾期")
+        precondition(board.map(\.bucket) == [.today, .week, .later])
+        precondition(board[0].items.map(\.id) == ["past", "today"])
+        precondition(board[1].items.map(\.id) == ["tomorrow", "sunday", "next-week"])
+        precondition(board[2].items.map(\.id) == ["none"])
+        precondition(board[0].items[0].overdue && !board[0].items[1].overdue, "全天提醒直到跨天才算逾期")
         var timed = reminder("morning", "2026-10-29"); timed.due?.hour = 9
         let timedBoard = TodoGrouping.columns([timed], now: now, calendar: calendar)
-        precondition(timedBoard[2].items[0].overdue && timedBoard[2].items[0].dateText.contains("09:00"))
+        precondition(timedBoard[0].items[0].overdue && timedBoard[0].items[0].dateText.contains("09:00"))
+        let boundary = TodoGrouping.columns([reminder("seventh", "2026-11-05"), reminder("eighth", "2026-11-06")], now: now, calendar: calendar)
+        precondition(boundary[1].items.map(\.id) == ["seventh"] && boundary[2].items.map(\.id) == ["eighth"], "包含未来第七天，排除第八天")
         precondition(TodoGrouping.dateComponents("2026-02-30", calendar: calendar) == nil)
         precondition(TodoGrouping.dateComponents("2026-1-1", calendar: calendar) == nil)
         precondition(TodoGrouping.dateComponents("2028-02-29", calendar: calendar) != nil)
         var sundayCalendar = calendar; sundayCalendar.firstWeekday = 1
-        precondition(TodoGrouping.columns([reminder("sunday", "2026-11-01")], now: now, calendar: sundayCalendar)[0].items.count == 1, "按系统本周边界，不是未来七天")
+        precondition(TodoGrouping.columns([reminder("sunday", "2026-11-01")], now: now, calendar: sundayCalendar)[1].items.count == 1, "近七不受每周起始日影响")
         let lastDay = calendar.date(from: DateComponents(year: 2026, month: 12, day: 31, hour: 12))!
         precondition(TodoGrouping.columns([reminder("next-year", "2027-01-01")], now: lastDay, calendar: calendar)[1].items.count == 1)
         var la = calendar; la.timeZone = TimeZone(identifier: "America/Los_Angeles")!
         let dstNow = la.date(from: DateComponents(year: 2026, month: 3, day: 8, hour: 12))!
         let tomorrow = TodoReminder(id: "dst", title: "明天", list: "", due: DateComponents(year: 2026, month: 3, day: 9))
-        precondition(TodoGrouping.columns([tomorrow], now: dstNow, calendar: la)[0].items.count == 1, "夏令时且周日结束后，明天归稍后")
+        precondition(TodoGrouping.columns([tomorrow], now: dstNow, calendar: la)[1].items.count == 1, "夏令时用日历加天，明天仍归近七")
         var zoned = reminder("timezone", "2026-10-30"); zoned.due?.hour = 0; zoned.due?.timeZone = TimeZone(secondsFromGMT: 14 * 3600)
-        precondition(TodoGrouping.columns([zoned], now: now, calendar: calendar)[2].items.count == 1, "带时区截止时间按本地日期归类")
+        precondition(TodoGrouping.columns([zoned], now: now, calendar: calendar)[0].items.count == 1, "带时区截止时间按本地日期归类")
         let priority = TodoGrouping.columns([reminder("normal", "2026-10-29"), reminder("urgent", "2026-10-29", priority: 1)], now: now, calendar: calendar)
-        precondition(priority[2].items.first?.id == "urgent")
+        precondition(priority[0].items.first?.id == "urgent")
 
         let suite = "local.bobo.todo-test." + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!
@@ -92,16 +105,43 @@ import SwiftUI
         repository.authorization = .allowed; repository.items = input
         await store.connect(); try await settle { !store.snapshot.loading }
         precondition(store.snapshot.enabled && store.snapshot.count == 6 && store.snapshot.defaultList == "inbox")
-        precondition(defaults.bool(forKey: "todoEnabled"))
+        precondition(defaults.bool(forKey: "todoEnabled") && !store.snapshot.showCompleted && !repository.requestedCompleted)
+        store.setShowCompleted(true); try await settle { !store.snapshot.loading }
+        precondition(store.snapshot.count == 7 && repository.requestedCompleted)
+        precondition(store.snapshot.columns[0].items.last?.completed == true)
+        store.setShowCompleted(false); try await settle { !store.snapshot.loading }
+        precondition(store.snapshot.count == 6 && !repository.requestedCompleted)
+        store.complete(id: "today", completed: true)
+        precondition(repository.completions.last?.0 == "today" && repository.completions.last?.1 == true)
+        store.complete(id: "unknown", completed: true); precondition(repository.completions.count == 1)
+        precondition(store.create(title: "改标题", date: "2026-10-29", listID: "inbox", details: TodoDetails(notes: "保留备注", time: "", url: "https://example.com"), editingID: "today"))
+        precondition(repository.updates == ["today"] && repository.preservedDue && repository.savedDetails.url == "https://example.com")
+        precondition(!store.create(title: "无日期时间", date: "", listID: "inbox", details: TodoDetails(time: "12:30")))
+        precondition(!store.create(title: "错误时间", date: "2026-10-30", listID: "inbox", details: TodoDetails(time: "25:30")))
+        precondition(store.create(title: "定时", date: "2026-10-30", listID: "inbox", details: TodoDetails(time: "12:30")))
+        precondition(repository.writes.last!.1?.hour == 12 && repository.writes.last!.1?.minute == 30)
+        repository.writes.removeAll()
         precondition(store.create(title: "  新待办  ", date: "2026-10-30", listID: "inbox"))
         precondition(repository.writes.count == 1 && repository.writes[0].0 == "新待办" && repository.writes[0].1?.day == 30)
         precondition(!store.create(title: "", date: "", listID: "inbox"))
         precondition(!store.create(title: "错误日期", date: "2026-02-30", listID: "inbox"))
         precondition(!store.create(title: "错误列表", date: "", listID: "deleted") && repository.writes.count == 1)
+        precondition(store.create(title: "稍后新增", date: "", listID: "inbox", bucket: .later) && repository.writes.last!.1 == nil)
+        precondition(store.create(title: "今天新增", date: "", listID: "inbox", bucket: .today) && repository.writes.last!.1?.day == 29)
+        let details = TodoDetails(notes: "备注", checklist: "第一步\n第二步", tags: "bobo #工作", priority: 1, alarm: now.addingTimeInterval(3600))
+        precondition(store.create(title: "本周新增", date: "", listID: "inbox", bucket: .week, details: details) && repository.writes.last!.1?.day == 30)
+        precondition(repository.savedDetails.savedNotes == "备注\n\n☐ 第一步\n☐ 第二步\n\n#bobo #工作" && repository.savedDetails.priority == 1 && repository.savedDetails.alarm != nil)
+        precondition(store.create(title: "指定日期覆盖列", date: "2026-11-02", listID: "inbox", bucket: .today) && repository.writes.last!.1?.month == 11)
+        let sunday = calendar.date(from: DateComponents(year: 2026, month: 11, day: 1))!
+        let sundayStore = TodoStore(repository: repository, defaults: defaults, now: { sunday }, calendar: { calendar }, observeSystem: false)
+        await sundayStore.connect(); try await settle { !sundayStore.snapshot.loading }
+        precondition(sundayStore.create(title: "周末边界", date: "", listID: "inbox", bucket: .week) && repository.writes.last!.1?.day == 2, "周日近七默认明天，不按本周末截断")
+        // 恢复原 store 的变更订阅。
+        repository.onChange = { store.refresh() }
         try await settle { !store.snapshot.loading }
         repository.items = [reminder("changed")]; repository.onChange?()
         try await settle { !store.snapshot.loading }
-        precondition(store.snapshot.count == 1 && store.snapshot.columns[0].items[0].id == "changed")
+        precondition(store.snapshot.count == 1 && store.snapshot.columns[2].items[0].id == "changed")
         repository.failure = true; store.refresh(); try await settle { !store.snapshot.loading }
         precondition(!store.snapshot.error.isEmpty && store.snapshot.count == 1, "读取失败不能伪装成空列表")
         repository.failure = false; repository.items = nil
@@ -110,7 +150,7 @@ import SwiftUI
         store.refresh(); store.refresh(); repository.finish([reminder("stale")])
         try await settle { repository.reads == reads + 1 && !repository.pending.isEmpty }
         repository.finish([reminder("latest")]); try await settle { !store.snapshot.loading }
-        precondition(store.snapshot.columns[0].items[0].id == "latest", "重复系统变更合并为一轮补查")
+        precondition(store.snapshot.columns[2].items[0].id == "latest", "重复系统变更合并为一轮补查")
         store.refresh(); try await settle { !repository.pending.isEmpty }
         store.setEnabled(false); repository.finish(input)
         try await Task.sleep(nanoseconds: 10_000_000)
@@ -136,7 +176,7 @@ import SwiftUI
         NSApplication.shared.setActivationPolicy(.prohibited)
         var snapshot = TodoSnapshot(); snapshot.enabled = true; snapshot.authorization = .allowed
         snapshot.columns = TodoGrouping.columns((0..<40).map { reminder("待办\($0)", "2026-10-29") }, now: now, calendar: calendar)
-        precondition(snapshot.height == 192 && snapshot.count == 40, "缩略布局有高度上限但保留全部事项")
+        precondition(snapshot.height == 360 && snapshot.count == 40, "缩略布局有高度上限但保留全部事项")
         for width: CGFloat in [300, 480, 760] {
             let host = NSHostingView(rootView: IslandTodoView(snapshot: snapshot, onManage: {}, onOpen: { _ in }).frame(width: width))
             host.frame = NSRect(x: 0, y: 0, width: width, height: snapshot.height)
@@ -144,7 +184,7 @@ import SwiftUI
             precondition(abs(host.fittingSize.height - snapshot.height) < 1 && host.fittingSize.width <= width + 1)
         }
         let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(snapshot)) as! [String: Any]
-        precondition((json["columns"] as! [[String: Any]]).map { $0["bucket"] as! String } == ["later", "week", "today"])
+        precondition((json["columns"] as! [[String: Any]]).map { $0["bucket"] as! String } == ["today", "week", "later"])
         print("Todo checks passed")
     }
 }
