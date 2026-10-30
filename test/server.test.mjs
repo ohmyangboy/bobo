@@ -19,6 +19,9 @@ test('主窗入口及其模块依赖都能通过 HTTP 加载，避免整页点�
    for(const match of source.matchAll(/(?:\bfrom\s*|\bimport\s*(?:\(\s*)?)['"](\.[^'"]+)['"]/g))entries.push(new URL(match[1],url).href);
   }
   assert.ok(visited.has(base+'/todo.js'),'Todo 必须包含在真实入口依赖检查中');
+  const reminderIcon=await fetch(base+'/reminders.png');
+  assert.equal(reminderIcon.status,200);assert.equal(reminderIcon.headers.get('content-type'),'image/png');
+  assert.deepEqual(Buffer.from(await reminderIcon.arrayBuffer()),await fs.readFile(new URL('../public/reminders.png',import.meta.url)));
   assert.equal((await fetch(base+'/not-a-public-file.js')).status,404,'静态资源仍使用白名单');
  }finally{child.kill();await new Promise(r=>child.once('exit',r));await fs.rm(home,{recursive:true,force:true});}
 });

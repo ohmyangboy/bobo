@@ -6,7 +6,7 @@ export function installTodoPage(doc=document,host=window){
  const send=body=>{if(bridge)bridge.postMessage(body);};
  const node=(tag,cls,text)=>{const el=doc.createElement(tag);if(cls)el.className=cls;if(text!==undefined)el.textContent=text;return el;};
  const show=selector=>{const el=$(selector);if(!el.open)el.showModal();};
- const close=selector=>$(selector).close();
+ const close=selector=>{if(selector==='#todoComposer'){$(selector).hidden=true;$('#todoQuickForm').hidden=!ready();}else $(selector).close();};
  const items=()=>snapshot?.columns?.flatMap(c=>c.items)||[];
  const ready=()=>!!bridge&&snapshot?.enabled&&snapshot?.authorization==='allowed';
  function localDate(value=new Date()){
@@ -43,8 +43,8 @@ export function installTodoPage(doc=document,host=window){
   $('#todoDate').value=item?.date??dateFor(bucket);$('#todoTime').value=item?.time||'';
   $('#todoNotes').value=item?.notes||'';$('#todoURL').value=item?.url||'';$('#todoPriority').value=String(item?.priority||0);$('#todoAlarm').value=alarmLocal(item?.alarm);
   if(item)$('#todoList').value=item.listID;
-  $('#todoComposerHeading').textContent=item?'编辑提醒事项':'新提醒事项';$('#todoCreate').textContent=item?'保存':'创建';
-  $('#todoSaveStatus').textContent='';option=null;syncTime();syncCreate();close('#todoDetail');show('#todoComposer');$('#todoTitle').focus();
+  $('#todoComposerHeading').textContent=item?'编辑提醒事项':'新增提醒事项';$('#todoCreate').textContent=item?'保存':'添加';
+  $('#todoSaveStatus').textContent='';option=null;syncTime();syncCreate();close('#todoDetail');$('#todoComposer').hidden=false;$('#todoQuickForm').hidden=false;$('#todoTitle').focus();
  }
  function renderBoard(data){
   const key=JSON.stringify(data?.columns||[]);if(key===boardKey)return;boardKey=key;
@@ -55,7 +55,7 @@ export function installTodoPage(doc=document,host=window){
    add.type='button';add.setAttribute('aria-label',`新增到${titles[bucket]}`);add.onclick=()=>openCreate(bucket);
    head.append(heading,node('span','todo-count',String(rows.length)),add);section.append(head);
    if(!rows.length){
-    const empty=node('div','todo-empty'),mark=node('img');mark.src='/icon.png';mark.alt='';empty.append(mark,node('span','','暂无事项'));section.append(empty);
+    const empty=node('div','todo-empty'),mark=node('img');mark.src='/reminders.png';mark.alt='';empty.append(mark,node('span','','暂无事项'));section.append(empty);
    }else{
     const list=node('div','todo-items');list.tabIndex=0;list.setAttribute('aria-label',`${titles[bucket]}事项，可滚动`);
     for(const item of rows){
@@ -90,7 +90,7 @@ export function installTodoPage(doc=document,host=window){
    select.value=lists.some(list=>list.id===old)?old:lists.some(list=>list.id===data?.defaultList)?data.defaultList:lists[0]?.id||'';
   }
   syncCreate();$('#todoCancel').disabled=pending;
-  $('#todoCreate').textContent=pending?'保存中…':editingID?'保存':'创建';
+  $('#todoCreate').textContent=pending?'保存中…':editingID?'保存':'添加';
   $('#todoListHint').textContent=lists.length?'':'没有可写列表，请先在系统提醒事项中创建列表。';
   if(connected)renderBoard(data);
   if(selectedID&&$('#todoDetail').open){if(items().some(item=>item.id===selectedID))showItem(selectedID);else close('#todoDetail');}
@@ -109,7 +109,7 @@ export function installTodoPage(doc=document,host=window){
  $('#todoShowCompleted').onchange=event=>send({action:'showCompleted',show:event.target.checked});
  $('#todoOpen').onclick=()=>send({action:'openSystem'});$('#todoRefresh').onclick=()=>send({action:'get'});
  $('#todoNew').onclick=()=>openCreate();$('#todoCancel').onclick=()=>{if(!pending)close('#todoComposer');};
- $('#todoComposer').oncancel=event=>{if(pending)event.preventDefault();};
+ $('#todoComposer').onkeydown=event=>{if(event.key==='Escape'&&!pending)close('#todoComposer');};
  $('#todoDate').onchange=syncTime;
  $('#todoTitle').oninput=syncCreate;
  for(const name of ['Date','Alarm','Organize','URL'])$('#todo'+name+'Toggle').onclick=()=>{option=option===name?null:name;syncOptions();};
@@ -118,7 +118,8 @@ export function installTodoPage(doc=document,host=window){
  $('#todoDetailClose').onclick=()=>{selectedID=null;close('#todoDetail');};$('#todoDetailSystem').onclick=()=>send({action:'openSystem',id:selectedID});
  $('#todoDetailEdit').onclick=()=>{const item=items().find(item=>item.id===selectedID);if(item&&item.editable!==false)openCreate('later','',item);};
  $('#todoDetailComplete').onclick=()=>{const item=items().find(item=>item.id===selectedID);if(item)send({action:'complete',id:item.id,completed:!item.completed});};
- $('#todoQuickForm').onsubmit=event=>{event.preventDefault();openCreate($('#todoQuickBucket').value,$('#todoQuickTitle').value);};
+ $('#todoQuickTitle').onfocus=()=>openCreate($('#todoQuickBucket').value,$('#todoQuickTitle').value);
+ $('#todoQuickForm').onsubmit=event=>{event.preventDefault();const title=$('#todoQuickTitle').value;openCreate($('#todoQuickBucket').value,title);if(title.trim())$('#todoForm').requestSubmit();};
  $('#todoForm').onsubmit=event=>{
   event.preventDefault();if(pending||!ready())return;
   const title=$('#todoTitle').value.trim();if(!title)return;

@@ -11,6 +11,7 @@ class Element{
  showModal(){this.open=true;}
  close(){this.open=false;}
  focus(){this.focused=true;}
+ requestSubmit(){this.onsubmit?.({preventDefault(){}});}
 }
 function page(native=true){
  const nodes=new Map(),sent=[];
@@ -36,16 +37,16 @@ test('Todo 三列固定顺序，点击在 bobo 内看详情，只有次要入口
  p.$('#todoDetailSystem').onclick();assert.deepEqual(p.sent.at(-1),{action:'openSystem',id:'real-id'});
  p.$('#todoDetailClose').onclick();p.host.__boboTodoOpen('real-id');assert.equal(p.$('#todoDetail').open,true);
 });
-test('Todo 底部 Return 与各列加号进入对应创建卡片；提交去重、失败保留输入、成功清空',()=>{
+test('Todo 点击原位展开输入；回车提交去重、失败保留输入、成功收缩',()=>{
  const p=page();p.host.__boboTodoReceive(data());
  p.$('#todoQuickTitle').value='  真实待办  ';p.$('#todoQuickBucket').value='today';
- p.$('#todoQuickForm').onsubmit({preventDefault(){}});
- assert.equal(p.$('#todoComposer').open,true);assert.equal(p.$('#todoBucket').value,'today');assert.equal(p.$('#todoTitle').focused,true);
+ p.$('#todoQuickTitle').onfocus();
+ assert.equal(p.$('#todoComposer').hidden,false);assert.equal(p.$('#todoBucket').value,'today');assert.equal(p.$('#todoTitle').focused,true);
  p.$('#todoDate').value='2026-10-30';p.$('#todoNotes').value='备注';p.$('#todoURL').value='https://example.com';p.$('#todoTime').value='09:30';p.$('#todoPriority').value='1';
  const submit=()=>p.$('#todoForm').onsubmit({preventDefault(){}});submit();submit();
  assert.deepEqual(p.sent.filter(s=>s.action==='create'),[{action:'create',title:'真实待办',date:'2026-10-30',time:'09:30',listID:'inbox',bucket:'today',notes:'备注',url:'https://example.com',priority:1,alarm:''}]);
- p.host.__boboTodoCreated(false);assert.equal(p.$('#todoTitle').value,'  真实待办  ');assert.equal(p.$('#todoCreate').disabled,false);assert.equal(p.$('#todoComposer').open,true);
- submit();p.host.__boboTodoCreated(true);assert.equal(p.$('#todoTitle').value,'');assert.equal(p.$('#todoDate').value,'');assert.equal(p.$('#todoNotes').value,'');assert.equal(p.$('#todoComposer').open,false);
+ p.host.__boboTodoCreated(false);assert.equal(p.$('#todoTitle').value,'  真实待办  ');assert.equal(p.$('#todoCreate').disabled,false);assert.equal(p.$('#todoComposer').hidden,false);
+ submit();p.host.__boboTodoCreated(true);assert.equal(p.$('#todoTitle').value,'');assert.equal(p.$('#todoDate').value,'');assert.equal(p.$('#todoNotes').value,'');assert.equal(p.$('#todoComposer').hidden,true);
  for(const [index,bucket] of ['today','week','later'].entries()){
   p.$('#todoBoard').children[index].children[0].children[2].onclick();assert.equal(p.$('#todoBucket').value,bucket);
  }
@@ -58,18 +59,28 @@ test('Todo 列保留所有任务，刷新不重建未变列表，更新保留列
  const next=structuredClone(snapshot);next.columns[0].items.push({id:'new',title:'新增'});p.host.__boboTodoReceive(next);
  assert.equal(p.$('#todoBoard').children[0].children[1].scrollTop,380);assert.equal(p.$('#todoBoard').children[0].children[1].children.length,41);
 });
+test('Todo 快速输入回车直接添加，不需要二次确认；取消后恢复收缩输入',()=>{
+ const p=page();p.host.__boboTodoReceive(data());
+ assert.equal(p.$('#todoComposer').hidden,true);
+ p.$('#todoQuickBucket').value='later';p.$('#todoQuickTitle').value='直接添加';
+ p.$('#todoQuickForm').onsubmit({preventDefault(){}});
+ assert.equal(p.sent.at(-1).action,'create');assert.equal(p.sent.at(-1).title,'直接添加');assert.equal(p.sent.at(-1).date,'');
+ p.host.__boboTodoCreated(true);assert.equal(p.$('#todoComposer').hidden,true);assert.equal(p.$('#todoQuickForm').hidden,false);
+ p.$('#todoQuickTitle').onfocus();assert.equal(p.$('#todoComposer').hidden,false);assert.equal(p.$('#todoQuickForm').hidden,false);
+ p.$('#todoComposer').onkeydown({key:'Escape'});assert.equal(p.$('#todoComposer').hidden,true);assert.equal(p.$('#todoQuickForm').hidden,false);
+});
 test('Todo 拒绝权限、关闭或撤权时隐藏数据并关闭详情与创建',()=>{
  const p=page();p.host.__boboTodoReceive(data());p.$('#todoNew').onclick();p.host.__boboTodoOpen('real-id');
  p.host.__boboTodoReceive({enabled:true,authorization:'denied',columns:[]});
  assert.equal(p.$('#todoPermissionSettings').hidden,false);assert.equal(p.$('#todoBoard').hidden,true);assert.equal(p.$('#todoForm').hidden,true);
- assert.equal(p.$('#todoComposer').open,false);assert.equal(p.$('#todoDetail').open,false);assert.match(p.$('#todoStatus').textContent,/隐私与安全性/);
+ assert.equal(p.$('#todoComposer').hidden,true);assert.equal(p.$('#todoDetail').open,false);assert.match(p.$('#todoStatus').textContent,/隐私与安全性/);
  p.host.__boboTodoReceive({...data(),enabled:false});assert.equal(p.$('#todoBoard').hidden,true);
  p.$('#todoEnabled').onchange({target:{checked:false}});assert.deepEqual(p.sent.at(-1),{action:'enabled',enabled:false});
 });
 
 test('Todo 编辑带回系统字段，保存失败保留草稿，完成与已完成切换独立写回',()=>{
  const p=page();p.host.__boboTodoReceive(data());p.host.__boboTodoOpen('real-id');p.$('#todoDetailEdit').onclick();
- assert.equal(p.$('#todoComposer').open,true);assert.equal(p.$('#todoDetail').open,false);
+ assert.equal(p.$('#todoComposer').hidden,false);assert.equal(p.$('#todoDetail').open,false);
  assert.equal(p.$('#todoDate').value,'2026-10-30');assert.equal(p.$('#todoNotes').value,'备注');assert.equal(p.$('#todoURL').value,'https://example.com');
  p.$('#todoTitle').value='修改标题';p.$('#todoDate').value='';p.$('#todoDate').onchange();
  assert.equal(p.$('#todoTime').disabled,true);

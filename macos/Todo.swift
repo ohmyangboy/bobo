@@ -444,10 +444,11 @@ struct IslandTodoView: View {
         quickFocused = false
         onCompose(true)
     }
+    private func finish() { draft = nil; onCompose(false) }
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Button(action: onManage) { HStack(spacing: 6) { TodoBoboMark(size: 20); Text("Todo").font(.system(size: 12, weight: .semibold)) } }
+                Button(action: onManage) { HStack(spacing: 6) { TodoRemindersMark(size: 20); Text("Todo").font(.system(size: 12, weight: .semibold)) } }
                     .help("打开 bobo Todo 看板").accessibilityIdentifier("island-todo-manage")
                 Text("\(snapshot.count)").font(.system(size: 10)).foregroundStyle(.white.opacity(0.65))
                 Spacer()
@@ -474,7 +475,7 @@ struct IslandTodoView: View {
                     TextField("", text: $quickTitle, prompt: Text("接下来要做什么？").foregroundColor(Color(white: 0.68))).textFieldStyle(.plain).font(.system(size: 12))
                         .focused($quickFocused).onSubmit { begin(bucket) }.accessibilityLabel("接下来要做什么？")
                     Button { begin(bucket) } label: { Image(systemName: "return").font(.system(size: 11)).frame(width: 26, height: 24).background(.white.opacity(0.05), in: Capsule()) }
-                        .help("展开创建卡片").accessibilityLabel("展开创建任务")
+                        .help("添加提醒事项").accessibilityLabel("展开任务输入")
                 }
                 .padding(.horizontal, 12).padding(.vertical, 7)
                 .background(Color(white: 0.14), in: Capsule()).overlay(Capsule().stroke(.white.opacity(0.12), lineWidth: 0.5))
@@ -483,30 +484,37 @@ struct IslandTodoView: View {
         }
         .allowsHitTesting(draft == nil)
         .accessibilityHidden(draft != nil)
-        .overlay {
+        .overlay(alignment: .bottom) {
             if let draft {
-                IslandTodoCreateCard(initial: draft, lists: snapshot.lists, error: snapshot.error, onCancel: { self.draft = nil; onCompose(false) }, onSave: { value in
-                    if onCreate(value) { self.draft = nil; quickTitle = ""; onCompose(false) }
+                IslandTodoCreateCard(initial: draft, lists: snapshot.lists, error: snapshot.error, onCancel: finish, onSave: { value in
+                    if onCreate(value) { quickTitle = ""; finish() }
                 })
-                .id(draft.id).padding(10)
+                .id(draft.id).fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 12).padding(.vertical, 12)
             }
         }
-        .onChange(of: quickFocused) { focused in if draft == nil { onCompose(focused) } }
+        .onChange(of: quickFocused) { focused in if focused && draft == nil { begin(bucket) } }
         .onDisappear { onCompose(false) }
-        .buttonStyle(.plain).foregroundStyle(Color.white).environment(\.colorScheme, .dark).frame(height: snapshot.height)
-        .background(Color(white: 0.055))
+        .buttonStyle(.plain).foregroundStyle(Color.white).environment(\.colorScheme, .dark)
+        .background(Color(white: 0.14), in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.white.opacity(0.18), lineWidth: 0.5))
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .frame(height: snapshot.height)
         .accessibilityElement(children: .contain).accessibilityLabel("Todo 看板，今日、近七、事务")
     }
 }
 
-private struct TodoBoboMark: View {
+private struct TodoRemindersMark: View {
     var size: CGFloat
+    private static let image: NSImage = {
+        if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.reminders") {
+            return NSWorkspace.shared.icon(forFile: app.path)
+        }
+        return NSImage(systemSymbolName: "checklist", accessibilityDescription: nil)!
+    }()
     var body: some View {
-        Group {
-            if let url = Bundle.main.url(forResource: "bobo-island-avatar-idle", withExtension: "png"), let image = NSImage(contentsOf: url) {
-                Image(nsImage: image).resizable().scaledToFit()
-            } else { Image(nsImage: NSImage(named: NSImage.applicationIconName)!).resizable().scaledToFit() }
-        }.frame(width: size, height: size).accessibilityHidden(true)
+        Image(nsImage: Self.image).resizable().scaledToFit()
+            .frame(width: size, height: size).accessibilityHidden(true)
     }
 }
 
@@ -524,9 +532,9 @@ private struct IslandTodoColumn: View {
                 Spacer(minLength: 0)
                 Button(action: onAdd) { Image(systemName: "plus").font(.system(size: 12)).frame(width: 24, height: 26) }
                     .foregroundStyle(Color(white: 0.8)).accessibilityLabel("新增到\(column.title)")
-            }.padding(.horizontal, 10).frame(height: 34).background(Color(white: 0.13))
+            }.padding(.horizontal, 10).frame(height: 34).background(Color(white: 0.16))
             if column.items.isEmpty {
-                VStack(spacing: 8) { TodoBoboMark(size: 34); Text("暂无事项").font(.system(size: 10)) }
+                VStack(spacing: 8) { TodoRemindersMark(size: 34); Text("暂无事项").font(.system(size: 10)) }
                     .foregroundStyle(Color(white: 0.65)).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView(.vertical) {
@@ -543,13 +551,13 @@ private struct IslandTodoColumn: View {
                                     }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                                 }.help("\(item.title) · \(item.list)；在 bobo 中查看").accessibilityLabel("\(item.title)，\(item.dateText)，在 bobo 中查看")
                             }.padding(9).frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color(white: 0.17), in: RoundedRectangle(cornerRadius: 9))
+                                .background(Color(white: 0.2), in: RoundedRectangle(cornerRadius: 9))
                                 .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.white.opacity(0.07), lineWidth: 0.5))
                         }
                     }.padding(6)
                 }.accessibilityLabel("\(column.title)事项，可滚动")
             }
-        }.background(Color(white: 0.095), in: RoundedRectangle(cornerRadius: 12))
+        }.background(Color(white: 0.075), in: RoundedRectangle(cornerRadius: 12))
             .clipShape(RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.1), lineWidth: 0.5))
     }
@@ -576,8 +584,13 @@ private struct IslandTodoCreateCard: View {
         self.lists = lists; self.error = error; self.onCancel = onCancel; self.onSave = onSave
     }
     private func field(_ label: String, _ value: Binding<String>, title: Bool = false) -> some View {
-        TextField("", text: value, prompt: Text(label).foregroundColor(Color(white: 0.68)), axis: .vertical)
-            .font(.system(size: title ? 17 : 12, weight: title ? .medium : .regular)).lineLimit(title ? 1...2 : 2...3)
+        Group {
+            if title {
+                TextField("", text: value, prompt: Text(label).foregroundColor(Color(white: 0.68))).onSubmit(save)
+            } else {
+                TextField("", text: value, prompt: Text(label).foregroundColor(Color(white: 0.68)), axis: .vertical).lineLimit(1...3)
+            }
+        }.font(.system(size: title ? 15 : 12, weight: title ? .medium : .regular))
             .textFieldStyle(.plain).foregroundStyle(Color(white: 0.97)).padding(.vertical, 4).accessibilityLabel(label)
     }
     private func tool(_ value: Option, _ icon: String, _ label: String, active: Bool = false) -> some View {
@@ -592,18 +605,13 @@ private struct IslandTodoCreateCard: View {
         }.help(label).accessibilityLabel(label).accessibilityValue(option == value ? "已展开" : "已收起")
     }
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                TodoBoboMark(size: 24)
-                Spacer()
+                field("接下来要做什么？", $draft.title, title: true).focused($titleFocused).accessibilityLabel("任务标题")
                 Button(action: onCancel) { Image(systemName: "xmark").font(.system(size: 12)).frame(width: 26, height: 26).background(Color(white: 0.24), in: Circle()) }.accessibilityLabel("取消创建")
             }
-            ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        field("接下来要做什么？", $draft.title, title: true).focused($titleFocused).accessibilityLabel("任务标题")
-                        field("备注", $draft.details.notes)
-                    }.padding(.horizontal, 4)
+                    field("备注", $draft.details.notes)
                     if option == .date {
                         VStack(spacing: 10) {
                             HStack { Text("日期"); Spacer(); if dateEnabled { DatePicker("日期", selection: $dueDate, displayedComponents: .date).labelsHidden() }; Toggle("日期", isOn: $dateEnabled).labelsHidden().toggleStyle(.switch) }
@@ -627,8 +635,7 @@ private struct IslandTodoCreateCard: View {
                     }
                     if !error.isEmpty { Text(error).font(.system(size: 11)).foregroundStyle(.orange) }
                     if lists.isEmpty { Text("没有可写列表，请在提醒事项中先创建列表。").font(.system(size: 11)).foregroundStyle(.orange) }
-                }.font(.system(size: 11)).padding(.trailing, 4)
-            }
+                }.font(.system(size: 11))
             HStack {
                 HStack(spacing: 6) {
                     tool(.date, "calendar", "日期与时间", active: dateEnabled)
@@ -637,14 +644,16 @@ private struct IslandTodoCreateCard: View {
                     tool(.url, "link", "URL", active: !draft.details.url.isEmpty)
                 }
                 Spacer()
-                Button(action: save) { Text("创建").font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.white).padding(.horizontal, 20).padding(.vertical, 8).background(Color(red: 0.05, green: 0.45, blue: 0.95), in: Capsule()) }
+                Button(action: save) { Image(systemName: "return").font(.system(size: 13, weight: .semibold)).foregroundStyle(Color.white).frame(width: 36, height: 32).background(Color(red: 0.05, green: 0.45, blue: 0.95), in: Capsule()) }
                     .disabled(draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || lists.isEmpty).accessibilityIdentifier("island-todo-create")
+                    .accessibilityLabel("添加提醒事项").help("回车添加")
             }
         }.padding(16).background(Color(white: 0.11), in: RoundedRectangle(cornerRadius: 20))
             .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.white.opacity(0.25), lineWidth: 0.5))
             .task { await Task.yield(); titleFocused = true }.onExitCommand(perform: onCancel)
     }
     private func save() {
+        guard !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !lists.isEmpty else { return }
         let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.dateFormat = "yyyy-MM-dd"
         draft.date = dateEnabled ? formatter.string(from: dueDate) : ""
         // 无日期时明确保持在事务，避免默认列重新补回日期。
