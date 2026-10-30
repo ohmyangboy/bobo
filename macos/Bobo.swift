@@ -526,8 +526,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         let barWidth = IslandBarGeometry.envelope(layout)
         let width = IslandBarGeometry.width(layout, minWidth: max(minWidth, barWidth), maxWidth: screen.frame.width - IslandMetrics.screenEdgeMargin * 2)
         // 展开高度按设置里的条数算（会话不足时跟着变矮），装不下的会话在列表里滚动查看。
-        let visibleRows = max(1, min(islandModel.settings.rows, islandModel.listed.count))
-        let listHeight: CGFloat = islandModel.expanded ? (islandModel.listed.isEmpty ? 42 : 13.5 + CGFloat(visibleRows) * 38) : 0
+        let listHeight: CGFloat = islandModel.expanded ? islandModel.sessionListHeight : 0
         return NSSize(width: width, height: islandBarHeight(screen) + listHeight + islandModel.butlerHeight + islandModel.todoHeight)
     }
 
@@ -2634,6 +2633,8 @@ final class IslandModel: ObservableObject {
         todoComposing = false; hovering = false; autoRevealed = false
         return true
     }
+    // 内容使用目标高度，由窗口从顶部裁切展开；不随补间中的剩余空间再次伸长。
+    var sessionListHeight: CGFloat { listed.isEmpty ? 42 : 13.5 + CGFloat(max(1, min(settings.rows, listed.count))) * 38 }
     var butlerListHeight: CGFloat { butler?.visibleListHeight(measured: butlerContentHeight, replying: butlerReply.isOpen) ?? 0 }
     var butlerHeight: CGFloat {
         guard expanded, butler?.enabled == true else { return 0 }
@@ -2968,7 +2969,7 @@ struct IslandView: View {
             .padding(.top, 6)
             .padding(.bottom, 9)
         }
-        .frame(maxHeight: .infinity)
+        .frame(height: model.sessionListHeight - 0.5)
     }
 }
 

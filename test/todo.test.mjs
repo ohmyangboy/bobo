@@ -66,7 +66,7 @@ test('Todo 快速输入回车直接添加，不需要二次确认；取消后恢
  p.$('#todoQuickForm').onsubmit({preventDefault(){}});
  assert.equal(p.sent.at(-1).action,'create');assert.equal(p.sent.at(-1).title,'直接添加');assert.equal(p.sent.at(-1).date,'');
  p.host.__boboTodoCreated(true);assert.equal(p.$('#todoComposer').hidden,true);assert.equal(p.$('#todoQuickForm').hidden,false);
- p.$('#todoQuickTitle').onfocus();assert.equal(p.$('#todoComposer').hidden,false);assert.equal(p.$('#todoQuickForm').hidden,false);
+ p.$('#todoQuickTitle').onfocus();assert.equal(p.$('#todoComposer').hidden,false);assert.equal(p.$('#todoQuickForm').hidden,true);
  p.$('#todoComposer').onkeydown({key:'Escape'});assert.equal(p.$('#todoComposer').hidden,true);assert.equal(p.$('#todoQuickForm').hidden,false);
 });
 test('Todo 拒绝权限、关闭或撤权时隐藏数据并关闭详情与创建',()=>{
@@ -104,7 +104,7 @@ test('Todo 创建卡片按需展开设置，切换面板保留字段，清除日
 });
 test('Todo 短过渡可中断，重新展开不会被旧收起回调隐藏；减少动态效果时立即切换',async()=>{
  const p=page(),motions=[];p.host.__boboTodoReceive(data());
- p.$('#todoComposer').animate=(frames,options)=>{
+ p.$('#todoInputShell').animate=(frames,options)=>{
   let finish;const motion={finished:new Promise(resolve=>{finish=resolve;}),cancel(){this.cancelled=true;},finish(){finish();},options};motions.push(motion);return motion;
  };
  p.$('#todoNew').onclick();p.$('#todoCancel').onclick();p.$('#todoNew').onclick();

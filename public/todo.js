@@ -12,14 +12,17 @@ export function installTodoPage(doc=document,host=window){
  const reducedMotion=()=>!!host.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
  // 参考 magpie：快起步、缓收尾；只动输入区，不牵动列表和窗口几何。
  function moveComposer(open,animated=true){
-  const el=$('#todoComposer');composerMotion?.cancel();composerMotion=null;
-  const done=()=>{el.hidden=!open;$('#todoQuickForm').hidden=!ready();};
-  if(!open&&el.hidden){done();return;}
-  if(open)el.hidden=false;
-  if(!animated||reducedMotion()||!el.animate){done();return;}
-  const frames=[{opacity:0,transform:'translateX(-50%) translateY(8px) scale(.985)'},{opacity:1,transform:'translateX(-50%) translateY(0) scale(1)'}];
-  const motion=el.animate(open?frames:[...frames].reverse(),{duration:open?180:120,easing:'cubic-bezier(.2,.8,.2,1)',fill:'both'});composerMotion=motion;
-  motion.finished.then(()=>{if(composerMotion===motion){done();composerMotion=null;motion.cancel();}},()=>{});
+  const el=$('#todoComposer'),shell=$('#todoInputShell');composerMotion?.cancel();composerMotion=null;if(shell.style)shell.style.overflow='';
+  optionMotion?.cancel();optionMotion=null;if(el.style)el.style.overflow='';
+  $('#todoSettings').open=false;$('#todoCancel').hidden=!open;
+  if(!open&&el.hidden){$('#todoQuickForm').hidden=!bridge;return;}
+  const before=shell.getBoundingClientRect?.();
+  el.hidden=!open;$('#todoQuickForm').hidden=open||!bridge;
+  if(!animated||reducedMotion()||!shell.animate)return;
+  const after=shell.getBoundingClientRect?.();
+  if(shell.style)shell.style.overflow='hidden';
+  const motion=shell.animate([{width:(before?.width||260)+'px',height:(before?.height||44)+'px'},{width:(after?.width||(open?380:260))+'px',height:(after?.height||(open?126:44))+'px'}],{duration:open?180:120,easing:'cubic-bezier(.2,.8,.2,1)',fill:'both'});composerMotion=motion;
+  const end=()=>{if(composerMotion===motion){composerMotion=null;if(shell.style)shell.style.overflow='';motion.cancel();}};motion.finished.then(end,end);
  }
  function localDate(value=new Date()){
   return `${value.getFullYear()}-${String(value.getMonth()+1).padStart(2,'0')}-${String(value.getDate()).padStart(2,'0')}`;
@@ -63,8 +66,8 @@ export function installTodoPage(doc=document,host=window){
   $('#todoDate').value=item?.date??dateFor(bucket);$('#todoTime').value=item?.time||'';
   $('#todoNotes').value=item?.notes||'';$('#todoURL').value=item?.url||'';$('#todoPriority').value=String(item?.priority||0);$('#todoAlarm').value=alarmLocal(item?.alarm);
   if(item)$('#todoList').value=item.listID;
-  $('#todoComposerHeading').textContent=item?'编辑提醒事项':'新增提醒事项';$('#todoCreate').textContent=item?'保存':'添加';
-  $('#todoSaveStatus').textContent='';option=null;syncTime();syncCreate();close('#todoDetail');moveComposer(true);$('#todoQuickForm').hidden=false;$('#todoTitle').focus();
+  $('#todoComposerHeading').textContent=item?'编辑提醒事项':'新增提醒事项';$('#todoCreate').textContent='⏎';$('#todoCreate').setAttribute('aria-label',item?'保存提醒事项':'添加提醒事项');
+  $('#todoSaveStatus').textContent='';option=null;syncTime();syncCreate();close('#todoDetail');moveComposer(true);$('#todoTitle').focus();
  }
  function renderBoard(data){
   const key=JSON.stringify(data?.columns||[]);if(key===boardKey)return;boardKey=key;
@@ -75,7 +78,7 @@ export function installTodoPage(doc=document,host=window){
    add.type='button';add.setAttribute('aria-label',`新增到${titles[bucket]}`);add.onclick=()=>openCreate(bucket);
    head.append(heading,node('span','todo-count',String(rows.length)),add);section.append(head);
    if(!rows.length){
-    const empty=node('div','todo-empty'),mark=node('img');mark.src='/reminders.png';mark.alt='';empty.append(mark,node('span','','暂无事项'));section.append(empty);
+    const empty=node('div','todo-empty');empty.append(node('span','','暂无事项'));section.append(empty);
    }else{
     const list=node('div','todo-items');list.tabIndex=0;list.setAttribute('aria-label',`${titles[bucket]}事项，可滚动`);
     for(const item of rows){
@@ -83,7 +86,8 @@ export function installTodoPage(doc=document,host=window){
      copy.type=check.type='button';check.disabled=item.editable===false;check.setAttribute('aria-label',`${item.completed?'标记未完成':'完成'}：${item.title}`);
      check.onclick=()=>send({action:'complete',id:item.id,completed:!item.completed});
      copy.title=`${item.title} · ${item.list}；在 bobo 中查看`;
-     copy.append(node('span','todo-title',item.title),node('small',item.overdue?'todo-overdue':'',`${item.dateText} · ${item.list}`));
+     copy.append(node('span','todo-title',item.title));
+     if(item.dateText&&!['今天','未设日期'].includes(item.dateText))copy.append(node('small',item.overdue?'todo-overdue':'',item.dateText));
      copy.onclick=()=>showItem(item.id);card.append(check,copy);list.append(card);
     }
     section.append(list);
@@ -101,7 +105,7 @@ export function installTodoPage(doc=document,host=window){
   $('#todoEnabled').checked=enabled;$('#todoEnabled').disabled=!bridge||!allowed;
   $('#todoShowCompleted').checked=!!data?.showCompleted;$('#todoShowCompleted').disabled=!connected;
   $('#todoOpen').disabled=!bridge;$('#todoRefresh').disabled=!bridge||loading;$('#todoNew').disabled=!connected;
-  $('#todoForm').hidden=!connected;$('#todoQuickForm').hidden=!connected;$('#todoBoard').hidden=!connected;
+  $('#todoForm').hidden=!connected;$('#todoQuickForm').hidden=!bridge||!$('#todoComposer').hidden;$('#todoInputShell').hidden=!bridge;$('#todoQuickTitle').disabled=!connected;$('#todoBoard').hidden=!connected;
   if(!connected){close('#todoComposer',false);close('#todoDetail');selectedID=editingID=null;}
   const lists=data?.lists||[],key=JSON.stringify(lists);
   if(key!==listKey){
@@ -110,7 +114,7 @@ export function installTodoPage(doc=document,host=window){
    select.value=lists.some(list=>list.id===old)?old:lists.some(list=>list.id===data?.defaultList)?data.defaultList:lists[0]?.id||'';
   }
   syncCreate();$('#todoCancel').disabled=pending;
-  $('#todoCreate').textContent=pending?'保存中…':editingID?'保存':'添加';
+  $('#todoCreate').textContent=pending?'…':'⏎';$('#todoCreate').setAttribute('aria-label',pending?'保存中':editingID?'保存提醒事项':'添加提醒事项');
   $('#todoListHint').textContent=lists.length?'':'没有可写列表，请先在系统提醒事项中创建列表。';
   if(connected)renderBoard(data);
   if(selectedID&&$('#todoDetail').open){if(items().some(item=>item.id===selectedID))showItem(selectedID);else close('#todoDetail');}

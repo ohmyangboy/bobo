@@ -92,6 +92,14 @@ precondition(!model.visible && model.todoHeight == 0, "关闭 Todo 后恢复既�
 model.todoHasItems = true
 model.settings.notch = false
 precondition(!model.visible, "Todo 不应绕过通知岛总开关")
+precondition(model.sessionListHeight == 42)
+model.sessions = try! JSONDecoder().decode([IslandSession].self, from: Data(#"[{"id":"one","state":"working"},{"id":"two","state":"working"},{"id":"three","state":"waiting"}]"#.utf8))
+model.settings.rows = 2
+let sessionHeight = model.sessionListHeight
+model.hovering = false
+precondition(sessionHeight == 89.5 && model.sessionListHeight == sessionHeight)
+model.hovering = true
+precondition(model.sessionListHeight == sessionHeight, "会话区从展开首帧就使用目标高度，不能后续伸长推挤 Todo")
 `);
 });
 
