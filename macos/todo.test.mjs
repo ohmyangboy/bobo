@@ -27,6 +27,8 @@ import SwiftUI
     var requestedCompleted = false
     var updates: [String] = []
     var completions: [(String, Bool)] = []
+    var deletions: [String] = []
+    var removeFailure = false
     var preservedDue = false
     func requestAccess() async throws -> Bool { requests += 1; authorization = permissionResult; return authorization == .allowed }
     func fetch(includeCompleted: Bool) async throws -> [TodoReminder] {
@@ -47,6 +49,7 @@ import SwiftUI
         updates.append(id); savedDetails = details; preservedDue = preserveDue
     }
     func complete(id: String, completed: Bool) throws { completions.append((id, completed)) }
+    func remove(id: String) throws { if removeFailure { throw TodoError.message("测试删除失败") }; deletions.append(id) }
     func finish(_ items: [TodoReminder]) { pending.removeFirst().resume(returning: items) }
 }
 
@@ -70,6 +73,15 @@ import SwiftUI
         var timed = reminder("morning", "2026-10-29"); timed.due?.hour = 9
         let timedBoard = TodoGrouping.columns([timed], now: now, calendar: calendar)
         precondition(timedBoard[0].items[0].overdue && timedBoard[0].items[0].dateText.contains("09:00"))
+        var editingItem = timedBoard[0].items[0]
+        editingItem.notes = "保留备注"; editingItem.priority = 5; editingItem.url = "https://example.com"; editingItem.alarm = "2026-10-29T01:00:00Z"
+        let editingDraft = TodoDraft.editing(editingItem, bucket: .today)
+        precondition(editingDraft.title == editingItem.title && editingDraft.listID == "inbox" && editingDraft.date == "2026-10-29" && editingDraft.details.time == "09:00")
+        precondition(editingDraft.details.notes == "保留备注" && editingDraft.details.priority == 5 && editingDraft.details.url == editingItem.url && editingDraft.details.alarm != nil, "原位编辑须保留已有日期、时间、列表与提醒字段")
+        var blank = editingDraft; blank.title = " \n"; blank.details.notes = ""; blank.details.url = ""
+        precondition(blank.isEmpty, "空白清理忽略日期、提醒与优先级")
+        blank.details.notes = "备注仍在"; precondition(!blank.isEmpty, "备注不能因清空标题被自动删除")
+        blank.details.notes = ""; blank.details.url = "https://example.com"; precondition(!blank.isEmpty)
         let boundary = TodoGrouping.columns([reminder("seventh", "2026-11-05"), reminder("eighth", "2026-11-06")], now: now, calendar: calendar)
         precondition(boundary[1].items.map(\.id) == ["seventh"] && boundary[2].items.map(\.id) == ["eighth"], "包含未来第七天，排除第八天")
         precondition(TodoGrouping.dateComponents("2026-02-30", calendar: calendar) == nil)
@@ -132,6 +144,7 @@ import SwiftUI
         precondition(store.create(title: "本周新增", date: "", listID: "inbox", bucket: .week, details: details) && repository.writes.last!.1?.day == 30)
         precondition(repository.savedDetails.savedNotes == "备注\n\n☐ 第一步\n☐ 第二步\n\n#bobo #工作" && repository.savedDetails.priority == 1 && repository.savedDetails.alarm != nil)
         precondition(store.create(title: "指定日期覆盖列", date: "2026-11-02", listID: "inbox", bucket: .today) && repository.writes.last!.1?.month == 11)
+        precondition(store.create(title: "系统默认列表", date: "", listID: "", bucket: .today) && repository.writes.last!.1?.day == 29 && repository.writes.last!.2 == "inbox", "未指定列表时写入系统默认列表，今日归类按本地日期计算")
         let sunday = calendar.date(from: DateComponents(year: 2026, month: 11, day: 1))!
         let sundayStore = TodoStore(repository: repository, defaults: defaults, now: { sunday }, calendar: { calendar }, observeSystem: false)
         await sundayStore.connect(); try await settle { !sundayStore.snapshot.loading }
@@ -142,6 +155,10 @@ import SwiftUI
         repository.items = [reminder("changed")]; repository.onChange?()
         try await settle { !store.snapshot.loading }
         precondition(store.snapshot.count == 1 && store.snapshot.columns[2].items[0].id == "changed")
+        precondition(!store.remove(id: "unknown") && repository.deletions.isEmpty)
+        repository.removeFailure = true; precondition(!store.remove(id: "changed") && repository.deletions.isEmpty)
+        repository.removeFailure = false; precondition(store.remove(id: "changed") && repository.deletions == ["changed"])
+        try await settle { !store.snapshot.loading }
         repository.failure = true; store.refresh(); try await settle { !store.snapshot.loading }
         precondition(!store.snapshot.error.isEmpty && store.snapshot.count == 1, "读取失败不能伪装成空列表")
         repository.failure = false; repository.items = nil
@@ -176,7 +193,7 @@ import SwiftUI
         NSApplication.shared.setActivationPolicy(.prohibited)
         var snapshot = TodoSnapshot(); snapshot.enabled = true; snapshot.authorization = .allowed
         snapshot.columns = TodoGrouping.columns((0..<40).map { reminder("待办\($0)", "2026-10-29") }, now: now, calendar: calendar)
-        precondition(snapshot.height == 324 && snapshot.count == 40, "缩略布局有高度上限但保留全部事项")
+        precondition(snapshot.height == 216 && snapshot.count == 40, "缩略布局有高度上限但保留全部事项")
         for width: CGFloat in [300, 480, 760] {
             let host = NSHostingView(rootView: IslandTodoView(snapshot: snapshot, onManage: {}, onOpen: { _ in }).frame(width: width))
             host.frame = NSRect(x: 0, y: 0, width: width, height: snapshot.height)

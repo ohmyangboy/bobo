@@ -26,6 +26,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     private var notchWindow: NotchPanel!
     private var islandHosting: NSHostingView<IslandView>?
     private let islandModel = IslandModel()
+    private let todoInputMonitor = TodoInputMonitor()
     private let todoStore = TodoStore(repository: EventKitTodoRepository(), defaults: .standard)
     private var todoBridge: TodoWebBridge?
     private var todoObserver: AnyCancellable?
@@ -224,7 +225,9 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         webView = WKWebView(frame: .zero)
         webView.uiDelegate = self
         webView.navigationDelegate = self
-        let todoBridge = TodoWebBridge(webView: webView, store: todoStore)
+        let todoBridge = TodoWebBridge(webView: webView, store: todoStore, onOpenTobo: { [weak self] in
+            self?.openInApp(tab: "islandTab", pane: ("island", "todo"))
+        })
         self.todoBridge = todoBridge
         webView.configuration.userContentController.add(todoBridge, name: "boboTodo")
         let size = NSSize(width: 960, height: 760)
@@ -277,6 +280,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         let hosting = IslandHostingView(rootView: IslandView(
             model: islandModel,
             todo: todoStore,
+            todoInputMonitor: todoInputMonitor,
             onTodo: { [weak self] id in
                 guard let self else { return }
                 self.islandModel.todoComposing = false
@@ -1015,9 +1019,17 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     }
 
     private func dismissTodoFromOutsideClick(_ window: NSWindow?) {
-        guard islandModel.todoComposing, !islandContainsPointer(), let panel = notchWindow else { return }
+        guard islandModel.todoComposing, let panel = notchWindow else { return }
         if let window, window !== self.window, window !== panel,
            window.parent === panel || window.level.rawValue > panel.level.rawValue { return }
+        if islandContainsPointer() {
+            guard let input = todoInputMonitor.view, !todoInputMonitor.contains(NSEvent.mouseLocation) else { return }
+            DispatchQueue.main.async { [weak self, weak input] in
+                guard let self, let input, self.todoInputMonitor.view === input else { return }
+                self.todoInputMonitor.dismiss?()
+            }
+            return
+        }
         guard islandModel.dismissTodoInput() else { return }
         islandCollapse?.cancel(); islandAutoCollapse?.cancel()
         if islandModel.butlerReply.isOpen { closeButlerReply() }
@@ -2730,6 +2742,7 @@ final class IslandModel: ObservableObject {
 struct IslandView: View {
     @ObservedObject var model: IslandModel
     @ObservedObject var todo: TodoStore
+    var todoInputMonitor: TodoInputMonitor?
     var onTodo: (String?) -> Void
     var onTodoCompose: (Bool) -> Void
     var onSelect: (IslandSession) -> Void
@@ -2776,7 +2789,9 @@ struct IslandView: View {
                 if todo.snapshot.enabled {
                     IslandTodoView(snapshot: todo.snapshot, onManage: { onTodo(nil) }, onOpen: { onTodo($0) }, onCreate: { draft in
                         todo.create(title: draft.title, date: draft.date, listID: draft.listID, bucket: draft.bucket, details: draft.details)
-                    }, onCompose: onTodoCompose, onShowCompleted: { todo.setShowCompleted($0) }, onComplete: { todo.complete(id: $0, completed: $1) }, active: model.expanded)
+                    }, onUpdate: { id, draft in
+                        todo.create(title: draft.title, date: draft.date, listID: draft.listID, details: draft.details, editingID: id)
+                    }, onDelete: { todo.remove(id: $0) }, onCompose: onTodoCompose, onShowCompleted: { todo.setShowCompleted($0) }, onComplete: { todo.complete(id: $0, completed: $1) }, active: model.expanded, inputMonitor: todoInputMonitor)
                     .frame(height: model.expanded ? todo.snapshot.height : 0, alignment: .bottom)
                     .clipped().allowsHitTesting(model.expanded).accessibilityHidden(!model.expanded)
                 }

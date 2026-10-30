@@ -75,7 +75,7 @@ struct TodoSnapshot: Equatable, Encodable {
     var height: CGFloat {
         guard enabled else { return 0 }
         guard authorization == .allowed else { return 80 }
-        return 324
+        return 216
     }
 }
 
@@ -147,13 +147,24 @@ struct TodoDetails: Equatable {
     }
 }
 
-struct TodoDraft: Identifiable {
+struct TodoDraft: Identifiable, Equatable {
     let id = UUID()
     var title = ""
-    var bucket = TodoBucket.later
+    var bucket = TodoBucket.today
     var date = ""
     var listID = ""
     var details = TodoDetails()
+    var isEmpty: Bool { [title, details.notes, details.url].allSatisfy { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } }
+    static func editing(_ item: TodoItem, bucket: TodoBucket) -> TodoDraft {
+        let details = TodoDetails(notes: item.notes, priority: item.priority, alarm: ISO8601DateFormatter().date(from: item.alarm), time: item.time, url: item.url)
+        return TodoDraft(title: item.title, bucket: bucket, date: item.date, listID: item.listID, details: details)
+    }
+}
+
+private struct IslandTodoEdit {
+    var itemID: String
+    var original: TodoDraft
+    var draft: TodoDraft
 }
 
 @MainActor protocol TodoRepository: AnyObject {
@@ -166,6 +177,7 @@ struct TodoDraft: Identifiable {
     func create(title: String, due: DateComponents?, listID: String, details: TodoDetails) throws
     func update(id: String, title: String, due: DateComponents?, listID: String, details: TodoDetails, preserveDue: Bool) throws
     func complete(id: String, completed: Bool) throws
+    func remove(id: String) throws
 }
 
 @MainActor final class EventKitTodoRepository: TodoRepository {
@@ -235,6 +247,10 @@ struct TodoDraft: Identifiable {
         guard let reminder = store.calendarItem(withIdentifier: id) as? EKReminder, reminder.calendar.allowsContentModifications else { throw TodoError.message("事项已移除或不可编辑，请刷新") }
         reminder.isCompleted = completed
         try store.save(reminder, commit: true)
+    }
+    func remove(id: String) throws {
+        guard let reminder = store.calendarItem(withIdentifier: id) as? EKReminder, reminder.calendar.allowsContentModifications else { throw TodoError.message("事项已移除或不可编辑，请刷新") }
+        try store.remove(reminder, commit: true)
     }
 }
 
@@ -334,6 +350,8 @@ enum TodoError: LocalizedError {
             guard !title.isEmpty, title.count <= 500 else { throw TodoError.message("请填写 1–500 字的事项标题") }
             guard [0, 1, 5, 9].contains(details.priority), details.savedNotes.count <= 20000 else { throw TodoError.message("优先级或备注无效") }
             guard details.url.isEmpty || (details.url.count <= 4000 && URL(string: details.url)?.scheme != nil) else { throw TodoError.message("URL 无效，请填写完整链接") }
+            let targetListID = listID.isEmpty ? snapshot.defaultList : listID
+            guard snapshot.lists.contains(where: { $0.id == targetListID }) else { throw TodoError.message("请选择可写的提醒事项列表") }
             var due = date.isEmpty ? nil : TodoGrouping.dateComponents(date, calendar: calendar())
             if date.isEmpty, let bucket, bucket != .later {
                 let cal = calendar(), today = cal.startOfDay(for: now())
@@ -349,8 +367,8 @@ enum TodoError: LocalizedError {
             }
             if let editingID {
                 guard let item = snapshot.columns.flatMap(\.items).first(where: { $0.id == editingID }), item.editable else { throw TodoError.message("事项已移除或不可编辑，请刷新") }
-                try repository.update(id: editingID, title: title, due: due, listID: listID, details: details, preserveDue: date == item.date && details.time == item.time)
-            } else { try repository.create(title: title, due: due, listID: listID, details: details) }
+                try repository.update(id: editingID, title: title, due: due, listID: targetListID, details: details, preserveDue: date == item.date && details.time == item.time)
+            } else { try repository.create(title: title, due: due, listID: targetListID, details: details) }
             snapshot.error = ""; refresh(); return true
         } catch { snapshot.error = error.localizedDescription; return false }
     }
@@ -360,6 +378,13 @@ enum TodoError: LocalizedError {
             try repository.complete(id: id, completed: completed)
             snapshot.error = ""; refresh()
         } catch { snapshot.error = error.localizedDescription }
+    }
+    func remove(id: String) -> Bool {
+        do {
+            guard snapshot.enabled, repository.authorization == .allowed, snapshot.columns.flatMap(\.items).contains(where: { $0.id == id && $0.editable }) else { throw TodoError.message("事项不可删除，请刷新") }
+            try repository.remove(id: id)
+            snapshot.error = ""; refresh(); return true
+        } catch { snapshot.error = error.localizedDescription; return false }
     }
 }
 
@@ -384,9 +409,10 @@ enum TodoNavigation {
 @MainActor final class TodoWebBridge: NSObject, WKScriptMessageHandler {
     private weak var webView: WKWebView?
     private let store: TodoStore
+    private let onOpenTobo: () -> Void
     private var subscription: AnyCancellable?
-    init(webView: WKWebView, store: TodoStore) {
-        self.webView = webView; self.store = store
+    init(webView: WKWebView, store: TodoStore, onOpenTobo: @escaping () -> Void = {}) {
+        self.webView = webView; self.store = store; self.onOpenTobo = onOpenTobo
         super.init()
         subscription = store.$snapshot.sink { [weak self] snapshot in self?.publish(snapshot) }
     }
@@ -403,6 +429,11 @@ enum TodoNavigation {
         case "enabled": if let enabled = body["enabled"] as? Bool { store.setEnabled(enabled) }
         case "showCompleted": if let show = body["show"] as? Bool { store.setShowCompleted(show) }
         case "complete": if let id = body["id"] as? String, let completed = body["completed"] as? Bool { store.complete(id: id, completed: completed) }
+        case "openTobo": onOpenTobo()
+        case "remove":
+            guard let id = body["id"] as? String else { return }
+            let saved = store.remove(id: id)
+            webView?.evaluateJavaScript("window.__boboTodoCreated?.(\(saved))")
         case "openSystem":
             let id = body["id"] as? String
             guard id == nil || store.snapshot.columns.contains(where: { $0.items.contains(where: { $0.id == id }) }) else { return }
@@ -425,36 +456,89 @@ enum TodoNavigation {
     }
 }
 
+@MainActor final class TodoInputMonitor {
+    weak var view: NSView?
+    var dismiss: (() -> Void)?
+    func contains(_ point: NSPoint) -> Bool {
+        guard let view, let window = view.window else { return false }
+        return window.convertToScreen(view.convert(view.bounds, to: nil)).contains(point)
+    }
+}
+
+private struct TodoInputRegion: NSViewRepresentable {
+    var monitor: TodoInputMonitor?
+    private final class InputView: NSView { override func hitTest(_ point: NSPoint) -> NSView? { nil } }
+    func makeNSView(context: Context) -> NSView { let view = InputView(); monitor?.view = view; return view }
+    func updateNSView(_ nsView: NSView, context: Context) { monitor?.view = nsView }
+}
+
 struct IslandTodoView: View {
     var snapshot: TodoSnapshot
     var onManage: () -> Void
     var onOpen: (String) -> Void
     var onCreate: (TodoDraft) -> Bool = { _ in false }
+    var onUpdate: (String, TodoDraft) -> Bool = { _, _ in false }
+    var onDelete: (String) -> Bool = { _ in false }
     var onCompose: (Bool) -> Void = { _ in }
     var onShowCompleted: (Bool) -> Void = { _ in }
     var onComplete: (String, Bool) -> Void = { _, _ in }
     var active = true
+    var inputMonitor: TodoInputMonitor?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var draft: TodoDraft?
+    @State private var composerOpen = false
+    @State private var editing: IslandTodoEdit?
 
     private func begin(_ bucket: TodoBucket) {
-        let listID = snapshot.lists.contains { $0.id == snapshot.defaultList } ? snapshot.defaultList : snapshot.lists.first?.id ?? ""
-        draft = TodoDraft(bucket: bucket, listID: listID)
+        guard finishEdit(save: true) else { return }
+        draft = TodoDraft(bucket: bucket); composerOpen = true
         onCompose(true)
     }
-    private func finish() { draft = nil; onCompose(false) }
+    private func finish() { draft = nil; composerOpen = false; onCompose(editing != nil) }
+    private func hideComposer() {
+        if draft?.isEmpty == true { draft = nil }
+        composerOpen = false; onCompose(editing != nil)
+    }
+    private func resumeComposer() {
+        guard finishEdit(save: true) else { return }
+        if draft == nil { draft = TodoDraft() }
+        composerOpen = true; onCompose(true)
+    }
+    private func dismissInput() { if composerOpen { hideComposer() }; finishEdit(save: true) }
+    private func beginEdit(_ item: TodoItem, bucket: TodoBucket) {
+        guard item.editable else { onOpen(item.id); return }
+        guard editing?.itemID != item.id, finishEdit(save: true) else { return }
+        if composerOpen { hideComposer() }
+        let value = TodoDraft.editing(item, bucket: bucket)
+        editing = IslandTodoEdit(itemID: item.id, original: value, draft: value)
+        onCompose(true)
+    }
+    @discardableResult private func finishEdit(save: Bool) -> Bool {
+        guard let value = editing else { return true }
+        if save && value.draft != value.original {
+            let saved = value.draft.isEmpty ? onDelete(value.itemID) : onUpdate(value.itemID, value.draft)
+            if !saved { return false }
+        }
+        editing = nil; onCompose(composerOpen)
+        return true
+    }
+    private func saveEdit(_ value: TodoDraft) { guard editing?.draft.id == value.id else { return }; editing?.draft = value; finishEdit(save: true) }
     var body: some View {
         VStack(spacing: 0) {
             if snapshot.authorization != .allowed {
                 Button("连接提醒事项，开始安排 →", action: onManage).foregroundStyle(.secondary)
                 Spacer()
             } else {
-                if !snapshot.error.isEmpty, draft == nil {
+                if !snapshot.error.isEmpty, !composerOpen {
                     Text(snapshot.error).font(.system(size: 10)).foregroundStyle(.orange).lineLimit(1).padding(.horizontal, 18)
                 }
                 HStack(spacing: 0) {
                     ForEach(snapshot.columns) { column in
-                        IslandTodoColumn(column: column, onOpen: onOpen, onComplete: onComplete, onAdd: { begin(column.bucket) })
+                        IslandTodoColumn(column: column, editing: editing, error: snapshot.error, lists: snapshot.lists, inputMonitor: inputMonitor,
+                            onEdit: { beginEdit($0, bucket: column.bucket) }, onEditChange: { if editing?.draft.id == $0.id { editing?.draft = $0 } },
+                            onSaveEdit: saveEdit, onCancelEdit: { finishEdit(save: false) }, onComplete: { id, completed in
+                                if editing?.itemID != id || finishEdit(save: true) { onComplete(id, completed) }
+                            }, onAdd: { begin(column.bucket) })
                             .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
                             .overlay(alignment: .leading) {
                                 if column.bucket != .today { Rectangle().fill(.white.opacity(0.07)).frame(width: 0.5).padding(.vertical, 8) }
@@ -463,43 +547,46 @@ struct IslandTodoView: View {
                 }.padding(.horizontal, 8).padding(.bottom, 16)
             }
         }
-        .allowsHitTesting(draft == nil)
-        .accessibilityHidden(draft != nil)
         .overlay(alignment: .bottom) {
             if snapshot.authorization == .allowed {
                 VStack(spacing: 0) {
-                    if let draft {
-                        IslandTodoCreateCard(initial: draft, lists: snapshot.lists, error: snapshot.error, onManage: onManage, showCompleted: snapshot.showCompleted, onShowCompleted: { onShowCompleted(!snapshot.showCompleted) }, onCancel: finish, onSave: { value in
+                    if composerOpen, let draft {
+                        IslandTodoCreateCard(initial: draft, lists: snapshot.lists, error: snapshot.error, inputMonitor: inputMonitor, onManage: onManage, showCompleted: snapshot.showCompleted, onShowCompleted: { onShowCompleted(!snapshot.showCompleted) }, onDraftChange: { if draft.id == $0.id { self.draft = $0 } }, onCancel: hideComposer, onSave: { value in
                             if onCreate(value) { finish() }
                         }).id(draft.id).fixedSize(horizontal: false, vertical: true).transition(.opacity)
                     } else {
                         quickInput.transition(.opacity)
                     }
                 }
-                .frame(maxWidth: draft == nil ? 236 : 360)
-                .background(Color(white: 0.12).opacity(draft == nil ? 0 : 0.85), in: RoundedRectangle(cornerRadius: 26))
+                .frame(maxWidth: composerOpen ? 360 : 236)
+                .background(Color(white: 0.12).opacity(composerOpen ? 0.85 : 0), in: RoundedRectangle(cornerRadius: 26))
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26))
                 .overlay(RoundedRectangle(cornerRadius: 26).stroke(.white.opacity(0.14), lineWidth: 0.5))
                 .shadow(color: .black.opacity(0.2), radius: 10, y: 3)
                 .padding(.horizontal, 32).padding(.vertical, 18)
             }
         }
-        .animation(reduceMotion ? nil : .timingCurve(0.2, 0.8, 0.2, 1, duration: 0.18), value: draft != nil)
+        .animation(reduceMotion ? nil : .timingCurve(0.2, 0.8, 0.2, 1, duration: 0.18), value: composerOpen)
         .onChange(of: active) { value in
-            if value && draft != nil { onCompose(true) }
+            if !value { dismissInput() }
+            else if composerOpen || editing != nil { onCompose(true) }
         }
-        .onDisappear { onCompose(false) }
+        .onChange(of: snapshot.columns) { columns in
+            if let editing, !columns.contains(where: { $0.items.contains(where: { $0.id == editing.itemID }) }) { finishEdit(save: false) }
+        }
+        .onAppear { inputMonitor?.dismiss = dismissInput }
+        .onDisappear { inputMonitor?.dismiss = nil; onCompose(false) }
         .buttonStyle(.plain).foregroundStyle(Color.white).environment(\.colorScheme, .dark)
         .padding(.top, 8)
         .background(Color(white: 0.14), in: RoundedRectangle(cornerRadius: 18))
         .padding(.horizontal, 10).padding(.vertical, 8)
         .frame(height: snapshot.height)
-        .accessibilityElement(children: .contain).accessibilityLabel("Todo 看板，今日、近七、事务")
+        .accessibilityElement(children: .contain).accessibilityLabel("tobo 看板，今日、近七、事务")
     }
     private var quickInput: some View {
         HStack(spacing: 8) {
-            Button(action: onManage) { TodoRemindersMark(size: 16) }.help("打开 Todo 看板").accessibilityLabel("Todo").accessibilityIdentifier("island-todo-manage")
-            Button { begin(.later) } label: {
+            Button(action: onManage) { TodoRemindersMark(size: 16) }.help("打开 tobo").accessibilityLabel("tobo").accessibilityIdentifier("island-todo-manage")
+            Button(action: resumeComposer) {
                 Text("todo？tobo！").font(.system(size: 12)).foregroundStyle(Color(white: 0.68))
                     .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
             }.accessibilityLabel("todo？tobo！").help("添加提醒事项")
@@ -531,16 +618,24 @@ private struct TodoMoreMenu: View {
     var body: some View {
         Menu {
             Button(showCompleted ? "隐藏已完成" : "显示已完成", action: onShowCompleted)
-            Button("打开 Todo 看板", action: onManage)
+            Button("打开 tobo", action: onManage)
+            Button("打开提醒事项") { TodoNavigation.open() }
             if let onCancel { Button("收起输入", action: onCancel) }
         } label: { Image(systemName: "ellipsis").font(.system(size: 12)).frame(width: 20, height: 20) }
-            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().foregroundStyle(Color(white: 0.65)).accessibilityLabel("Todo 更多操作")
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().foregroundStyle(Color(white: 0.65)).accessibilityLabel("tobo 更多操作")
     }
 }
 
 private struct IslandTodoColumn: View {
     var column: TodoColumn
-    var onOpen: (String) -> Void
+    var editing: IslandTodoEdit?
+    var error: String
+    var lists: [TodoList]
+    var inputMonitor: TodoInputMonitor?
+    var onEdit: (TodoItem) -> Void
+    var onEditChange: (TodoDraft) -> Void
+    var onSaveEdit: (TodoDraft) -> Void
+    var onCancelEdit: () -> Void
     var onComplete: (String, Bool) -> Void
     var onAdd: () -> Void
     @State private var hoveredItem: String?
@@ -565,14 +660,19 @@ private struct IslandTodoColumn: View {
                                 Button { onComplete(item.id, !item.completed) } label: {
                                     Image(systemName: item.completed ? "checkmark.circle.fill" : "circle").font(.system(size: 14)).foregroundStyle(item.completed ? Color.green : Color(white: 0.65))
                                 }.frame(width: 18).disabled(!item.editable).padding(.top, 1).accessibilityLabel("\(item.completed ? "标记未完成" : "完成")：\(item.title)")
-                                Button { onOpen(item.id) } label: {
+                                if let editing, editing.itemID == item.id {
+                                    IslandTodoCreateCard(initial: editing.draft, lists: lists, error: error, inline: true, inputMonitor: inputMonitor, onDraftChange: onEditChange, onCancel: onCancelEdit, onSave: onSaveEdit)
+                                        .id(editing.draft.id).fixedSize(horizontal: false, vertical: true)
+                                } else {
+                                Button { onEdit(item) } label: {
                                     VStack(alignment: .leading, spacing: 5) {
                                         Text(item.title).font(.system(size: 12)).foregroundStyle(Color(white: item.completed ? 0.65 : 0.92)).strikethrough(item.completed).lineLimit(3).multilineTextAlignment(.leading)
                                         if !item.dateText.isEmpty && !["今天", "未设日期"].contains(item.dateText) {
                                             Text(item.dateText).font(.system(size: 10)).foregroundStyle(item.overdue ? Color.orange : Color(white: 0.65))
                                         }
                                     }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                                }.help("\(item.title) · \(item.list)；在 bobo 中查看").accessibilityLabel("\(item.title)，\(item.dateText)，在 bobo 中查看")
+                                }.help("\(item.title) · \(item.list)；点击原位编辑").accessibilityLabel("\(item.title)，\(item.dateText)，\(item.editable ? "原位编辑" : "查看")")
+                                }
                             }.padding(.horizontal, 12).padding(.vertical, 10).frame(maxWidth: .infinity, alignment: .leading)
                                 .background(.white.opacity(hoveredItem == item.id ? 0.05 : 0), in: RoundedRectangle(cornerRadius: 8))
                                 .onHover { hoveredItem = $0 ? item.id : nil }
@@ -585,7 +685,7 @@ private struct IslandTodoColumn: View {
 }
 
 private struct IslandTodoCreateCard: View {
-    private enum Option { case date, alarm, organize, url }
+    private enum Option { case date, alarm, notes, organize, url }
     @State private var draft: TodoDraft
     @State private var dateEnabled: Bool
     @State private var timeEnabled = false
@@ -597,16 +697,30 @@ private struct IslandTodoCreateCard: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var lists: [TodoList]
     var error: String
+    var inline: Bool
+    var inputMonitor: TodoInputMonitor?
+    var onDraftChange: (TodoDraft) -> Void
     var onManage: () -> Void
     var showCompleted: Bool
     var onShowCompleted: () -> Void
     var onCancel: () -> Void
     var onSave: (TodoDraft) -> Void
-    init(initial: TodoDraft, lists: [TodoList], error: String, onManage: @escaping () -> Void = {}, showCompleted: Bool = false, onShowCompleted: @escaping () -> Void = {}, onCancel: @escaping () -> Void, onSave: @escaping (TodoDraft) -> Void) {
+    init(initial: TodoDraft, lists: [TodoList], error: String, inline: Bool = false, inputMonitor: TodoInputMonitor? = nil, onManage: @escaping () -> Void = {}, showCompleted: Bool = false, onShowCompleted: @escaping () -> Void = {}, onDraftChange: @escaping (TodoDraft) -> Void = { _ in }, onCancel: @escaping () -> Void, onSave: @escaping (TodoDraft) -> Void) {
         _draft = State(initialValue: initial)
-        _dateEnabled = State(initialValue: initial.bucket != .later)
-        _dueDate = State(initialValue: Calendar.current.date(byAdding: .day, value: initial.bucket == .week ? 1 : 0, to: Date())!)
-        self.lists = lists; self.error = error; self.onManage = onManage; self.showCompleted = showCompleted; self.onShowCompleted = onShowCompleted; self.onCancel = onCancel; self.onSave = onSave
+        let calendar = Calendar.current
+        var date = calendar.date(byAdding: .day, value: initial.bucket == .week ? 1 : 0, to: Date())!
+        if var components = TodoGrouping.dateComponents(initial.date, calendar: calendar) {
+            let time = initial.details.time.split(separator: ":").compactMap { Int($0) }
+            components.hour = time.count == 2 ? time[0] : calendar.component(.hour, from: date)
+            components.minute = time.count == 2 ? time[1] : calendar.component(.minute, from: date)
+            date = calendar.date(from: components) ?? date
+        }
+        _dateEnabled = State(initialValue: !initial.date.isEmpty || initial.bucket != .later)
+        _timeEnabled = State(initialValue: !initial.details.time.isEmpty)
+        _dueDate = State(initialValue: date)
+        _alarmEnabled = State(initialValue: initial.details.alarm != nil)
+        _alarmDate = State(initialValue: initial.details.alarm ?? Date().addingTimeInterval(3600))
+        self.lists = lists; self.error = error; self.inline = inline; self.inputMonitor = inputMonitor; self.onDraftChange = onDraftChange; self.onManage = onManage; self.showCompleted = showCompleted; self.onShowCompleted = onShowCompleted; self.onCancel = onCancel; self.onSave = onSave
     }
     private func field(_ label: String, _ value: Binding<String>, title: Bool = false) -> some View {
         Group {
@@ -622,72 +736,96 @@ private struct IslandTodoCreateCard: View {
         Button { option = option == value ? nil : value } label: {
             HStack(spacing: 5) {
                 Image(systemName: icon).font(.system(size: 11))
-                if value == .date && dateEnabled { Text(dueDate, format: .dateTime.month().day()).font(.system(size: 10)) }
-            }.padding(.horizontal, 6).frame(height: 24)
+                if value == .date && dateEnabled && !inline { Text(dueDate, format: .dateTime.month().day()).font(.system(size: 10)) }
+            }.padding(.horizontal, inline ? 4 : 6).frame(height: inline ? 22 : 24)
                 .foregroundStyle(active ? Color(red: 0.35, green: 0.7, blue: 1) : Color(white: 0.85))
                 .background(Color.white.opacity(option == value ? 0.08 : 0), in: Capsule())
         }.help(label).accessibilityLabel(label).accessibilityValue(option == value ? "已展开" : "已收起")
+            .popover(isPresented: Binding(get: { inline && option == value }, set: { if !$0 && option == value { option = nil } }), arrowEdge: .bottom) {
+                optionFields.frame(width: 270).padding(12).foregroundStyle(Color.white).environment(\.colorScheme, .dark)
+            }
+    }
+    @ViewBuilder private var optionFields: some View {
+        if option == .notes { field("备注", $draft.details.notes) }
+        if option == .date {
+            VStack(spacing: 10) {
+                HStack { Text("日期"); Spacer(); if dateEnabled { DatePicker("日期", selection: $dueDate, displayedComponents: .date).labelsHidden() }; Toggle("日期", isOn: $dateEnabled).labelsHidden().toggleStyle(.switch) }
+                Divider()
+                HStack { Text("时间").foregroundStyle(Color(white: dateEnabled ? 0.95 : 0.65)); Spacer(); if dateEnabled && timeEnabled { DatePicker("时间", selection: $dueDate, displayedComponents: .hourAndMinute).labelsHidden() }; Toggle("时间", isOn: $timeEnabled).labelsHidden().toggleStyle(.switch).disabled(!dateEnabled) }
+            }.padding(12).background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 12))
+        }
+        if option == .alarm {
+            HStack { Text("提醒我"); Spacer(); if alarmEnabled { DatePicker("提醒时间", selection: $alarmDate).labelsHidden() }; Toggle("提醒我", isOn: $alarmEnabled).labelsHidden().toggleStyle(.switch) }
+                .padding(12).background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 12))
+        }
+        if option == .organize {
+            VStack(spacing: 10) {
+                HStack { Text("列表"); Spacer(); Picker("列表", selection: $draft.listID) { Text("系统默认").tag(""); ForEach(lists) { Text($0.title).tag($0.id) } }.labelsHidden().pickerStyle(.menu).buttonStyle(.bordered).frame(maxWidth: 240) }
+                Divider()
+                HStack { Text("优先级"); Spacer(); Picker("优先级", selection: $draft.details.priority) { Text("无").tag(0); Text("低").tag(9); Text("中").tag(5); Text("高").tag(1) }.labelsHidden().pickerStyle(.menu).buttonStyle(.bordered).frame(maxWidth: 240) }
+            }.padding(12).background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 12))
+        }
+        if option == .url {
+            field("URL", $draft.details.url).padding(12).background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 12))
+        }
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 field("todo？tobo！", $draft.title, title: true).focused($titleFocused).accessibilityLabel("任务标题")
+                if inline {
+                    Button(action: onCancel) { Image(systemName: "xmark").font(.system(size: 9)).foregroundStyle(Color(white: 0.65)).frame(width: 16, height: 18) }.accessibilityLabel("取消编辑")
+                } else {
                 TodoMoreMenu(showCompleted: showCompleted, onManage: onManage, onShowCompleted: onShowCompleted, onCancel: onCancel)
+                }
             }
                 VStack(alignment: .leading, spacing: 8) {
-                    field("备注", $draft.details.notes)
-                    if option == .date {
-                        VStack(spacing: 10) {
-                            HStack { Text("日期"); Spacer(); if dateEnabled { DatePicker("日期", selection: $dueDate, displayedComponents: .date).labelsHidden() }; Toggle("日期", isOn: $dateEnabled).labelsHidden().toggleStyle(.switch) }
-                            Divider()
-                            HStack { Text("时间").foregroundStyle(Color(white: dateEnabled ? 0.95 : 0.65)); Spacer(); if dateEnabled && timeEnabled { DatePicker("时间", selection: $dueDate, displayedComponents: .hourAndMinute).labelsHidden() }; Toggle("时间", isOn: $timeEnabled).labelsHidden().toggleStyle(.switch).disabled(!dateEnabled) }
-                        }.padding(12).background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 12))
-                    }
-                    if option == .alarm {
-                        HStack { Text("提醒我"); Spacer(); if alarmEnabled { DatePicker("提醒时间", selection: $alarmDate).labelsHidden() }; Toggle("提醒我", isOn: $alarmEnabled).labelsHidden().toggleStyle(.switch) }
-                            .padding(12).background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 12))
-                    }
-                    if option == .organize {
-                        VStack(spacing: 10) {
-                            HStack { Text("列表"); Spacer(); Picker("列表", selection: $draft.listID) { ForEach(lists) { Text($0.title).tag($0.id) } }.labelsHidden().pickerStyle(.menu).buttonStyle(.bordered).frame(maxWidth: 240) }
-                            Divider()
-                            HStack { Text("优先级"); Spacer(); Picker("优先级", selection: $draft.details.priority) { Text("无").tag(0); Text("低").tag(9); Text("中").tag(5); Text("高").tag(1) }.labelsHidden().pickerStyle(.menu).buttonStyle(.bordered).frame(maxWidth: 240) }
-                        }.padding(12).background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 12))
-                    }
-                    if option == .url {
-                        field("URL", $draft.details.url).padding(12).background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 12))
-                    }
+                    if !inline { optionFields }
                     if !error.isEmpty { Text(error).font(.system(size: 11)).foregroundStyle(.orange) }
                     if lists.isEmpty { Text("没有可写列表，请在提醒事项中先创建列表。").font(.system(size: 11)).foregroundStyle(.orange) }
                 }.font(.system(size: 11))
-            HStack {
-                HStack(spacing: 6) {
-                    Button(action: onManage) { TodoRemindersMark(size: 16).frame(width: 24, height: 24) }.help("打开 Todo 看板").accessibilityLabel("Todo")
+            HStack(spacing: inline ? 4 : 8) {
+                HStack(spacing: inline ? 2 : 6) {
+                    if !inline {
+                        Button(action: onManage) { TodoRemindersMark(size: 16).frame(width: 24, height: 24) }.help("打开 tobo").accessibilityLabel("tobo")
+                    }
                     tool(.date, "calendar", "日期与时间", active: dateEnabled)
                     tool(.alarm, "bell", "提醒时间", active: alarmEnabled)
+                    tool(.notes, "note.text", "备注", active: !draft.details.notes.isEmpty)
                     tool(.organize, "list.bullet", "列表与优先级", active: draft.details.priority > 0)
                     tool(.url, "link", "URL", active: !draft.details.url.isEmpty)
                 }
-                Spacer()
-                Button(action: save) { Image(systemName: "return").font(.system(size: 11)).foregroundStyle(Color.white).frame(width: 28, height: 24).background(Color.blue.opacity(0.65), in: Capsule()) }
-                    .disabled(draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || lists.isEmpty).accessibilityIdentifier("island-todo-create")
-                    .accessibilityLabel("添加提醒事项").help("回车添加")
+                Spacer(minLength: inline ? 0 : 8)
+                Button(action: save) { Image(systemName: "return").font(.system(size: 11)).foregroundStyle(Color.white).frame(width: inline ? 22 : 28, height: inline ? 22 : 24).background(Color.blue.opacity(0.65), in: Capsule()) }
+                    .disabled((draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !(inline && draft.isEmpty)) || lists.isEmpty).accessibilityIdentifier("island-todo-create")
+                    .accessibilityLabel(inline ? (draft.isEmpty ? "删除空白事项" : "保存提醒事项") : "添加提醒事项").help(inline ? "回车保存" : "回车添加")
             }
-        }.padding(.horizontal, 16).padding(.vertical, 12)
+        }.padding(.horizontal, inline ? 0 : 16).padding(.vertical, inline ? 0 : 12)
+            .background(TodoInputRegion(monitor: inputMonitor))
             .animation(reduceMotion ? nil : .timingCurve(0.2, 0.8, 0.2, 1, duration: 0.18), value: option)
             .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: dateEnabled)
             .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: alarmEnabled)
+            .onChange(of: draft) { _ in changed() }
+            .onChange(of: dueDate) { _ in changed() }
+            .onChange(of: dateEnabled) { _ in changed() }
+            .onChange(of: timeEnabled) { _ in changed() }
+            .onChange(of: alarmEnabled) { _ in changed() }
+            .onChange(of: alarmDate) { _ in changed() }
             .task { await Task.yield(); titleFocused = true }.onExitCommand(perform: onCancel)
     }
-    private func save() {
-        guard !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !lists.isEmpty else { return }
+    private func changed() { onDraftChange(value()) }
+    private func value() -> TodoDraft {
+        var result = draft
         let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.dateFormat = "yyyy-MM-dd"
-        draft.date = dateEnabled ? formatter.string(from: dueDate) : ""
-        // 无日期时明确保持在事务，避免默认列重新补回日期。
-        if !dateEnabled { draft.bucket = .later }
+        result.date = dateEnabled ? formatter.string(from: dueDate) : ""
+        if !dateEnabled { result.bucket = .later }
         formatter.dateFormat = "HH:mm"
-        draft.details.time = dateEnabled && timeEnabled ? formatter.string(from: dueDate) : ""
-        draft.details.alarm = alarmEnabled ? alarmDate : nil
-        onSave(draft)
+        result.details.time = dateEnabled && timeEnabled ? formatter.string(from: dueDate) : ""
+        result.details.alarm = alarmEnabled ? alarmDate : nil
+        return result
+    }
+    private func save() {
+        guard (!draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (inline && draft.isEmpty)), !lists.isEmpty else { return }
+        onSave(value())
     }
 }
