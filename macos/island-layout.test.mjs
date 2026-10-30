@@ -81,6 +81,11 @@ model.todoHasItems = true
 precondition(model.visible && !model.expanded && model.todoHeight == 0, "新待办不应自动展开岛")
 model.hovering = true
 precondition(model.todoHeight == 192)
+model.todoComposing = true
+model.autoRevealed = true
+precondition(model.dismissTodoInput() && !model.expanded && model.todoHeight == 0, "点击岛外须同时取消输入固定、悬停和自动展开")
+model.hovering = true
+precondition(!model.dismissTodoInput() && model.expanded, "没有使用 Todo 输入时不干扰原有悬停")
 model.todoContentHeight = 0
 model.todoHasItems = false
 precondition(!model.visible && model.todoHeight == 0, "关闭 Todo 后恢复既有空闲隐藏规则")

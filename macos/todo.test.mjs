@@ -176,7 +176,7 @@ import SwiftUI
         NSApplication.shared.setActivationPolicy(.prohibited)
         var snapshot = TodoSnapshot(); snapshot.enabled = true; snapshot.authorization = .allowed
         snapshot.columns = TodoGrouping.columns((0..<40).map { reminder("待办\($0)", "2026-10-29") }, now: now, calendar: calendar)
-        precondition(snapshot.height == 360 && snapshot.count == 40, "缩略布局有高度上限但保留全部事项")
+        precondition(snapshot.height == 324 && snapshot.count == 40, "缩略布局有高度上限但保留全部事项")
         for width: CGFloat in [300, 480, 760] {
             let host = NSHostingView(rootView: IslandTodoView(snapshot: snapshot, onManage: {}, onOpen: { _ in }).frame(width: width))
             host.frame = NSRect(x: 0, y: 0, width: width, height: snapshot.height)

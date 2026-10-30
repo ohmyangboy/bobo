@@ -75,7 +75,7 @@ struct TodoSnapshot: Equatable, Encodable {
     var height: CGFloat {
         guard enabled else { return 0 }
         guard authorization == .allowed else { return 80 }
-        return 360
+        return 324
     }
 }
 
@@ -433,6 +433,8 @@ struct IslandTodoView: View {
     var onCompose: (Bool) -> Void = { _ in }
     var onShowCompleted: (Bool) -> Void = { _ in }
     var onComplete: (String, Bool) -> Void = { _, _ in }
+    var active = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var draft: TodoDraft?
     @State private var quickTitle = ""
     @State private var bucket = TodoBucket.later
@@ -447,14 +449,6 @@ struct IslandTodoView: View {
     private func finish() { draft = nil; onCompose(false) }
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Button(action: onManage) { HStack(spacing: 6) { TodoRemindersMark(size: 20); Text("Todo").font(.system(size: 12, weight: .semibold)) } }
-                    .help("打开 bobo Todo 看板").accessibilityIdentifier("island-todo-manage")
-                Text("\(snapshot.count)").font(.system(size: 10)).foregroundStyle(.white.opacity(0.65))
-                Spacer()
-                Button { onShowCompleted(!snapshot.showCompleted) } label: { Image(systemName: snapshot.showCompleted ? "checkmark.circle.fill" : "checkmark.circle").font(.system(size: 13)) }.help(snapshot.showCompleted ? "隐藏已完成" : "显示已完成").accessibilityLabel(snapshot.showCompleted ? "隐藏已完成" : "显示已完成")
-                Button(action: onManage) { Image(systemName: "arrow.up.right").font(.system(size: 11)) }.help("在 bobo 中展开看板")
-            }.foregroundStyle(.white.opacity(0.7)).padding(.horizontal, 18).frame(height: 34)
             if snapshot.authorization != .allowed {
                 Button("连接提醒事项，开始安排 →", action: onManage).foregroundStyle(.secondary)
                 Spacer()
@@ -462,24 +456,12 @@ struct IslandTodoView: View {
                 if !snapshot.error.isEmpty, draft == nil {
                     Text(snapshot.error).font(.system(size: 10)).foregroundStyle(.orange).lineLimit(1).padding(.horizontal, 18)
                 }
-                HStack(spacing: 8) {
+                HStack(spacing: 12) {
                     ForEach(snapshot.columns) { column in
-                        IslandTodoColumn(column: column, onOpen: onOpen, onComplete: onComplete, onAdd: { begin(column.bucket) })
+                        IslandTodoColumn(column: column, onOpen: onOpen, onComplete: onComplete, onAdd: { begin(column.bucket) }, onManage: onManage, showCompleted: snapshot.showCompleted, onShowCompleted: { onShowCompleted(!snapshot.showCompleted) })
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                }.padding(.horizontal, 12)
-                HStack(spacing: 8) {
-                    Menu { ForEach(TodoBucket.allCases, id: \.self) { value in Button(value.title) { bucket = value } } } label: {
-                        Text(bucket.title).font(.system(size: 10)).foregroundStyle(.white.opacity(0.75))
-                    }.menuStyle(.borderlessButton).fixedSize().help("新增到哪一列")
-                    TextField("", text: $quickTitle, prompt: Text("接下来要做什么？").foregroundColor(Color(white: 0.68))).textFieldStyle(.plain).font(.system(size: 12))
-                        .focused($quickFocused).onSubmit { begin(bucket) }.accessibilityLabel("接下来要做什么？")
-                    Button { begin(bucket) } label: { Image(systemName: "return").font(.system(size: 11)).frame(width: 26, height: 24).background(.white.opacity(0.05), in: Capsule()) }
-                        .help("添加提醒事项").accessibilityLabel("展开任务输入")
-                }
-                .padding(.horizontal, 12).padding(.vertical, 7)
-                .background(Color(white: 0.14), in: Capsule()).overlay(Capsule().stroke(.white.opacity(0.12), lineWidth: 0.5))
-                .padding(.horizontal, 48).padding(.vertical, 13)
+                }.padding(.horizontal, 20).padding(.bottom, 16)
             }
         }
         .allowsHitTesting(draft == nil)
@@ -490,18 +472,44 @@ struct IslandTodoView: View {
                     if onCreate(value) { quickTitle = ""; finish() }
                 })
                 .id(draft.id).fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 12).padding(.vertical, 12)
+                .background(RoundedRectangle(cornerRadius: 24).fill(Color(white: 0.14)).padding(-8))
+                .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 8)))
+                .padding(.horizontal, 32).padding(.vertical, 18)
+            } else if snapshot.authorization == .allowed {
+                quickInput.transition(.opacity)
             }
         }
+        .animation(reduceMotion ? nil : .timingCurve(0.2, 0.8, 0.2, 1, duration: 0.18), value: draft != nil)
         .onChange(of: quickFocused) { focused in if focused && draft == nil { begin(bucket) } }
+        .onChange(of: active) { value in
+            if !value { quickFocused = false }
+            else if draft != nil { onCompose(true) }
+        }
         .onDisappear { onCompose(false) }
         .buttonStyle(.plain).foregroundStyle(Color.white).environment(\.colorScheme, .dark)
+        .padding(.top, 8)
         .background(Color(white: 0.14), in: RoundedRectangle(cornerRadius: 18))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.white.opacity(0.18), lineWidth: 0.5))
         .padding(.horizontal, 10).padding(.vertical, 8)
         .frame(height: snapshot.height)
         .accessibilityElement(children: .contain).accessibilityLabel("Todo 看板，今日、近七、事务")
     }
+    private var quickInput: some View {
+        HStack(spacing: 8) {
+            Menu { ForEach(TodoBucket.allCases, id: \.self) { value in Button(value.title) { bucket = value } } } label: {
+                Text(bucket.title).font(.system(size: 10)).foregroundStyle(.white.opacity(0.75))
+            }.menuStyle(.borderlessButton).fixedSize().help("新增到哪一列")
+            TextField("", text: $quickTitle, prompt: Text("接下来要做什么？").foregroundColor(Color(white: 0.68))).textFieldStyle(.plain).font(.system(size: 12))
+                .focused($quickFocused).onSubmit { begin(bucket) }.accessibilityLabel("接下来要做什么？")
+            Button { begin(bucket) } label: { Image(systemName: "return").font(.system(size: 11)).frame(width: 26, height: 24).background(.white.opacity(0.05), in: Capsule()) }
+                .help("添加提醒事项").accessibilityLabel("展开任务输入")
+        }
+        .padding(.horizontal, 12).padding(.vertical, 7)
+        .background(Color(white: 0.14), in: Capsule()).overlay(Capsule().stroke(.white.opacity(0.12), lineWidth: 0.5))
+        .frame(maxWidth: 280)
+        .shadow(color: .black.opacity(0.2), radius: 10, y: 3)
+        .padding(.horizontal, 32).padding(.vertical, 18)
+    }
+
 }
 
 private struct TodoRemindersMark: View {
@@ -523,22 +531,33 @@ private struct IslandTodoColumn: View {
     var onOpen: (String) -> Void
     var onComplete: (String, Bool) -> Void
     var onAdd: () -> Void
+    var onManage: () -> Void
+    var showCompleted: Bool
+    var onShowCompleted: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 5) {
-                Circle().fill(column.bucket == .today ? Color.orange : column.bucket == .week ? Color.cyan : Color(white: 0.65)).frame(width: 5, height: 5)
+                if column.bucket == .today {
+                    Button(action: onManage) { TodoRemindersMark(size: 18) }.help("打开 Todo 看板").accessibilityLabel("Todo").accessibilityIdentifier("island-todo-manage")
+                } else {
+                    Circle().fill(column.bucket == .week ? Color.cyan : Color(white: 0.65)).frame(width: 5, height: 5)
+                }
                 Text(column.title).font(.system(size: 12, weight: .semibold))
                 Text("\(column.items.count)").font(.system(size: 10)).foregroundStyle(Color(white: 0.65))
                 Spacer(minLength: 0)
                 Button(action: onAdd) { Image(systemName: "plus").font(.system(size: 12)).frame(width: 24, height: 26) }
                     .foregroundStyle(Color(white: 0.8)).accessibilityLabel("新增到\(column.title)")
-            }.padding(.horizontal, 10).frame(height: 34).background(Color(white: 0.16))
+                if column.bucket == .later {
+                    Button(action: onShowCompleted) { Image(systemName: showCompleted ? "checkmark.circle.fill" : "checkmark.circle").font(.system(size: 12)).frame(width: 20, height: 26) }.help(showCompleted ? "隐藏已完成" : "显示已完成").accessibilityLabel(showCompleted ? "隐藏已完成" : "显示已完成")
+                    Button(action: onManage) { Image(systemName: "arrow.up.right").font(.system(size: 11)).frame(width: 20, height: 26) }.help("打开 Todo 看板").accessibilityLabel("打开 Todo 看板")
+                }
+            }.padding(.horizontal, 12).frame(height: 38)
             if column.items.isEmpty {
                 VStack(spacing: 8) { TodoRemindersMark(size: 34); Text("暂无事项").font(.system(size: 10)) }
                     .foregroundStyle(Color(white: 0.65)).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView(.vertical) {
-                    LazyVStack(spacing: 6) {
+                    LazyVStack(spacing: 8) {
                         ForEach(column.items) { item in
                             HStack(alignment: .top, spacing: 7) {
                                 Button { onComplete(item.id, !item.completed) } label: {
@@ -550,16 +569,14 @@ private struct IslandTodoColumn: View {
                                         Text(item.dateText).font(.system(size: 10)).foregroundStyle(item.overdue ? Color.orange : Color(white: 0.7))
                                     }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                                 }.help("\(item.title) · \(item.list)；在 bobo 中查看").accessibilityLabel("\(item.title)，\(item.dateText)，在 bobo 中查看")
-                            }.padding(9).frame(maxWidth: .infinity, alignment: .leading)
+                            }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
                                 .background(Color(white: 0.2), in: RoundedRectangle(cornerRadius: 9))
-                                .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.white.opacity(0.07), lineWidth: 0.5))
                         }
-                    }.padding(6)
+                    }.padding(8)
                 }.accessibilityLabel("\(column.title)事项，可滚动")
             }
         }.background(Color(white: 0.075), in: RoundedRectangle(cornerRadius: 12))
             .clipShape(RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.1), lineWidth: 0.5))
     }
 }
 
@@ -573,6 +590,7 @@ private struct IslandTodoCreateCard: View {
     @State private var alarmDate = Date().addingTimeInterval(3600)
     @State private var option: Option?
     @FocusState private var titleFocused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var lists: [TodoList]
     var error: String
     var onCancel: () -> Void
@@ -648,8 +666,11 @@ private struct IslandTodoCreateCard: View {
                     .disabled(draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || lists.isEmpty).accessibilityIdentifier("island-todo-create")
                     .accessibilityLabel("添加提醒事项").help("回车添加")
             }
-        }.padding(16).background(Color(white: 0.11), in: RoundedRectangle(cornerRadius: 20))
-            .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.white.opacity(0.25), lineWidth: 0.5))
+        }.padding(20).background(Color(white: 0.11), in: RoundedRectangle(cornerRadius: 20))
+            .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.white.opacity(0.16), lineWidth: 0.5))
+            .animation(reduceMotion ? nil : .timingCurve(0.2, 0.8, 0.2, 1, duration: 0.18), value: option)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: dateEnabled)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: alarmEnabled)
             .task { await Task.yield(); titleFocused = true }.onExitCommand(perform: onCancel)
     }
     private func save() {

@@ -102,3 +102,15 @@ test('Todo 创建卡片按需展开设置，切换面板保留字段，清除日
  p.$('#todoURL').oninvalid();assert.equal(p.$('#todoURLPanel').hidden,false);
  p.$('#todoTitle').value='';p.$('#todoTitle').oninput();assert.equal(p.$('#todoCreate').disabled,true);
 });
+test('Todo 短过渡可中断，重新展开不会被旧收起回调隐藏；减少动态效果时立即切换',async()=>{
+ const p=page(),motions=[];p.host.__boboTodoReceive(data());
+ p.$('#todoComposer').animate=(frames,options)=>{
+  let finish;const motion={finished:new Promise(resolve=>{finish=resolve;}),cancel(){this.cancelled=true;},finish(){finish();},options};motions.push(motion);return motion;
+ };
+ p.$('#todoNew').onclick();p.$('#todoCancel').onclick();p.$('#todoNew').onclick();
+ assert.equal(motions.length,3);assert.ok(motions.every(m=>m.options.duration<=200));
+ motions[1].finish();await Promise.resolve();assert.equal(p.$('#todoComposer').hidden,false,'旧的退出动画不能隐藏新打开的输入');
+ motions[2].finish();await Promise.resolve();assert.equal(p.$('#todoComposer').hidden,false);
+ p.host.matchMedia=()=>({matches:true});p.$('#todoCancel').onclick();
+ assert.equal(p.$('#todoComposer').hidden,true);assert.equal(motions.length,3);
+});

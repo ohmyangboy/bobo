@@ -2,13 +2,25 @@
 const buckets=['today','week','later'],titles={later:'事务',week:'近七',today:'今日'};
 export function installTodoPage(doc=document,host=window){
  const $=s=>doc.querySelector(s),bridge=host.webkit?.messageHandlers?.boboTodo;
- let snapshot=null,pending=false,listKey='',boardKey='',selectedID=null,editingID=null,option=null;
+ let snapshot=null,pending=false,listKey='',boardKey='',selectedID=null,editingID=null,option=null,composerMotion=null,optionMotion=null;
  const send=body=>{if(bridge)bridge.postMessage(body);};
  const node=(tag,cls,text)=>{const el=doc.createElement(tag);if(cls)el.className=cls;if(text!==undefined)el.textContent=text;return el;};
  const show=selector=>{const el=$(selector);if(!el.open)el.showModal();};
- const close=selector=>{if(selector==='#todoComposer'){$(selector).hidden=true;$('#todoQuickForm').hidden=!ready();}else $(selector).close();};
+ const close=(selector,animated=true)=>{if(selector==='#todoComposer')moveComposer(false,animated);else $(selector).close();};
  const items=()=>snapshot?.columns?.flatMap(c=>c.items)||[];
  const ready=()=>!!bridge&&snapshot?.enabled&&snapshot?.authorization==='allowed';
+ const reducedMotion=()=>!!host.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+ // 参考 magpie：快起步、缓收尾；只动输入区，不牵动列表和窗口几何。
+ function moveComposer(open,animated=true){
+  const el=$('#todoComposer');composerMotion?.cancel();composerMotion=null;
+  const done=()=>{el.hidden=!open;$('#todoQuickForm').hidden=!ready();};
+  if(!open&&el.hidden){done();return;}
+  if(open)el.hidden=false;
+  if(!animated||reducedMotion()||!el.animate){done();return;}
+  const frames=[{opacity:0,transform:'translateX(-50%) translateY(8px) scale(.985)'},{opacity:1,transform:'translateX(-50%) translateY(0) scale(1)'}];
+  const motion=el.animate(open?frames:[...frames].reverse(),{duration:open?180:120,easing:'cubic-bezier(.2,.8,.2,1)',fill:'both'});composerMotion=motion;
+  motion.finished.then(()=>{if(composerMotion===motion){done();composerMotion=null;motion.cancel();}},()=>{});
+ }
  function localDate(value=new Date()){
   return `${value.getFullYear()}-${String(value.getMonth()+1).padStart(2,'0')}-${String(value.getDate()).padStart(2,'0')}`;
  }
@@ -29,12 +41,20 @@ export function installTodoPage(doc=document,host=window){
  }
  function syncCreate(){$('#todoCreate').disabled=pending||!snapshot?.lists?.length||!$('#todoTitle').value.trim();}
  function syncOptions(){
+  const composer=$('#todoComposer'),before=!composer.hidden?composer.getBoundingClientRect?.().height:0;
+  if(optionMotion){optionMotion.cancel();optionMotion=null;composer.style.overflow='';}
   const date=$('#todoDate').value;
   $('#todoDateLabel').textContent=date?(date===localDate()?'今天':date.slice(5).replace('-','/')):'';
   for(const name of ['Date','Alarm','Organize','URL']){
    $('#todo'+name+'Panel').hidden=option!==name;
    const toggle=$('#todo'+name+'Toggle');toggle.setAttribute('aria-expanded',String(option===name));
    toggle.setAttribute('data-active',String(name==='Date'?!!date:name==='Alarm'?!!$('#todoAlarm').value:name==='URL'?!!$('#todoURL').value:Number($('#todoPriority').value)>0));
+  }
+  const after=before?composer.getBoundingClientRect?.().height:0;
+  if(before&&after&&Math.abs(before-after)>0.5&&composer.animate&&!reducedMotion()){
+   optionMotion?.cancel();composer.style.overflow='hidden';
+   const motion=composer.animate([{height:before+'px'},{height:after+'px'}],{duration:180,easing:'cubic-bezier(.2,.8,.2,1)'});optionMotion=motion;
+   const end=()=>{if(optionMotion===motion){optionMotion=null;composer.style.overflow='';}};motion.finished.then(end,end);
   }
  }
  function openCreate(bucket='later',title='',item=null){
@@ -44,7 +64,7 @@ export function installTodoPage(doc=document,host=window){
   $('#todoNotes').value=item?.notes||'';$('#todoURL').value=item?.url||'';$('#todoPriority').value=String(item?.priority||0);$('#todoAlarm').value=alarmLocal(item?.alarm);
   if(item)$('#todoList').value=item.listID;
   $('#todoComposerHeading').textContent=item?'编辑提醒事项':'新增提醒事项';$('#todoCreate').textContent=item?'保存':'添加';
-  $('#todoSaveStatus').textContent='';option=null;syncTime();syncCreate();close('#todoDetail');$('#todoComposer').hidden=false;$('#todoQuickForm').hidden=false;$('#todoTitle').focus();
+  $('#todoSaveStatus').textContent='';option=null;syncTime();syncCreate();close('#todoDetail');moveComposer(true);$('#todoQuickForm').hidden=false;$('#todoTitle').focus();
  }
  function renderBoard(data){
   const key=JSON.stringify(data?.columns||[]);if(key===boardKey)return;boardKey=key;
@@ -82,7 +102,7 @@ export function installTodoPage(doc=document,host=window){
   $('#todoShowCompleted').checked=!!data?.showCompleted;$('#todoShowCompleted').disabled=!connected;
   $('#todoOpen').disabled=!bridge;$('#todoRefresh').disabled=!bridge||loading;$('#todoNew').disabled=!connected;
   $('#todoForm').hidden=!connected;$('#todoQuickForm').hidden=!connected;$('#todoBoard').hidden=!connected;
-  if(!connected){close('#todoComposer');close('#todoDetail');selectedID=editingID=null;}
+  if(!connected){close('#todoComposer',false);close('#todoDetail');selectedID=editingID=null;}
   const lists=data?.lists||[],key=JSON.stringify(lists);
   if(key!==listKey){
    listKey=key;const select=$('#todoList'),old=select.value;

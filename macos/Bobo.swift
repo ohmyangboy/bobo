@@ -61,6 +61,8 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     private var terminalWatchTimer: Timer?
     private var islandTask: Task<Void, Never>?
     private var islandDragMonitor: Any?
+    private var islandOutsideMonitor: Any?
+    private var islandLocalOutsideMonitor: Any?
     private var islandDragStartMouseX: CGFloat?
     private var islandDragStartOriginX: CGFloat?
     private var islandDragging = false
@@ -345,6 +347,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         islandHosting = hosting
         notchWindow.contentView = hosting
         setupIslandDrag()
+        setupIslandOutsideClick()
         // 采鼠标坐标，并按一秒缓存补查进入 / 退出全屏；网页播放器可能不切应用或 Space。
         menuBarWatchTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.updateMenuBarYield()
@@ -1002,6 +1005,28 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         URLSession.shared.dataTask(with: request).resume()
     }
 
+    // 输入时移出鼠标仍保留草稿；明确点到岛外才收起。原生菜单等子浮层属于岛内交互。
+    private func setupIslandOutsideClick() {
+        islandOutsideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+            self?.dismissTodoFromOutsideClick(nil)
+        }
+        islandLocalOutsideMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
+            self?.dismissTodoFromOutsideClick(event.window)
+            return event
+        }
+    }
+
+    private func dismissTodoFromOutsideClick(_ window: NSWindow?) {
+        guard islandModel.todoComposing, !islandContainsPointer(), let panel = notchWindow else { return }
+        if let window, window !== self.window, window !== panel,
+           window.parent === panel || window.level.rawValue > panel.level.rawValue { return }
+        guard islandModel.dismissTodoInput() else { return }
+        islandCollapse?.cancel(); islandAutoCollapse?.cancel()
+        if islandModel.butlerReply.isOpen { closeButlerReply() }
+        panel.makeFirstResponder(nil); panel.resignKey()
+        hideDetail(); scheduleIslandLayout()
+    }
+
     // 水平拖动：按住面板左右移动（阈值 5pt，避免把单击误判成拖动），松手后记住偏移。
     // 做法与 CodeIsland 的 setupHorizontalDragMonitor 相同：本地事件监视器，不改窗口的可拖动属性。
     private func setupIslandDrag() {
@@ -1557,6 +1582,8 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     }
     func applicationWillTerminate(_ notification: Notification) {
         menuBarWatchTimer?.invalidate()
+        if let islandOutsideMonitor { NSEvent.removeMonitor(islandOutsideMonitor) }
+        if let islandLocalOutsideMonitor { NSEvent.removeMonitor(islandLocalOutsideMonitor) }
         stopIslandLayoutAnimation()
         if let service = service, service.isRunning { service.terminate() }
     }
@@ -2602,6 +2629,11 @@ final class IslandModel: ObservableObject {
     var top: IslandSession? { waiting ?? sessions.first { $0.state == "working" } ?? sessions.first }
     // 展开：鼠标悬停，或（设置允许时）状态变化自动亮起（等你回答 3 秒、结束/终止 2 秒，见 revealIslandTemporarily）。
     var expanded: Bool { todoComposing || butlerReply.isOpen || hovering || (settings.autoExpand && autoRevealed) }
+    @discardableResult func dismissTodoInput() -> Bool {
+        guard todoComposing else { return false }
+        todoComposing = false; hovering = false; autoRevealed = false
+        return true
+    }
     var butlerListHeight: CGFloat { butler?.visibleListHeight(measured: butlerContentHeight, replying: butlerReply.isOpen) ?? 0 }
     var butlerHeight: CGFloat {
         guard expanded, butler?.enabled == true else { return 0 }
@@ -2739,11 +2771,15 @@ struct IslandView: View {
                 if model.expanded {
                     Rectangle().fill(.white.opacity(0.14)).frame(height: 0.5).padding(.horizontal, 12)
                     list
-                    if todo.snapshot.enabled {
-                        IslandTodoView(snapshot: todo.snapshot, onManage: { onTodo(nil) }, onOpen: { onTodo($0) }, onCreate: { draft in
-                            todo.create(title: draft.title, date: draft.date, listID: draft.listID, bucket: draft.bucket, details: draft.details)
-                        }, onCompose: onTodoCompose, onShowCompleted: { todo.setShowCompleted($0) }, onComplete: { todo.complete(id: $0, completed: $1) })
-                    }
+                }
+                if todo.snapshot.enabled {
+                    IslandTodoView(snapshot: todo.snapshot, onManage: { onTodo(nil) }, onOpen: { onTodo($0) }, onCreate: { draft in
+                        todo.create(title: draft.title, date: draft.date, listID: draft.listID, bucket: draft.bucket, details: draft.details)
+                    }, onCompose: onTodoCompose, onShowCompleted: { todo.setShowCompleted($0) }, onComplete: { todo.complete(id: $0, completed: $1) }, active: model.expanded)
+                    .frame(height: model.expanded ? todo.snapshot.height : 0, alignment: .bottom)
+                    .clipped().allowsHitTesting(model.expanded).accessibilityHidden(!model.expanded)
+                }
+                if model.expanded {
                     if let butler = model.butler, butler.enabled {
                         IslandButlerList(butler: butler, avatarForProject: { model.avatarImage($0) }, viewportHeight: model.butlerListHeight,
                             onSelect: onButler, onCompose: onButlerCompose, onFocus: onButlerFocus, onQuote: onButlerQuote,
