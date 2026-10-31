@@ -43,7 +43,15 @@ test('隔离环境：列表、文件增删改、冲突保护、路径保护、�
   assert.equal((await req('skills',null,{Origin:'https://evil.example'})).status,403);
   // 用量接口：隔离环境里没有 OpenCode 数据库、Codex / Claude Code 登录与 agy 会话，所有额度来源都不可用但接口本身要正常。
   const usage=(await req('usage')).data;
-  assert.equal(usage.available,false);assert.deepEqual(usage.providers.map(p=>p.id),['codex','claude','opencode-go','agy','cursor','grok']);
+  assert.equal(usage.available,false);assert.deepEqual(usage.providers.map(p=>p.id),['codex','claude','opencode-go','agy','deepseek','cursor','grok']);
+  // 未知来源在任何 Key 动作前拒绝，绝不按 OpenCode Go 的默认分支发送密钥。
+  for(const id of ['unknown','codex','agy','constructor','__proto__',null,{},123])for(const action of [{key:'private-fixture'},{clear:true},{keychain:true}])assert.equal((await req('usage/key',{id,...action})).status,400);
+  assert.doesNotMatch(await fs.readFile(path.join(home,'.bobo/usage.json'),'utf8').catch(()=>''),/private-fixture/);
+  // 余额显示设置：合法值即时写入快照，非法值 400 且不污染当前设置。
+  const balance=(await req('usage/balance',{mode:'percent',currency:'USD',denominator:'50'})).data;
+  const shown=balance.providers.find(p=>p.id==='deepseek').balanceView;
+  assert.equal(shown.mode,'percent');assert.equal(shown.currency,'USD');assert.equal(shown.denominator,'50.00');
+  for(const payload of [{mode:'circle'},{currency:'EUR'},{denominator:'0'},{denominator:'1e2'}])assert.equal((await req('usage/balance',payload)).status,400);
   const island=(await req('opencode')).data;
   assert.ok(island.agy);
   assert.equal(island.butler.enabled,false);

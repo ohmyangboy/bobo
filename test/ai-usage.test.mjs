@@ -58,7 +58,7 @@ test('缓存缺失不伪造 0%：部分记录显示下限，费用合计持久�
  await fs.writeFile(path.join(home,'.bobo/ai-usage.json'),JSON.stringify(legacy));
  const migrated=createAIUsage(home,{now:()=>now});value=await migrated.snapshot();assert.equal(value.total.total,13106);assert.equal(value.total.cacheRate,2432/11161);assert.equal(value.total.cachePartial,true);assert.equal(value.total.unpricedRequests,5);assert.equal(value.total.costCnyMax,0,'旧请求不能套用当前配置追溯费用');
  await migrated.record('butler',{prompt_tokens:100,completion_tokens:20,prompt_cache_hit_tokens:80},metadata);
- value=await migrated.snapshot();assert.equal(value.total.total,13226);assert.equal(value.total.pricedRequests,1);assert.equal(value.total.unpricedRequests,5);assert.equal(value.today.cachePartial,false);assert.equal(JSON.parse(await fs.readFile(path.join(home,'.bobo/ai-usage.json'),'utf8')).version,2);
+ value=await migrated.snapshot();assert.equal(value.total.total,13226);assert.equal(value.total.pricedRequests,1);assert.equal(value.total.unpricedRequests,5);assert.equal(value.today.cachePartial,false);assert.equal(JSON.parse(await fs.readFile(path.join(home,'.bobo/ai-usage.json'),'utf8')).version,3);
  const latest=value.features.find(f=>f.id==='butler').lastRequest;assert.equal(latest.cacheRate,0.8);assert.equal(latest.input,100);assert.equal(latest.cachedInput,80);assert.ok(latest.costCnyMin>0);
  assert.deepEqual((await createAIUsage(home,{now:()=>now}).snapshot()).features.find(f=>f.id==='butler').lastRequest,latest);
 });

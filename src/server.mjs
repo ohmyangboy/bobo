@@ -15,7 +15,7 @@ import { createOmp } from './omp.mjs';
 import { createClaude } from './claude.mjs';
 import { createDsh } from './dsh.mjs';
 import { createAgy } from './agy.mjs';
-import { createUsage } from './usage.mjs';
+import { createUsage,keyProviders } from './usage.mjs';
 import { createDevices } from './devices.mjs';
 import { createNetwork } from './network.mjs';
 import { createLinks } from './links.mjs';
@@ -338,6 +338,8 @@ const server=http.createServer(async(req,res)=>{
    if(url.pathname==='/api/usage/order')return json(usage.setOrder(b.ids));
    // 额度圆环显示哪一档窗口：{id} 让这一家在它自己的窗口之间循环（5 小时 / 本周 / 账单月…），选择保存在 usage.json。
    if(url.pathname==='/api/usage/range')return json(usage.cycleRange(b.id));
+   // 余额来源的刘海显示：{mode:'balance'|'percent',currency:'CNY'|'USD',denominator:'100.00'}，只改显示、不联网。
+   if(url.pathname==='/api/usage/balance')return json(usage.setBalanceDisplay(b));
    // 来源启停：关掉的来源不参与刘海胶囊的切换循环。
    if(url.pathname==='/api/usage/enabled')return json(usage.setEnabled(b.id,b.enabled));
    // 额度重置提醒开关：Codex / Claude Code / Antigravity 的额度窗口回到 100% 时提醒（系统通知 + 提示音）。
@@ -345,9 +347,10 @@ const server=http.createServer(async(req,res)=>{
    // 手动填写的 Token / API Key：{id} 默认 OpenCode Go，Claude Code 用 {id:'claude'}；
    // {keychain:true} 显式读取 macOS 钥匙串里的 Claude Code 登录（会弹一次系统授权）。
    if(url.pathname==='/api/usage/key'){
-    const id=typeof b.id==='string'?b.id:'opencode-go',direct=b.direct===true;
+    const id=b.id===undefined?'opencode-go':b.id,direct=b.direct===true;
+    if(!keyProviders.includes(id))fail('不支持的额度密钥来源');
     if(b.keychain)return json(await usage.readKeychain(id,{direct}));
-    if(b.clear)return json({ok:true,message:'已清除手动 Token，改回读取本机登录',snapshot:await usage.clearKey(id)});
+    if(b.clear)return json({ok:true,message:id==='deepseek'?'已清除 DeepSeek 官方余额 Key':'已清除手动 Token，改回读取本机登录',snapshot:await usage.clearKey(id)});
     return json(await usage.setKey(id,b.key,{direct}));
    }
    // 「直连时也请求」：没有 VPN / 代理时也携带登录请求 Claude（默认关，见 usage.mjs 的 claudeGate）。

@@ -26,10 +26,60 @@ function initTitlebar(){
  window.addEventListener('resize',schedule);document.fonts?.ready.then(schedule);schedule();
 }
 initTitlebar();
+// 分段控件与标签页的平滑滑动指示块（吸取 magpie 的 .thumb 动效系统）：
+// 选中项切换时，背景拇指在选项之间以弹簧物理曲线平滑滑动与缩放，而不是突兀跳变。
+function slideSeg(box){
+ if(!box)return;
+ let th=box.querySelector(':scope > .thumb');
+ const fresh=!th;
+ if(fresh){
+  th=document.createElement('span');
+  th.className='thumb';
+  box.prepend(th);
+ }
+ const on=box.querySelector(':scope > [aria-pressed="true"]');
+ if(!on||on.offsetWidth===0){
+  th.style.opacity='0';
+  return;
+ }
+ const toX=on.offsetLeft,toW=on.offsetWidth;
+ if(fresh){
+  th.classList.add('still');
+  th.style.transform=`translateX(${toX}px)`;
+  th.style.width=`${toW}px`;
+  th.style.opacity='1';
+  void th.offsetWidth;
+  th.classList.remove('still');
+ }else{
+  th.style.opacity='1';
+  th.style.transform=`translateX(${toX}px)`;
+  th.style.width=`${toW}px`;
+ }
+}
+let segObserver;
+if(typeof ResizeObserver!=='undefined'){
+ segObserver=new ResizeObserver(entries=>{
+  for(const entry of entries){
+   if(entry.target.offsetWidth>0)slideSeg(entry.target);
+  }
+ });
+}
+function observeSeg(el){
+ if(!el)return;
+ slideSeg(el);
+ segObserver?.observe(el);
+}
 // 外观：默认跟随系统（prefers-color-scheme 随系统即时切换），也可固定浅色 / 深色；手动选择保存在本机，不改动系统设置。
 const themeKey='bobo-theme',legacyThemeKey='skills-theme',themes=['system','light','dark'];
-let theme='system';try{const stored=localStorage.getItem(themeKey)??localStorage.getItem(legacyThemeKey);if(themes.includes(stored))theme=stored;}catch{}
-function applyTheme(){document.documentElement.dataset.theme=theme==='system'?'':theme;for(const b of document.querySelectorAll('[data-theme-value]'))b.setAttribute('aria-pressed',String(b.dataset.themeValue===theme));}
+let theme='system',themeTimer=null;try{const stored=localStorage.getItem(themeKey)??localStorage.getItem(legacyThemeKey);if(themes.includes(stored))theme=stored;}catch{}
+function applyTheme(){
+ document.documentElement.classList.add('theming');
+ clearTimeout(themeTimer);
+ themeTimer=setTimeout(()=>document.documentElement.classList.remove('theming'),360);
+ document.documentElement.dataset.theme=theme==='system'?'':theme;
+ for(const b of document.querySelectorAll('[data-theme-value]'))b.setAttribute('aria-pressed',String(b.dataset.themeValue===theme));
+ document.querySelectorAll('.theme-switch').forEach(observeSeg);
+}
 for(const b of document.querySelectorAll('[data-theme-value]'))b.onclick=()=>{theme=b.dataset.themeValue;try{localStorage.setItem(themeKey,theme);}catch{}applyTheme();};
 applyTheme();
 // 当前一级视图：默认进通知岛（顶栏第一个 tab），另有 Agents / 设备 / 设置（额度已并入通知岛）。当前页操作区按它显示（见 style.css）。
@@ -340,7 +390,8 @@ async function loadAISettings(){
  await loadAIUsage();
 }
 async function loadAIUsage(){
- const data=await api('ai/usage'),number=v=>Number(v||0).toLocaleString('zh-CN');
+ const data=await api('ai/usage');renderDeepSeekLedger(data.deepseek,data.error);
+ const number=v=>Number(v||0).toLocaleString('zh-CN');
  const money=v=>v>0&&v<0.0001?'< ¥0.0001':'¥'+Number(v||0).toLocaleString('zh-CN',{minimumFractionDigits:4,maximumFractionDigits:4});
  const cost=value=>!value.requests?'¥0.0000':!value.pricedRequests?'—':Math.abs(value.costCnyMax-value.costCnyMin)<1e-10?money(value.costCnyMin):money(value.costCnyMin)+'–'+money(value.costCnyMax);
  const note=(cell,text)=>{const small=document.createElement('small');small.textContent=text;cell.append(small);};
@@ -389,8 +440,13 @@ function showSettingsPane(name){
  for(const b of document.querySelectorAll('#settingsWorkspace [data-settings-pane]'))b.setAttribute('aria-pressed',String(b.dataset.settingsPane===next));
  $('#settingsActions').hidden=next!=='ai';
  if(next==='ai')loadAIUsage().catch(e=>$('#aiUsageDetail').textContent=e.message);
+ if(next==='appearance')requestAnimationFrame(()=>document.querySelectorAll('#settingsWorkspace .theme-switch').forEach(observeSeg));
 }
-for(const b of document.querySelectorAll('#settingsWorkspace [data-settings-pane]'))b.onclick=()=>showSettingsPane(b.dataset.settingsPane);
+for(const b of document.querySelectorAll('#settingsWorkspace [data-settings-pane]'))b.onclick=()=>{
+ const p=b.dataset.settingsPane;
+ if(p==='island'){switchView('island').then(()=>showIslandPane('settings'));return;}
+ showSettingsPane(p);
+};
 
 // 更新入口在右上角的版本按钮（#appVersion）：默认显示版本号，检查中 / 下载中 / 已就绪会直接变成对应状态，
 // 点它执行「检查更新」或「重启并更新」；设置页只保留 app 信息，更新说明放在重启确认框里。
@@ -1024,6 +1080,7 @@ function applyAgentsMode(){
  for(const el of document.querySelectorAll('#agentsWorkspace [data-agents-pane]'))el.hidden=el.dataset.agentsPane!==agentsMode;
  for(const b of document.querySelectorAll('#agentsWorkspace [data-agents-mode]'))b.setAttribute('aria-pressed',String(b.dataset.agentsMode===agentsMode));
  syncBackLink();
+ document.querySelectorAll('.mode-switch, .view-switch').forEach(observeSeg);
 }
 function setAgentsMode(mode){
  if(mode===agentsMode||!leave()||!agentLeave())return;
@@ -1056,10 +1113,10 @@ async function switchView(next){
  $('#deviceWorkspace').hidden=next!=='device';
  $('#settingsWorkspace').hidden=next!=='settings';
  for(const [id,name] of [['#agentsTab','agents'],['#islandTab','island'],['#deviceTab','device'],['#settingsTab','settings']])$(id).setAttribute('aria-pressed',String(next===name));
- if(next==='agents'){await loadAgentProviders();if(!agentLoaded||!agentConfigLoaded)await loadAgentAll();else renderAgentList();}
- if(next==='island'){openIsland();openUsage();}else{islandClose();usageClose();}
+ if(next==='agents'){await loadAgentProviders();if(!agentLoaded||!agentConfigLoaded)await loadAgentAll();else renderAgentList();requestAnimationFrame(()=>document.querySelectorAll('#agentsWorkspace .mode-switch').forEach(observeSeg));}
+ if(next==='island'){openIsland();openUsage();requestAnimationFrame(()=>document.querySelectorAll('#islandWorkspace .segs, #islandWorkspace .set-tabs').forEach(observeSeg));}else{islandClose();usageClose();}
  if(next==='device')openDevice();else deviceClose();
- if(next==='settings')await loadAISettings();
+ if(next==='settings'){await loadAISettings();requestAnimationFrame(()=>document.querySelectorAll('#settingsWorkspace .theme-switch').forEach(observeSeg));}
 }
 async function saveAgent(){
  if(!agentSel)return;
@@ -1345,7 +1402,7 @@ function renderIsland(){
 }
 // 通知岛左侧分类（参考 magpie 的来源列表）：Agent 连接（会话）与额度来源两组，底部固定「通知岛设置」。
 // 行右侧是「圆点 + 状态文字」；分栏按 data-island-pane 切换，设置页内再用子页签（data-island-settings）切四个分页。
-const islandPanes=['opencode','codex','omp','claude','dsh','agy','butler','todo','quota-codex','quota-claude','quota-opencode','quota-agy','quota-cursor','quota-grok','settings'];
+const islandPanes=['opencode','codex','omp','claude','dsh','agy','butler','todo','quota-codex','quota-claude','quota-opencode','quota-agy','quota-deepseek','quota-cursor','quota-grok','settings'];
 function showIslandPane(name){
  const next=islandPanes.includes(name)?name:islandPanes[0];
  for(const p of document.querySelectorAll('#islandWorkspace [data-island-pane-content]'))p.hidden=p.dataset.islandPaneContent!==next;
@@ -1354,6 +1411,8 @@ function showIslandPane(name){
  document.body.dataset.islandKind=next.startsWith('quota-')?'quota':next==='settings'?'settings':'session';
  document.body.dataset.islandPane=next;
  if(next==='todo')todoPage.refresh();
+ // 分段控件的滑动拇指按可见宽度定位：刚切到这个分栏时补一次，否则隐藏时创建的拇指会停在 opacity:0。
+ requestAnimationFrame(()=>document.querySelectorAll(`#islandWorkspace [data-island-pane-content="${next}"] .segs`).forEach(observeSeg));
  if(next==='butler')loadButler().catch(e=>$('#butlerStatus').textContent=e.message);
 }
 for(const b of document.querySelectorAll('#islandWorkspace [data-island-pane]'))b.onclick=()=>showIslandPane(b.dataset.islandPane);
@@ -1362,6 +1421,8 @@ function showIslandSettings(name){
  const next=islandSettingsPanes.includes(name)?name:islandSettingsPanes[0];
  for(const p of document.querySelectorAll('[data-island-settings-content]'))p.hidden=p.dataset.islandSettingsContent!==next;
  for(const b of document.querySelectorAll('[data-island-settings]'))b.setAttribute('aria-pressed',String(b.dataset.islandSettings===next));
+ document.querySelectorAll('.set-tabs').forEach(observeSeg);
+ requestAnimationFrame(()=>document.querySelectorAll('[data-island-settings-content]:not([hidden]) .segs').forEach(observeSeg));
 }
 for(const b of document.querySelectorAll('[data-island-settings]'))b.onclick=()=>showIslandSettings(b.dataset.islandSettings);
 // 侧栏行右侧的状态：小圆点（颜色沿用会话状态色）+ 一段文字，参考 magpie 的「● Connected」。
@@ -1373,12 +1434,13 @@ function sessionSide(rows){return rows.length?[rows[0].state,ocLabels[rows[0].st
 function islandSwitch(row,key,label,on){
  const cell=$(row);cell.querySelector('.switch')?.remove();
  cell.append(toggleSwitch(on,label,async value=>{
+  cell.classList.add('flash');setTimeout(()=>cell.classList.remove('flash'),800);
   islandState.settings=await api('opencode/settings',{...islandState.settings,[key]:value});
  }));
 }
 // 「内容 → 额度显示顺序」：几枚来源图标按住拖动排序。写的是同一份 order（usage.json 的 order），
 // 所以通知岛里的这个顺序、左栏「额度来源」的顺序、刘海面板上圆环的顺序始终一致。
-const quotaSymbols={codex:'provider-codex',claude:'provider-claude','opencode-go':'provider-opencode',agy:'provider-agy',cursor:'provider-cursor',grok:'/provider-grok.png'};
+const quotaSymbols={codex:'provider-codex',claude:'provider-claude','opencode-go':'provider-opencode',agy:'provider-agy',deepseek:'provider-dsh',cursor:'provider-cursor',grok:'/provider-grok.png'};
 let quotaOrderIds='';
 function renderQuotaOrder(usage){
  const box=$('#quotaOrderList');if(!box)return;
@@ -1444,8 +1506,19 @@ if(quotaOrderBox){
  }));
 }
 // 设置里的小枚举用分段控件（样式同「外观」）：按钮带 data-value，选中态是 aria-pressed；点击即先切换显示，再写入设置。
-function setSeg(id,value){for(const b of document.querySelectorAll(`#${id} button`))b.setAttribute('aria-pressed',String(b.dataset.value===String(value)));}
-function bindSeg(id,onChange){for(const b of document.querySelectorAll(`#${id} button`))b.onclick=guard(async()=>{setSeg(id,b.dataset.value);await onChange(b.dataset.value,b.textContent);});}
+function setSeg(id,value){
+ for(const b of document.querySelectorAll(`#${id} button`))b.setAttribute('aria-pressed',String(b.dataset.value===String(value)));
+ const box=document.getElementById(id);
+ if(box)observeSeg(box);
+}
+function bindSeg(id,onChange){
+ for(const b of document.querySelectorAll(`#${id} button`))b.onclick=guard(async()=>{
+  setSeg(id,b.dataset.value);
+  const row=b.closest('.settings-row');
+  if(row){row.classList.add('flash');setTimeout(()=>row.classList.remove('flash'),800);}
+  await onChange(b.dataset.value,b.textContent);
+ });
+}
 function renderIslandSettings(){
  const s=islandState.settings;
  islandSwitch('#rowNotify','notify','系统通知',s.notify!==false);
@@ -1573,8 +1646,89 @@ function renderQuotaSide(snapshot){
  }
  for(const p of list){
   const on=p.available&&p.enabled!==false;
-  setSideStatus('quota-'+usagePaneFor(p.id),on?'idle':'off',!p.available?'未连接':on?'已连接':'已关闭');
+  setSideStatus('quota-'+usagePaneFor(p.id),!on?'off':p.stale||p.kind==='balance'&&p.isAvailable===false?'aborted':'idle',!p.available?'未连接':!on?'已关闭':p.stale?'已过期':p.kind==='balance'&&p.isAvailable===false?'余额不足':'已连接');
  }
+}
+// 官方余额保留十进制原文，不经过浮点换算，也不与百分比窗口混用。
+function deepseekBalanceCard(balance){
+ const card=document.createElement('div');card.className='usage-card usage-balance-card';
+ const head=document.createElement('div');head.className='usage-card-head';
+ const title=document.createElement('span');title.textContent=balance.currency==='CNY'?'人民币 · CNY':'美元 · USD';
+ const total=document.createElement('strong');total.textContent=balance.currency+' '+balance.total;head.append(title,total);card.append(head);
+ for(const [label,value] of [['赠送余额',balance.granted],['充值余额',balance.toppedUp]]){
+  const row=document.createElement('div');row.className='usage-balance-fact';
+  const name=document.createElement('span');name.textContent=label;const amount=document.createElement('span');amount.textContent=balance.currency+' '+value;row.append(name,amount);card.append(row);
+ }
+ return card;
+}
+const balanceSymbol=currency=>currency==='USD'?'$':'¥';
+// 占比卡：与其它额度卡同一套 .meter 颜色，但数字是「余额 ÷ 分母」的剩余占比（和刘海圆环同向）。
+function deepseekPercentCard(view){
+ const card=document.createElement('div');card.className='usage-card usage-balance-card';
+ if(Number.isFinite(view?.percent))card.dataset.level=usageLevel(view.percent);
+ const head=document.createElement('div');head.className='usage-card-head';
+ const title=document.createElement('span');title.textContent='余额占比';
+ const percent=document.createElement('strong');percent.textContent=view?.percentText?view.percentText+'%':'—';
+ head.append(title,percent);
+ const meter=document.createElement('div');meter.className='meter';
+ const fill=document.createElement('i');fill.style.width=Math.min(100,Math.max(0,view?.percent||0))+'%';meter.append(fill);
+ const foot=document.createElement('div');foot.className='usage-card-foot';
+ const current=document.createElement('span');current.textContent=view?.amountText?`余额 ${balanceSymbol(view.currency)}${view.amountText}`:'余额 —';
+ const denominator=document.createElement('span');denominator.textContent='分母 '+balanceSymbol(view?.currency)+view?.denominator;
+ foot.append(current,denominator);
+ card.append(head,meter,foot);
+ return card;
+}
+function renderDeepSeekBalance(provider){
+ const box=$('#usageDeepseekBalances');box.replaceChildren();
+ const view=provider?.balanceView;
+ if(view?.percent!==null&&view?.percent!==undefined)box.append(deepseekPercentCard(view));
+ if(provider?.balances?.length)box.append(...provider.balances.map(deepseekBalanceCard));
+ else{const p=document.createElement('p');p.className='usage-empty';p.textContent=provider?.reason||'尚未读取到官方余额';box.append(p);}
+ // 刘海显示设置：分段控件与分母输入直接反映服务端快照；余额模式下分母不可用。
+ const mode=view?.mode==='percent'?'percent':'balance',currency=view?.currency==='USD'?'USD':'CNY';
+ setSeg('deepseekDisplaySegs',mode);
+ setSeg('deepseekCurrencySegs',currency);
+ const input=$('#deepseekDenominator');
+ if(input&&document.activeElement!==input)input.value=view?.denominator||'100.00';
+ $('#deepseekDenominatorPrefix').textContent=balanceSymbol(currency);
+ input.disabled=mode!=='percent';
+ $('#deepseekDenominatorSave').disabled=mode!=='percent';
+ $('#rowUsageDeepseekDenominator').classList.toggle('is-disabled',mode!=='percent');
+ const note=[];
+ if(view?.amountText!==null&&view?.amountText!==undefined){
+  note.push(mode==='percent'
+   ?`刘海：占比 ${view.percentText}%（分母 ${balanceSymbol(view.currency)}${view.denominator}）`
+   :`刘海：余额 ${balanceSymbol(view.currency)}${view.amountText}（上方横排两位小数）`);
+ }
+ if(provider?.isAvailable!==null&&provider?.isAvailable!==undefined)note.push(provider.isAvailable?'官方状态：余额可用':'官方状态：余额不足，暂不可调用');
+ if(provider?.lastSuccessfulAt)note.push('最近成功：'+new Date(provider.lastSuccessfulAt).toLocaleString('zh-CN'));
+ if(provider?.stale)note.push('已过期：当前显示上次成功的余额');
+ if(provider?.error)note.push('⚠ '+provider.error);
+ note.push('充值余额是当前剩余金额，不是累计充值。刷新遵循缓存与失败退避。');
+ $('#usageDeepseekNote').textContent=note.join('；');
+ $('#usageDeepseekKeyStatus').textContent=provider?.keySource==='manual'?'已保存专用于官方余额的手动 Key':'未配置 · 请主动填写官方 Key';
+ $('#usageDeepseekKeyClear').disabled=provider?.keySource!=='manual';
+}
+function renderDeepSeekLedger(ledger,error=''){
+ const number=value=>value===null||value===undefined?'—':Number(value).toLocaleString('zh-CN');
+ const money=value=>value>0&&value<0.0001?'< ¥0.0001':'¥'+Number(value).toLocaleString('zh-CN',{minimumFractionDigits:4,maximumFractionDigits:4});
+ const cost=value=>value.costCnyMin===null||value.costCnyMin===undefined?'—':Math.abs(value.costCnyMax-value.costCnyMin)<1e-10?money(value.costCnyMin):money(value.costCnyMin)+'–'+money(value.costCnyMax);
+ const row=(label,value)=>{
+  const tr=document.createElement('tr'),th=document.createElement('th');th.scope='row';th.textContent=label;
+  const state=document.createElement('small');state.textContent=value.requests+' 次请求 · '+value.measured+' 次已计量'+(value.unmeasured?' · '+value.unmeasured+' 次用量未知':'')+(value.pricingVersions?.length?' · '+value.pricingVersions.join('、'):'');th.append(state);tr.append(th);
+  for(const key of ['input','output','total']){const td=document.createElement('td');td.textContent=number(value[key]);if(value.unmeasured&&value.measured){const small=document.createElement('small');small.textContent='已知部分';td.append(small);}tr.append(td);}
+  const td=document.createElement('td');td.textContent=cost(value);const small=document.createElement('small');small.textContent=value.unpricedRequests?value.unpricedRequests+' 次费用未知':value.pricedRequests?'按请求价格版本估算':'费用未知';td.append(small);tr.append(td);return tr;
+ };
+ const versions=[...new Set((ledger?.models||[]).flatMap(m=>m.pricingVersions||[]))];
+ for(const box of document.querySelectorAll('[data-deepseek-ledger-rows]')){
+  box.replaceChildren();
+  if(!ledger?.total?.requests){const tr=document.createElement('tr'),td=document.createElement('td');td.colSpan=5;td.textContent='尚无 bobo 发出的官方 DeepSeek 请求';tr.append(td);box.append(tr);continue;}
+  box.append(row('接入后合计',ledger.total));
+  for(const day of [...(ledger.days||[])].sort((a,b)=>b.day.localeCompare(a.day)))for(const model of day.models)box.append(row(day.day+' / '+model.model,model));
+ }
+ for(const note of document.querySelectorAll('[data-deepseek-ledger-note]'))note.textContent=(ledger?.since?'自 '+new Date(ledger.since).toLocaleString('zh-CN')+' 起，':'')+'仅统计 bobo 实际发往官方 DeepSeek 的可观测请求；本地缓存不计调用。按 '+(ledger?.timezone||'本机时区')+' 分日。';
+ for(const detail of document.querySelectorAll('[data-deepseek-ledger-detail]'))detail.textContent=(error?'⚠ '+error+'。':'')+'未知或流中断用量不按 0 计，合计只包含已知部分；费用为 token 估算，思考 token 已含在输出中。'+(versions.length?'价格版本：'+versions.join('、')+'。':'尚无可计价记录。')+'不包含外部 dsh 历史，不用余额差推算消费，不是官方全账户账单。';
 }
 function usageCard(w){
  const card=document.createElement('div');card.className='usage-card';card.dataset.level=usageLevel(w.remainingPercent);
@@ -1619,15 +1773,17 @@ function usageSwitch(row,label,on,id){
 function renderUsage(){
  const data=usageData;
  const byId=id=>data?.providers?.find(p=>p.id===id)||null;
- const codex=byId('codex'),claude=byId('claude'),local=byId('opencode-go'),agy=byId('agy'),cursor=byId('cursor'),grok=byId('grok');
+ const codex=byId('codex'),claude=byId('claude'),local=byId('opencode-go'),agy=byId('agy'),deepseek=byId('deepseek'),cursor=byId('cursor'),grok=byId('grok');
  renderQuotaSide(data);
  $('#usageUpdated').textContent=data?.updatedAt?'更新于 '+new Date(data.updatedAt).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}):'每分钟刷新';
  usageSwitch('#rowUsageCodex','刘海胶囊可切换到此来源',codex?.enabled!==false,'codex');
  usageSwitch('#rowUsageClaude','刘海胶囊可切换到此来源',claude?.enabled!==false,'claude');
  usageSwitch('#rowUsageOpencode','刘海胶囊可切换到此来源',local?.enabled!==false,'opencode-go');
  usageSwitch('#rowUsageAgy','刘海胶囊可切换到此来源',agy?.enabled!==false,'agy');
+ usageSwitch('#rowUsageDeepseek','刘海胶囊可切换到此来源',deepseek?.enabled!==false,'deepseek');
  usageSwitch('#rowUsageCursor','刘海胶囊可切换到此来源',cursor?.enabled!==false,'cursor');
  usageSwitch('#rowUsageGrok','刘海胶囊可切换到此来源',grok?.enabled!==false,'grok');
+ renderDeepSeekBalance(deepseek);
  // 额度重置提醒：订阅窗口回到 100% 时提醒（服务端检测并走通知岛的提醒通道）。
  const resetRow=$('#rowUsageResetNotify');
  resetRow.querySelector('.switch')?.remove();
@@ -1697,6 +1853,7 @@ async function loadUsage(){
  try{
   usageData=await api('usage?refresh=1');
   renderUsage();
+  await loadAIUsage();
  }catch(e){toast(e.message);}
 }
 const usageClaudeDirect=()=>usageData?.providers.find(p=>p.id==='claude');
@@ -1709,6 +1866,7 @@ $('#usageRefresh').onclick=guard(async()=>{
   let data=await api('usage?refresh=1');
   if(data?.providers.find(p=>p.id==='claude')?.needsDirectConfirm&&claudeDirectAsk())data=await api('usage?refresh=1&direct=1');
   usageData=data;renderUsage();
+  await loadAIUsage();
   toast('已刷新额度');
  }finally{button.disabled=false;}
 });
@@ -1730,6 +1888,35 @@ $('#usageKeyClear').onclick=guard(async()=>{
  usageData=r.snapshot||await api('usage');renderUsage();
  toast(r.message);
 });
+// DeepSeek 余额专用 Key：由用户主动填写，只交给固定的官方余额接口。
+$('#usageDeepseekKeyForm').onsubmit=guard(async e=>{
+ e.preventDefault();const key=$('#usageDeepseekKey').value.trim();if(!key)return toast('请输入 DeepSeek 官方 API Key');
+ const button=$('#usageDeepseekKeySave');button.disabled=true;
+ try{const r=await api('usage/key',{id:'deepseek',key});usageData=r.snapshot||await api('usage');renderUsage();if(r.ok)$('#usageDeepseekKey').value='';toast(r.message);}
+ finally{button.disabled=false;}
+});
+$('#usageDeepseekKeyClear').onclick=guard(async()=>{const r=await api('usage/key',{id:'deepseek',clear:true});usageData=r.snapshot||await api('usage');renderUsage();toast(r.message);});
+// 刘海显示方式 / 币种 / 占比分母：只更新 usage.json 里的显示设置，服务端立即重算并推送，不重新请求余额接口。
+const deepseekView=()=>usageData?.providers?.find(p=>p.id==='deepseek')?.balanceView||{};
+async function saveDeepSeekBalance(patch){
+ const view=deepseekView();
+ try{
+  usageData=await api('usage/balance',{mode:view.mode||'balance',currency:view.currency||'CNY',denominator:view.denominator||'100.00',...patch});
+  renderUsage();
+  if(patch.denominator!==undefined){const input=$('#deepseekDenominator');if(input)input.value=deepseekView().denominator||'';}
+  toast('已更新 DeepSeek 刘海显示');
+ }catch(e){renderUsage();throw e;}
+}
+bindSeg('deepseekDisplaySegs',value=>saveDeepSeekBalance({mode:value}));
+bindSeg('deepseekCurrencySegs',value=>saveDeepSeekBalance({currency:value}));
+$('#usageDeepseekDisplayForm').onsubmit=guard(async e=>{
+ e.preventDefault();
+ const input=$('#deepseekDenominator'),value=input.value.trim();
+ if(!/^\d{1,12}(?:\.\d{1,2})?$/.test(value)||!(Number(value)>0))return toast('分母必须是大于 0 的金额，最多两位小数');
+ if(input.disabled)return;
+ await saveDeepSeekBalance({denominator:value});
+});
+$('#deepseekUsageRefresh').onclick=guard(loadAIUsage);
 // Claude Code：手动 Token 的保存 / 清除，以及显式读取 macOS 钥匙串（读一次并验证，之后 bobo 自动读、不再弹授权）。
 // 保存 Token 与读取钥匙串都会真的带一次登录请求：被直连闸门拦下时先确认，再带 direct 重试。
 async function claudeKeyAction(payload){

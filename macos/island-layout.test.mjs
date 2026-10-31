@@ -575,6 +575,11 @@ test('通知岛额度：并排显示的固定上限与自适应数量', {skip:pr
  // 固定上限同样受空间约束：窄屏上即使选了 7 家也不会越过中轴线。
  let capped = IslandBarGeometry.quotaChips(count: 8, limit: 7, screenWidth: 400, keepOut: keepOut, device: true, network: true, actionButtons: true)
  precondition(capped < 7 && capped >= 1)
+ // 余额 chip 在 32pt 刘海上放大到 30pt，外接屏 / 矮菜单栏仍回到 22pt；并排宽度补上差额。
+ precondition(IslandMetrics.balanceChipSize(barHeight: 32) == 32)
+ precondition(IslandMetrics.balanceChipSize(barHeight: 24) == 24)
+ precondition(IslandBarGeometry.contentWidths(faces: 0, hidden: 0, quota: 1, device: false, network: false, actionButtons: false, wideQuota: 32).right == 32)
+ precondition(IslandBarGeometry.contentWidths(faces: 0, hidden: 0, quota: 2, device: false, network: false, actionButtons: false, wideQuota: 32).right == 22 + 32 + 5)
 `);
 });
 

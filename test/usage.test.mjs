@@ -407,21 +407,21 @@ test('Codex：正常读取 5 小时 + 周两个窗口，selected 点击后循环
   // 写盘是异步的：等到文件里的顺序就是当前顺序（而不是更早那一次），避免和下一次切换赛跑。
   const readSettings=async()=>JSON.parse(await fs.readFile(path.join(home,'.bobo/usage.json'),'utf8'));
   const waitOrder=want=>waitFor(async()=>{const r=await readSettings();if((r.order||[]).join()!==want)throw Error('顺序还没写到 '+want);return r;});
-  const saved=await waitOrder('claude,agy,cursor,grok,codex,opencode-go');
-  assert.equal(saved.order.join(),'claude,agy,cursor,grok,codex,opencode-go','两次点击切换把前两家依次挪到了末尾');
+  const saved=await waitOrder('claude,agy,deepseek,cursor,grok,codex,opencode-go');
+  assert.equal(saved.order.join(),'claude,agy,deepseek,cursor,grok,codex,opencode-go','两次点击切换把前两家依次挪到了末尾');
   // 新进程读同一份设置：顺序被记住，折叠胶囊显示顺序里第一个可用的那家。
   usage.selectProvider('opencode-go');
-  await waitOrder('opencode-go,claude,agy,cursor,grok,codex');
+  await waitOrder('opencode-go,claude,agy,deepseek,cursor,grok,codex');
   const again=createUsage({home,now:()=>NOW,env:{},fetchImpl:async()=>fakeFetch(codexBody())});
   try{
    const s2=await again.refresh();
    assert.equal(s2.selected,'opencode-go');
-   assert.deepEqual(s2.providers.map(p=>p.id),['opencode-go','claude','agy','cursor','grok','codex'],'快照按用户排的顺序返回');
+   assert.deepEqual(s2.providers.map(p=>p.id),['opencode-go','claude','agy','deepseek','cursor','grok','codex'],'快照按用户排的顺序返回');
   }finally{await again.stop();}
   // 拖动排序（setOrder）：认不出的 id 忽略、没提到的按默认顺序补在后面；agy 不可用时显示下一个可用的。
-  assert.deepEqual(usage.setOrder(['agy','codex']).providers.map(p=>p.id),['agy','codex','claude','opencode-go','cursor','grok']);
+  assert.deepEqual(usage.setOrder(['agy','codex']).providers.map(p=>p.id),['agy','codex','claude','opencode-go','deepseek','cursor','grok']);
   assert.equal(usage.snapshot().selected,'codex','顺序里第一家不可用就显示下一家');
-  await waitOrder('agy,codex,claude,opencode-go,cursor,grok');
+  await waitOrder('agy,codex,claude,opencode-go,deepseek,cursor,grok');
   assert.equal(usage.selectProvider('不存在的来源'),usage.snapshot(),'认不出的来源不动任何状态');
  }finally{await usage.stop();await cleanup(home);}
 });

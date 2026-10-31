@@ -131,6 +131,13 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         menu.addItem(appItem)
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "关于 bobo", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        let checkUpdate = NSMenuItem(title: "检查更新…", action: #selector(checkForUpdates), keyEquivalent: "")
+        checkUpdate.target = self
+        appMenu.addItem(checkUpdate)
+        appMenu.addItem(.separator())
+        let prefs = NSMenuItem(title: "设置…", action: #selector(showSettings), keyEquivalent: ",")
+        prefs.target = self
+        appMenu.addItem(prefs)
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "退出 bobo", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
@@ -141,6 +148,20 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         }
         edit.submenu = editMenu
         menu.addItem(edit)
+        let viewItem = NSMenuItem(title: "视图", action: nil, keyEquivalent: "")
+        let viewMenu = NSMenu(title: "视图")
+        let navs: [(String, Selector, String)] = [
+            ("通知岛", #selector(showIsland), "1"),
+            ("智能体与技能", #selector(showAgents), "2"),
+            ("设备监控", #selector(showDevice), "3")
+        ]
+        for (title, action, key) in navs {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            item.target = self
+            viewMenu.addItem(item)
+        }
+        viewItem.submenu = viewMenu
+        menu.addItem(viewItem)
         // 窗口菜单提供 ⌘W，关闭窗口走 windowShouldClose 的隐藏逻辑。
         let windowItem = NSMenuItem(title: "窗口", action: nil, keyEquivalent: "")
         let windowMenu = NSMenu(title: "窗口")
@@ -159,7 +180,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     // 开关经 /api/opencode/stream 的快照同步到 applyIsland，再调用 syncStatusItem。
     private func setupStatusMenu() {
         let menu = NSMenu()
-        let state = NSMenuItem(title: "OpenCode：未连接", action: nil, keyEquivalent: "")
+        let state = NSMenuItem(title: "通知岛：未连接", action: nil, keyEquivalent: "")
         state.isEnabled = false
         menu.addItem(state)
         statusMenuStateItem = state
@@ -167,14 +188,25 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         let open = NSMenuItem(title: "打开 bobo", action: #selector(showWindow), keyEquivalent: "")
         open.target = self
         menu.addItem(open)
-        let status = NSMenuItem(title: "通知岛…", action: #selector(showOpenCodeStatus), keyEquivalent: "")
+        let status = NSMenuItem(title: "通知岛…", action: #selector(showIsland), keyEquivalent: "")
         status.target = self
         menu.addItem(status)
+        let device = NSMenuItem(title: "设备监控…", action: #selector(showDevice), keyEquivalent: "")
+        device.target = self
+        menu.addItem(device)
+        let settings = NSMenuItem(title: "设置…", action: #selector(showSettings), keyEquivalent: ",")
+        settings.target = self
+        menu.addItem(settings)
+        menu.addItem(.separator())
         let center = NSMenuItem(title: "通知岛居中", action: #selector(centerIsland), keyEquivalent: "")
         center.target = self
         menu.addItem(center)
+        let checkUpdate = NSMenuItem(title: "检查更新…", action: #selector(checkForUpdates), keyEquivalent: "")
+        checkUpdate.target = self
+        menu.addItem(checkUpdate)
         menu.addItem(.separator())
-        menu.addItem(withTitle: "退出 bobo", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
+        let quit = NSMenuItem(title: "退出 bobo", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        menu.addItem(quit)
         statusMenu = menu
     }
 
@@ -523,7 +555,8 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             quota: islandModel.quotaChipLimit,
             device: islandModel.device != nil,
             network: islandModel.network != nil,
-            actionButtons: islandModel.expanded)
+            actionButtons: islandModel.expanded,
+            wideQuota: wideQuotaWidth(for: screen))
         // 刘海屏上下同宽，列表沿用顶部内容宽度；外接屏保留原有展开宽度。
         let minWidth: CGFloat = islandModel.expanded ? min(todoStore.snapshot.enabled ? 620 : 480, screen.frame.width - IslandMetrics.screenEdgeMargin * 2) : 0
         let layout = IslandBarGeometry.layout(left: widths.left, right: widths.right, notch: notch, minWidth: minWidth)
@@ -534,12 +567,24 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         return NSSize(width: width, height: islandBarHeight(screen) + islandModel.expandedContentHeight)
     }
 
+    // 余额 chip 的额外宽度（余额模式且刘海够高时）；百分比模式与普通额度一样保持 22。
+    private func wideQuotaWidth(for screen: NSScreen) -> CGFloat {
+        let barHeight = islandBarHeight(screen), size = IslandMetrics.balanceChipSize(barHeight: barHeight)
+        guard size > IslandMetrics.itemSize else { return 0 }
+        if islandModel.expanded, islandModel.settings.quotaView == "expand" {
+            // 展开并排时宁可多留一点：余额 chip 在展示集合里就按宽的那枚算（被 limit 截掉只是浪费几 pt）。
+            return islandModel.usage?.subscriptions.contains { $0.kind == "balance" && $0.balanceMode != "percent" } == true ? size : 0
+        }
+        guard let shown = islandModel.usage?.displayed else { return 0 }
+        return shown.kind == "balance" && shown.balanceMode != "percent" ? size : 0
+    }
+
     // 顶部栏该画几枚额度圆环（写进 IslandModel.quotaChipLimit，SwiftUI 只按它渲染前几家）：
     // 折叠态与「点击切换」方式恒为当前选中的那一枚（没有窗口可画时 0 枚）；「展开并排」方式在展开时
     // 把可用来源交给 IslandBarGeometry.quotaChips 按屏幕剩余空间取数量。
     private func quotaChipLimit(for screen: NSScreen, keepOut: CGFloat) -> Int {
         guard islandModel.expanded, islandModel.settings.quotaView == "expand" else {
-            return islandModel.usage?.displayed?.session != nil ? 1 : 0
+            return islandModel.usage?.displayed?.hasQuotaIndicator == true ? 1 : 0
         }
         return IslandBarGeometry.quotaChips(
             count: islandModel.usage?.subscriptions.count ?? 0,
@@ -548,7 +593,8 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             keepOut: keepOut,
             device: islandModel.device != nil,
             network: islandModel.network != nil,
-            actionButtons: islandModel.expanded)
+            actionButtons: islandModel.expanded,
+            wideQuota: wideQuotaWidth(for: screen))
     }
 
     // 窗口包络始终以屏幕中心加拖动偏移定位；刘海屏的顶部栏在包络内独立对齐。
@@ -1146,9 +1192,10 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         let notch = notched ? notchWidth(screen) : 0
         let limit = IslandBarGeometry.avatarCapacity(screenWidth: screen.frame.width, keepOut: notch > 0 ? notch + IslandMetrics.notchGap * 2 : IslandMetrics.itemSpacing)
         let plan = IslandBarGeometry.avatars(islandModel.busy.count, cap: limit)
-        let quota = islandModel.usage?.displayed?.session != nil ? 1 : 0
+        let quota = islandModel.usage?.displayed?.hasQuotaIndicator == true ? 1 : 0
         let widths = IslandBarGeometry.contentWidths(faces: islandModel.busy.isEmpty ? 1 : plan.shown, hidden: plan.hidden, quota: quota,
-                                                     device: islandModel.device != nil, network: islandModel.network != nil, actionButtons: false)
+                                                     device: islandModel.device != nil, network: islandModel.network != nil, actionButtons: false,
+                                                     wideQuota: wideQuotaWidth(for: screen))
         let layout = IslandBarGeometry.layout(left: widths.left, right: widths.right, notch: notch)
         let barWidth = IslandBarGeometry.envelope(layout)
         return IslandBarGeometry.width(layout, minWidth: barWidth, maxWidth: screen.frame.width - IslandMetrics.screenEdgeMargin * 2)
@@ -1386,8 +1433,29 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         ))
     }
 
+    @objc private func showIsland() {
+        showIslandStatus()
+    }
+
     @objc private func showOpenCodeStatus() {
         showIslandStatus()
+    }
+
+    @objc private func showDevice() {
+        showDeviceStatus()
+    }
+
+    @objc private func showAgents() {
+        openInApp(tab: "agentsTab")
+    }
+
+    @objc private func showSettings() {
+        showSettingsStatus()
+    }
+
+    @objc private func checkForUpdates() {
+        showWindow()
+        webView.evaluateJavaScript("document.getElementById('appVersion')?.click()", completionHandler: nil)
     }
 
     // 点刘海上的设备指示：打开窗口并切到「设备」视图（和通知岛菜单同一条路径）。
@@ -1921,6 +1989,37 @@ struct IslandQuotaWindow: Decodable, Equatable {
     }
 }
 
+// 官方余额使用十进制字符串，避免金额精度损失；各币种独立展示。
+struct IslandQuotaBalance: Decodable, Equatable {
+    var currency: String
+    var total: String
+    var granted: String
+    var toppedUp: String
+}
+
+// 余额在刘海上的显示视图（服务端按 usage.json 里的设置算好）：余额模式绕排 amountText，占比模式画 percent 的圆环。
+struct IslandQuotaBalanceView: Decodable, Equatable {
+    var mode = "balance", currency = "CNY", denominator = "100.00"
+    var total: String?
+    var amountText: String?
+    var percent: Double?
+    var percentText: String?
+    private enum Keys: String, CodingKey { case mode, currency, denominator, total, amountText, percent, percentText }
+    init() {}
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Keys.self)
+        let mode = (try? container.decode(String.self, forKey: .mode)) ?? "balance"
+        self.mode = ["balance", "percent"].contains(mode) ? mode : "balance"
+        let currency = (try? container.decode(String.self, forKey: .currency)) ?? "CNY"
+        self.currency = ["CNY", "USD"].contains(currency) ? currency : "CNY"
+        denominator = (try? container.decode(String.self, forKey: .denominator)) ?? "100.00"
+        total = try? container.decodeIfPresent(String.self, forKey: .total)
+        amountText = try? container.decodeIfPresent(String.self, forKey: .amountText)
+        percent = try? container.decodeIfPresent(Double.self, forKey: .percent)
+        percentText = try? container.decodeIfPresent(String.self, forKey: .percentText)
+    }
+}
+
 // 一家额度的快照（Codex 走 chatgpt.com，Claude Code 走 api.anthropic.com，OpenCode Go 读本机数据库估算，agy 走本地语言服务 / CLI）。
 struct IslandQuotaProvider: Decodable, Equatable {
     var id = "", name = "", symbol = "", available = false, enabled = true, estimated = false, plan = ""
@@ -1929,7 +2028,10 @@ struct IslandQuotaProvider: Decodable, Equatable {
     var reason: String?
     var error: String?
     var windows: [IslandQuotaWindow] = []
-    private enum Keys: String, CodingKey { case id, name, symbol, available, enabled, estimated, plan, range, reason, error, windows }
+    var kind = "", balances: [IslandQuotaBalance] = []
+    var balanceView: IslandQuotaBalanceView?
+    var isAvailable: Bool?, lastSuccessfulAt: Double?, stale = false
+    private enum Keys: String, CodingKey { case id, name, symbol, available, enabled, estimated, plan, range, reason, error, windows, kind, balances, balanceView, isAvailable, lastSuccessfulAt, stale }
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: Keys.self)
         id = (try? container.decode(String.self, forKey: .id)) ?? ""
@@ -1943,13 +2045,28 @@ struct IslandQuotaProvider: Decodable, Equatable {
         reason = try? container.decodeIfPresent(String.self, forKey: .reason)
         error = try? container.decodeIfPresent(String.self, forKey: .error)
         windows = (try? container.decodeIfPresent([IslandQuotaWindow].self, forKey: .windows)) ?? []
+        kind = (try? container.decode(String.self, forKey: .kind)) ?? ""
+        balances = (try? container.decode([IslandQuotaBalance].self, forKey: .balances)) ?? []
+        balanceView = try? container.decodeIfPresent(IslandQuotaBalanceView.self, forKey: .balanceView)
+        isAvailable = try? container.decodeIfPresent(Bool.self, forKey: .isAvailable)
+        lastSuccessfulAt = try? container.decodeIfPresent(Double.self, forKey: .lastSuccessfulAt)
+        stale = (try? container.decode(Bool.self, forKey: .stale)) ?? false
     }
     // 折叠胶囊显示 5 小时窗口；没有就退回第一个窗口（例如只返回周窗口的套餐）。
     var session: IslandQuotaWindow? { windows.first { !$0.aside && $0.key == "session" } ?? windows.first { !$0.aside } }
     // 圆环显示的那一档窗口：记住的 range 认得出就用它，认不出（没有这一档）退回 5 小时窗口、再退回第一档。
     var displayWindow: IslandQuotaWindow? { windows.first { !$0.aside && $0.key == range } ?? session }
-    // 能参与刘海胶囊的来源：可用、在「用量」里开启、且有窗口可以画圆环（关掉的只在网页里看）。
-    var showable: Bool { available && enabled && session != nil }
+    // 余额显示状态图标与悬停金额；窗口额度保留圆环。关闭的来源只在网页里显示。
+    var showable: Bool { available && enabled && (session != nil || kind == "balance" && !balances.isEmpty) }
+    // 余额来源的显示设置：服务端已经按币种 / 分母算好；旧快照没有 balanceView 时按余额模式处理。
+    var balanceMode: String { balanceView?.mode == "percent" ? "percent" : "balance" }
+    var balancePercent: Double? { balanceView?.percent }
+    var balanceAmountText: String? { balanceView?.amountText }
+    var balanceCurrency: String { balanceView?.currency ?? balances.first?.currency ?? "CNY" }
+    var balanceSymbol: String { balanceCurrency == "USD" ? "$" : "¥" }
+    var balanceDenominator: String { balanceView?.denominator ?? "100.00" }
+    // 折叠胶囊是否有额度指示：窗口额度看窗口，余额看接口是否给出了币种余额。
+    var hasQuotaIndicator: Bool { showable }
 }
 
 // 额度总快照：刘海胶囊显示 selected 那家；「展开并排」方式在面板展开时并排显示所有可用的来源。
@@ -2161,6 +2278,9 @@ enum IslandMetrics {
     static let glyphSize: CGFloat = 19
     // 额度圆环里来源图标的尺寸（IslandQuotaChip），设置 / 退出的图形与它对齐。
     static let quotaIconSize: CGFloat = 13
+    // 余额 chip 在 22pt 里放不下能看清的数字：按刘海高度放大到 32pt（余额横排在上、图标在下），
+    // 外接屏 / 矮菜单栏退回 24pt。百分比模式继续保持 22pt，与其他额度一致。
+    static func balanceChipSize(barHeight: CGFloat) -> CGFloat { min(32, max(24, barHeight)) }
     static let actionGlyphSize: CGFloat = quotaIconSize
     static let fillIdle: Double = 0.12
     static let fillHover: Double = 0.22
@@ -2263,7 +2383,7 @@ enum IslandMetrics {
         return image
     }
     static func icon(for provider: IslandQuotaProvider) -> NSImage? {
-        icon(id: provider.id)
+        icon(id: provider.id == "deepseek" ? "dsh" : provider.id)
     }
     // 各来源（opencode / codex / omp / claude / dsh / agy）对应的来源图标 id，展开列表与折叠胶囊都用它显示 Agent 图标；
     // 都有打包好的 bobo-provider-<id>.svg（opencode 与额度来源 opencode-go 共用同一枚标记）。
@@ -2349,24 +2469,26 @@ enum IslandBarGeometry {
     // 两侧内容的宽度（不含端帽）：左侧是会话头像 + 分隔线（放不下时最后一格换成「+N」徽标，
     // 尺寸与头像脸一致），右侧是额度圆环（展开并排时可能有几枚）+ 设备 + 网络（+ 展开时的设置与退出）。
     // 间距与图标规格共用 IslandMetrics。
-    static func contentWidths(faces: Int, hidden: Int, quota: Int, device: Bool, network: Bool, actionButtons: Bool) -> (left: CGFloat, right: CGFloat) {
+    static func contentWidths(faces: Int, hidden: Int, quota: Int, device: Bool, network: Bool, actionButtons: Bool, wideQuota: CGFloat = 0) -> (left: CGFloat, right: CGFloat) {
         // 头像之间、头像与徽标 / 分隔线之间都是同一个间距；分隔线自己也占一格的宽度。
         var left = CGFloat(faces) * IslandMetrics.glyphSize + IslandMetrics.itemSpacing * CGFloat(faces) + IslandMetrics.dividerWidth
         if hidden > 0 { left += IslandMetrics.itemSpacing + IslandMetrics.glyphSize }
         let chips = max(0, quota) + (device ? 1 : 0) + (network ? 1 : 0) + (actionButtons ? 2 : 0)
         let networkInset = network ? IslandMetrics.itemSize - IslandMetrics.networkItemWidth : 0
-        return (left, CGFloat(chips) * IslandMetrics.itemSize - networkInset + IslandMetrics.itemSpacing * CGFloat(max(0, chips - 1)))
+        // 余额圆环可能比普通 22pt 更宽（见 balanceChipSize）：只在真正画着余额 chip 时补差额。
+        let wideExtra = quota > 0 ? max(0, wideQuota - IslandMetrics.itemSize) : 0
+        return (left, CGFloat(chips) * IslandMetrics.itemSize + wideExtra - networkInset + IslandMetrics.itemSpacing * CGFloat(max(0, chips - 1)))
     }
 
     // 并排显示几枚额度圆环（纯函数）：count 是可用的来源数，limit 是用户设的上限（3 / 5 / 7），0 = 自适应。
     // 自适应按屏幕剩余空间算：面板以屏幕正中（展开后的中轴线）为轴，圆环从刘海右侧往右排，中轴线到屏幕
     // 右缘的那半屏里还要给设备、网络指示、设置 / 退出按钮与端帽留位置——装不下的不显示，至少留一枚。
-    static func quotaChips(count: Int, limit: Int, screenWidth: CGFloat, keepOut: CGFloat, device: Bool, network: Bool, actionButtons: Bool) -> Int {
+    static func quotaChips(count: Int, limit: Int, screenWidth: CGFloat, keepOut: CGFloat, device: Bool, network: Bool, actionButtons: Bool, wideQuota: CGFloat = 0) -> Int {
         guard count > 0 else { return 0 }
         guard count > 1 else { return 1 }
         let space = (screenWidth - IslandMetrics.screenEdgeMargin * 2) / 2 - keepOut / 2 - IslandMetrics.barEdge
         func fits(_ shown: Int) -> Bool {
-            contentWidths(faces: 0, hidden: 0, quota: shown, device: device, network: network, actionButtons: actionButtons).right <= space
+            contentWidths(faces: 0, hidden: 0, quota: shown, device: device, network: network, actionButtons: actionButtons, wideQuota: wideQuota).right <= space
         }
         var shown = limit > 0 ? min(limit, count) : count
         while shown > 1, !fits(shown) { shown -= 1 }
@@ -2945,8 +3067,9 @@ struct IslandView: View {
                 // 点某一枚：「展开并排」切这一家的显示范围，「点击切换」切来源；并排的几枚还能按住拖动排序。
                 if model.expanded, model.settings.quotaView == "expand", let quota = model.usage {
                     ForEach(quotaRowProviders(quota), id: \.id) { provider in
-                        if let window = provider.displayWindow {
-                            IslandQuotaChip(provider: provider, window: window,
+                        if provider.showable {
+                            IslandQuotaChip(provider: provider, window: provider.displayWindow,
+                                            barHeight: model.barHeight,
                                             selected: provider.id == quota.displayed?.id,
                                             onHover: quotaHover(provider.id))
                                 .contentShape(Circle())
@@ -2956,9 +3079,10 @@ struct IslandView: View {
                                 .opacity(quotaDragId == provider.id ? 0.6 : 1)
                         }
                     }
-                } else if let provider = model.usage?.displayed, let window = provider.displayWindow {
+                } else if let provider = model.usage?.displayed, provider.showable {
                     // 「点击切换」方式点圆环切换来源；「展开并排」的折叠态点圆环换这一家的显示范围（展开看全部）。
-                    IslandQuotaChip(provider: provider, window: window,
+                    IslandQuotaChip(provider: provider, window: provider.displayWindow,
+                                    barHeight: model.barHeight,
                                     onHover: quotaHover(provider.id))
                         .contentShape(Circle())
                         .onTapGesture {
@@ -3689,32 +3813,98 @@ struct IslandSignalBars: View {
     }
 }
 
-// 折叠胶囊的额度指示：一枚圆环（底圈 + 剩余比例圆弧），环里是来源图标（模板图，白色）。
-// 不再显示百分比文字——数字放进悬停半秒后弹出的明细卡里，宽度因此恒为一枚图标（见 Bobo.islandSize）。
-// 「展开并排」方式下会并排出现几枚：只有当前选中的那家带底色（收起后留在胶囊上的就是它）。
-// 这里只画圆环：点击（切换来源 / 显示范围）与按住拖动排序由 IslandView 在调用处加手势。
+// 余额来源的折叠指示：余额模式是一枚加大的圆形 chip——余额横排在图标上方、图标居中偏下（13pt，
+// 与其它额度 / 来源图标同宽）；占比模式仍是 22pt 圆环，与其他额度同一套阈值与颜色。
+// 「展开并排」方式下会并排出现几枚：只有当前选中的那家带底色。
+// 这里只画指示：点击（切换来源 / 显示范围）与按住拖动排序由 IslandView 在调用处加手势。
 struct IslandQuotaChip: View {
     let provider: IslandQuotaProvider
-    let window: IslandQuotaWindow
+    let window: IslandQuotaWindow?
+    var barHeight: CGFloat = 22
     var selected = true
     var onHover: ((Bool, IslandHoverRegion) -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
-    // 剩余越少越显眼：绿 / 橙 / 红，与网页「用量」里的进度条同一套阈值。
-    private var color: Color { IslandMetrics.remainingColor(window.remainingPercent) }
-
-    // 圆环：底圈 + 剩余比例圆弧，来源图标放在环里。
-    // 环的外圈正好是 22pt（= 胶囊高度）：胶囊的左端帽就是这个圆，不留额外灰边。
-    private var ring: some View {
-        ZStack {
-            Circle().inset(by: 1).stroke(.white.opacity(0.22), lineWidth: 2)
-            Circle().inset(by: 1).trim(from: 0, to: max(0.03, min(1, window.remainingPercent / 100)))
-                .stroke(color, style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-            providerIcon.frame(width: IslandMetrics.quotaIconSize, height: IslandMetrics.quotaIconSize).foregroundStyle(.white.opacity(0.92))
+    private var wideBalance: Bool { provider.kind == "balance" && provider.balanceMode != "percent" }
+    // 余额模式按刘海高度放大到 32pt（见 IslandMetrics.balanceChipSize）；占比模式与普通额度一致。
+    private var chipSize: CGFloat { wideBalance ? IslandMetrics.balanceChipSize(barHeight: barHeight) : IslandMetrics.itemSize }
+    // 图标保持 13pt，与其它额度 / 来源图标同宽；矮菜单栏时按比例缩一点。
+    private var chipIconSize: CGFloat { wideBalance ? min(IslandMetrics.quotaIconSize, chipSize * 0.42) : IslandMetrics.quotaIconSize }
+    private var amountText: String {
+        let text = provider.balanceAmountText ?? ""
+        return text.isEmpty ? "—" : text
+    }
+    // 数字横排，字号按位数分档：4 位约 13pt，6 位约 10.5pt，8 位约 8.8pt（都随 chip 大小缩放）。
+    private var amountFontSize: CGFloat {
+        let base: CGFloat
+        switch amountText.count {
+        case ...4: base = 13
+        case 5: base = 11.5
+        case 6: base = 10.5
+        case 7: base = 9.6
+        case 8: base = 8.8
+        default: base = 8.2
         }
-        .frame(width: IslandMetrics.itemSize, height: IslandMetrics.itemSize)
+        return base * chipSize / 32
+    }
+
+    // 余额只在占比模式画圆环；余额模式用上方的大号数字，不占圆环。
+    private var progress: Double? {
+        if let window { return window.remainingPercent }
+        if provider.kind == "balance", provider.balanceMode == "percent" { return provider.balancePercent }
+        return nil
+    }
+    // 圆环颜色看「剩余占比」：余额占比模式与窗口额度一样按剩余比例分档。
+    private var color: Color {
+        if provider.kind == "balance" {
+            if provider.stale { return IslandMetrics.warnHue }
+            if provider.isAvailable == false { return IslandMetrics.criticalHue }
+            if let progress { return IslandMetrics.remainingColor(progress) }
+            return IslandMetrics.healthyHue
+        }
+        return window.map { IslandMetrics.remainingColor($0.remainingPercent) } ?? IslandMetrics.healthyHue
+    }
+    // 余额数字的颜色只表达可用状态（沿用原来绿点的含义），不让低保额把数字压成难读的红色；
+    // 低余额的颜色提醒留给占比模式的圆环与明细卡。
+    private var labelColor: Color {
+        if provider.stale { return IslandMetrics.warnHue }
+        if provider.isAvailable == false { return IslandMetrics.criticalHue }
+        return IslandMetrics.healthyHue
+    }
+    private var showsDot: Bool { progress == nil && !wideBalance }
+
+    private var content: some View {
+        ZStack {
+            if let progress {
+                Circle().inset(by: 1).stroke(.white.opacity(0.22), lineWidth: 2)
+                Circle().inset(by: 1).trim(from: 0, to: max(0.03, min(1, progress / 100)))
+                    .stroke(color, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+            }
+            if wideBalance {
+                VStack(spacing: 0) {
+                    Text(amountText)
+                        .font(.system(size: amountFontSize, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.55)
+                        .foregroundStyle(labelColor)
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 1)
+                    providerIcon.frame(width: chipIconSize, height: chipIconSize)
+                        .foregroundStyle(.white.opacity(0.92))
+                }
+                .frame(width: chipSize, height: chipSize)
+            } else {
+                providerIcon.frame(width: IslandMetrics.quotaIconSize, height: IslandMetrics.quotaIconSize)
+                    .foregroundStyle(.white.opacity(0.92))
+                if showsDot {
+                    Circle().fill(color).frame(width: 5, height: 5).offset(x: 7, y: 7)
+                }
+            }
+        }
+        .frame(width: chipSize, height: chipSize)
     }
 
     @ViewBuilder private var providerIcon: some View {
@@ -3728,12 +3918,23 @@ struct IslandQuotaChip: View {
     }
 
     var body: some View {
-        ring
-            .frame(height: IslandMetrics.itemSize)
+        content
+            .frame(height: chipSize)
             .background(Capsule().fill(.white.opacity(hovering ? IslandMetrics.fillHover : (selected ? IslandMetrics.fillIdle : 0))))
             .contentShape(Capsule())
             .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovering)
             .background(DetailHoverReporter { hovering = $0; onHover?($0, $1) })
+            .accessibilityLabel(accessibilityText)
+    }
+
+    private var accessibilityText: String {
+        if provider.kind == "balance" {
+            let amount = provider.balanceAmountText ?? "—"
+            let mode = provider.balanceMode == "percent" ? "，占比 \(provider.balanceView?.percentText ?? "—")%" : ""
+            return "\(provider.name) 余额 \(provider.balanceSymbol)\(amount)\(mode)"
+        }
+        if let window { return "\(provider.name) 剩余 \(Int(window.remainingPercent.rounded()))%" }
+        return provider.name
     }
 }
 
@@ -3975,7 +4176,30 @@ private struct IslandQuotaProviderBlock: View {
                 if provider.estimated { IslandBadge(text: "本机估算") }
                 Spacer(minLength: 0)
             }
-            if provider.windows.isEmpty {
+            if provider.kind == "balance" {
+                ForEach(provider.balances, id: \.currency) { balance in
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack {
+                            Text(balance.currency + " 余额").font(.system(size: 10.5)).foregroundStyle(.white.opacity(0.55))
+                            if balance.currency == provider.balanceCurrency { IslandBadge(text: "刘海") }
+                            Spacer(minLength: 0)
+                            Text(balance.total).font(.system(size: 12, weight: .semibold)).monospacedDigit().foregroundStyle(.white)
+                        }
+                        Text("赠送 " + balance.granted + " · 充值 " + balance.toppedUp).font(.system(size: 10)).monospacedDigit().foregroundStyle(.white.opacity(0.5))
+                    }
+                }
+                Text(provider.isAvailable == true ? "官方状态：余额可用" : provider.isAvailable == false ? "官方状态：余额不足" : "官方可用状态未知").font(.system(size: 10)).foregroundStyle(.white.opacity(0.5))
+                if let view = provider.balanceView {
+                    Text(view.mode == "percent"
+                         ? "刘海：占比 \(view.percentText ?? "—")%（分母 \(provider.balanceSymbol)\(provider.balanceDenominator)）"
+                         : "刘海：余额 \(provider.balanceSymbol)\(view.amountText ?? "—")（上方外圈两位小数）")
+                        .font(.system(size: 10)).foregroundStyle(.white.opacity(0.48))
+                }
+                if let at = provider.lastSuccessfulAt {
+                    Text("最近成功：" + Date(timeIntervalSince1970: at / 1000).formatted(date: .abbreviated, time: .shortened)).font(.system(size: 10)).foregroundStyle(.white.opacity(0.45))
+                }
+                if provider.stale { IslandBadge(text: "已过期 · 上次余额") }
+            } else if provider.windows.isEmpty {
                 Text("没有返回额度窗口").font(.system(size: 10.5)).foregroundStyle(.white.opacity(0.45))
             }
             ForEach(provider.windows, id: \.key) { IslandQuotaWindowRow(window: $0, onRing: $0.key == provider.displayWindow?.key) }

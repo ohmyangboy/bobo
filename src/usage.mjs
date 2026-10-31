@@ -21,12 +21,15 @@ export const providers=[
  {id:'claude',name:'Claude Code',symbol:'sparkles'},
  {id:'opencode-go',name:'OpenCode Go',symbol:'terminal'},
  {id:'agy',name:'Antigravity',symbol:'sparkles'},
+ {id:'deepseek',name:'DeepSeek',symbol:'sparkles'},
  {id:'cursor',name:'Cursor',symbol:'cursorarrow'},
  {id:'grok',name:'Grok Bot',symbol:'sparkles'},
 ];
+export const keyProviders=Object.freeze(['opencode-go','claude','deepseek']);
 const codexUsageURL='https://chatgpt.com/backend-api/wham/usage';
 const opencodeUsageURL='https://opencode.ai/zen/go/v1/usage';
 const claudeUsageURL='https://api.anthropic.com/api/oauth/usage';
+const deepseekBalanceURL='https://api.deepseek.com/user/balance';
 const cursorUsageURL='https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage';
 const grokUsageURL='https://cursor.com/api/dashboard/get-sand-usage-status';
 // 用量接口对认不出的客户端限流更凶，User-Agent 要像 Claude Code 自己（CodexBar 同样固定成 claude-code/<版本>；
@@ -64,6 +67,55 @@ const userError=message=>Object.assign(Error(message),{userFacing:true});
 const describe=(e,prefix)=>e?.userFacing?e.message:prefix+(e?.message||e);
 // 手动粘贴的 Token 常带引号或 "Bearer " 前缀：先清掉再验证 / 保存。
 const cleanToken=v=>String(v||'').trim().replace(/^["']|["']$/g,'').replace(/^Bearer\s+/i,'').trim();
+// 余额来源的刘海显示：余额模式在图标上方外圈绕排两位小数；占比模式按「余额 ÷ 分母」画百分比圆环。
+// 默认人民币与 100 元分母，接口没返回所选币种时自动退回第一个可用币种。
+const balanceModes=Object.freeze(['balance','percent']),balanceCurrencies=Object.freeze(['CNY','USD']);
+export const defaultBalanceDisplay=()=>({mode:'balance',currency:'CNY',denominator:'100.00'});
+// 十进制金额保留固定小数位：用字符串 + BigInt 做四舍五入，避免先转浮点数丢精度（DeepSeek 会返回 18 位小数）。
+export function formatDecimal(value,digits=2){
+ if(typeof value!=='string'||!/^-?\d+(?:\.\d+)?$/.test(value))return null;
+ const negative=value.startsWith('-'),body=negative?value.slice(1):value;
+ const [whole,fraction='']=body.split('.');
+ const padded=fraction.padEnd(digits+1,'0');
+ const keep=padded.slice(0,digits),next=padded[digits]||'0';
+ let amount=BigInt(whole+keep);
+ if(next>='5')amount+=1n;
+ let text=amount.toString().padStart(digits+1,'0');
+ if(digits>0){
+  const cut=text.length-digits;
+  text=text.slice(0,cut)+'.'+text.slice(cut);
+ }
+ return negative&&amount!==0n?'-'+text:text;
+}
+// 分母只接受大于 0 的金额，最多 12 位整数与 2 位小数；保存前统一成两位小数的十进制字符串。
+const cleanDenominator=value=>{
+ const text=typeof value==='number'&&Number.isFinite(value)?String(value):typeof value==='string'?value.trim():'';
+ if(!/^\d{1,12}(?:\.\d{1,2})?$/.test(text))return null;
+ const amount=Number(text);
+ if(!(amount>0)||amount>1e12)return null;
+ return formatDecimal(text,2);
+};
+export function normalizeBalanceDisplay(raw,fallback=defaultBalanceDisplay()){
+ const next={...fallback};
+ if(raw&&typeof raw==='object'){
+  if(balanceModes.includes(raw.mode))next.mode=raw.mode;
+  if(balanceCurrencies.includes(raw.currency))next.currency=raw.currency;
+  const denominator=cleanDenominator(raw.denominator);
+  if(denominator)next.denominator=denominator;
+ }
+ return next;
+}
+const balancePercent=(total,denominator)=>{
+ const value=Number(total)/Number(denominator)*100;
+ return Number.isFinite(value)?Math.round(Math.max(0,Math.min(100,value))*100)/100:null;
+};
+// 给一家余额来源算出刘海实际使用的视图：金额按两位小数格式化，占比是「剩余额度」百分比（与其它额度圆环同向）。
+function balanceViewFor(snapshot,display){
+ const list=Array.isArray(snapshot?.balances)?snapshot.balances:[],picked=list.find(b=>b.currency===display.currency)||list[0]||null;
+ const total=picked?.total??null,percent=total===null?null:balancePercent(total,display.denominator);
+ return {mode:display.mode,currency:picked?.currency||display.currency,denominator:display.denominator,total,amountText:total===null?null:formatDecimal(total,2),percent,percentText:percent===null?null:formatDecimal(String(percent),2)};
+}
+export const balanceCurrencySymbol=currency=>currency==='USD'?'$':'¥';
 // Node 22 的 fetch 不读取 macOS 系统代理；桌面应用从 Finder 启动时通常也没有 HTTPS_PROXY。
 export function macHTTPSProxy(output){
  if(!/\bHTTPSEnable\s*:\s*1\b/.test(output))return '';
@@ -248,6 +300,18 @@ export function claudeSnapshot(body,nowMs){
  return {id:'claude',name:'Claude Code',symbol:'sparkles',available:true,estimated:false,source:'api',keySource:'',keyHint:'',plan:'',credits:null,windows,error:null,updatedAt:nowMs};
 }
 
+// 官方金额保持十进制字符串；不转浮点数、不混合币种，也不从余额倒推消耗或累计充值。
+export function deepseekSnapshot(body,nowMs){
+ if(typeof body?.is_available!=='boolean'||!Array.isArray(body.balance_infos)||!body.balance_infos.length)throw userError('DeepSeek 余额接口没有返回有效余额');
+ const seen=new Set(),decimal=value=>typeof value==='string'&&/^-?\d+(?:\.\d+)?$/.test(value)&&value.length<=200;
+ const balances=body.balance_infos.map(row=>{
+  if(!row||!['CNY','USD'].includes(row.currency)||seen.has(row.currency)||![row.total_balance,row.granted_balance,row.topped_up_balance].every(decimal))throw userError('DeepSeek 余额接口的币种或金额格式无效');
+  seen.add(row.currency);
+  return {currency:row.currency,total:row.total_balance,granted:row.granted_balance,toppedUp:row.topped_up_balance};
+ });
+ return {id:'deepseek',name:'DeepSeek',symbol:'sparkles',kind:'balance',available:true,estimated:false,source:'api',keySource:'manual',keyHint:'',plan:'',credits:null,windows:[],balances,isAvailable:body.is_available,lastSuccessfulAt:nowMs,stale:false,error:null,updatedAt:nowMs};
+}
+
 // 订阅窗口：Cursor Total 是补充明细（aside），不参与圆环范围切换。
 function subscriptionWindow(key,label,used,resetsAt,nowMs,aside=false){
  if(typeof used!=='number'||!Number.isFinite(used))throw userError('额度接口返回的百分比无效');
@@ -320,7 +384,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
  // 各来源的启停、手动填的 API Key、额度重置提醒、各来源圆环显示哪一档窗口（ranges，见 cycleRange）；
  // keychain 记「用户允许读过 macOS 钥匙串里的 Claude Code 登录」，没答应过就一次都不读（见 claudeAuth）；
  // claudeDirect 记「直连时也请求」（默认关：没走 VPN / 代理就整个跳过，见 claudeGate）。
- const settings={keys:{},enabled:{},ranges:{},notifyReset:true,keychain:false,claudeDirect:false};
+ const settings={keys:{},keyTargets:{},enabled:{},ranges:{},balance:defaultBalanceDisplay(),notifyReset:true,keychain:false,claudeDirect:false};
  const isEnabled=id=>settings.enabled[id]!==false;
  // 顺序规范化：只认已知来源、去掉重复，没提到的按默认顺序补在后面。
  function normalizeOrder(ids){
@@ -352,6 +416,9 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
    if(typeof raw?.notifyReset==='boolean')settings.notifyReset=raw.notifyReset;
    if(typeof raw?.keychain==='boolean')settings.keychain=raw.keychain;
    if(typeof raw?.claudeDirect==='boolean')settings.claudeDirect=raw.claudeDirect;
+   settings.balance=normalizeBalanceDisplay(raw?.balance);
+   // 老版本允许任意 id 保存 Key，只有显式在新接口验证过的目标绑定才能后台使用。
+   if(raw?.keyTargets?.deepseek===deepseekBalanceURL)settings.keyTargets.deepseek=deepseekBalanceURL;else delete settings.keyTargets.deepseek;
    for(const p of providers){
     if(typeof raw?.enabled?.[p.id]==='boolean')settings.enabled[p.id]=raw.enabled[p.id];
     const range=raw?.ranges?.[p.id];
@@ -364,7 +431,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
  // 串行写盘（原子改名，避免半截 JSON）：连点切换时最后一次调用写入的就是当前顺序。
  let saving=Promise.resolve();
  function saveSettings(){
-  saving=saving.then(async()=>{try{await fs.mkdir(dataDir,{recursive:true});await fs.writeFile(settingsFile+'.tmp',JSON.stringify({order,enabled:settings.enabled,keys:settings.keys,ranges:settings.ranges,notifyReset:settings.notifyReset,keychain:settings.keychain,claudeDirect:settings.claudeDirect},{},1),{mode:0o600});await fs.rename(settingsFile+'.tmp',settingsFile);}catch{}});
+  saving=saving.then(async()=>{try{await fs.mkdir(dataDir,{recursive:true});await fs.writeFile(settingsFile+'.tmp',JSON.stringify({order,enabled:settings.enabled,keys:settings.keys,keyTargets:settings.keyTargets,ranges:settings.ranges,balance:settings.balance,notifyReset:settings.notifyReset,keychain:settings.keychain,claudeDirect:settings.claudeDirect},{},1),{mode:0o600});await fs.chmod(settingsFile+'.tmp',0o600);await fs.rename(settingsFile+'.tmp',settingsFile);return true;}catch{return false;}});
   return saving;
  }
 
@@ -471,6 +538,22 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
    }
   }
   return localSnapshot(list||[],nowMs,false,rowsError||null,'','');
+ }
+
+ // ---- DeepSeek：仅显式填写的官方 Key，不读取 AI 设置、环境变量或其它服务的凭据。 ----
+ async function readDeepSeek(nowMs,key=settings.keyTargets.deepseek===deepseekBalanceURL?settings.keys.deepseek:''){
+  if(!key)throw userError('请填写 DeepSeek 官方 API Key；不会自动读取或复制 AI 设置里的密钥');
+  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),codexTimeoutMs);
+  try{
+   // 目标固定且禁止重定向，代理商 Key 应留在它自己的 AI 接口配置中。
+   const response=await fetchImpl(deepseekBalanceURL,{headers:{authorization:'Bearer '+key,accept:'application/json','user-agent':'bobo'},redirect:'error',signal:controller.signal});
+   if(response.status===401||response.status===403)throw userError('DeepSeek 官方余额接口拒绝了当前 Key，请检查是否为官方 Key 及其权限');
+   if(response.status===429)throw userError('DeepSeek 官方余额接口请求受限，稍后会自动重试');
+   if(!response.ok)throw userError('DeepSeek 官方余额接口返回 '+response.status);
+   let body;try{body=await response.json();}catch{throw userError('DeepSeek 官方余额接口返回的不是 JSON');}
+   return deepseekSnapshot(body,nowMs);
+  }catch(e){if(e?.userFacing)throw e;throw userError('无法连接 DeepSeek 官方余额接口，请检查网络后重试');}
+  finally{clearTimeout(timeout);}
  }
 
  // ---- Cursor / Grok Bot：每轮共用一次只读登录，不刷新或回写任何凭据。 ----
@@ -725,10 +808,13 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   async function readAgyCLI(){
    const bin=await resolveAgyBinary();
    if(!bin)throw userError('未检测到 agy CLI');
-   return new Promise((resolve,reject)=>{
+   // execFile 的 timeout 只管住直接子进程：agy 若派生了孙进程并继承 stdout / stderr，
+   // 管道不关，回调可能永远不来，整个 Promise.all 就把用量刷新一起拖住。这里再压一层硬超时。
+   let child=null,hardTimer=null;
+   const task=new Promise((resolve,reject)=>{
     const childEnv={...process.env,...env};
     if(!childEnv.PATH)childEnv.PATH='/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin';
-    execFileImpl(bin,['-p','/usage','--output-format','json','--print-timeout','20s'],{
+    child=execFileImpl(bin,['-p','/usage','--output-format','json','--print-timeout','20s'],{
      timeout:25000,
      env:childEnv,
      maxBuffer:2*1024*1024
@@ -752,6 +838,15 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
      }
     });
    });
+   const timeout=new Promise((_,reject)=>{
+    hardTimer=setTimeout(()=>{
+     try{child?.kill?.('SIGKILL');}catch{}
+     reject(userError('获取 Antigravity 配额超时（agy CLI 无响应）'));
+    },30000);
+    hardTimer.unref?.();
+   });
+   try{return await Promise.race([task,timeout]);}
+   finally{if(hardTimer)clearTimeout(hardTimer);}
   }
 
   async function readAgyServer(address,csrfToken){
@@ -803,7 +898,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
 
  // ---- 刷新与推送 ----
  // 只在「有效数据」变化时推送：倒计时（resetInSec/resetsAt/updatedAt）每分钟都会变，不参与比较。
- const signatureOf=s=>JSON.stringify([s.selected,s.providers.map(p=>[p.id,p.available,p.enabled,p.range,p.keySource,p.keyHint,p.reason,p.error,p.plan,p.needsDirectConfirm,p.windows.map(w=>[w.key,w.usedPercent,w.usedUSD,w.status]),p.daily,p.models,p.totals,p.credits])]);
+ const signatureOf=s=>JSON.stringify([s.selected,s.providers.map(p=>[p.id,p.available,p.enabled,p.range,p.keySource,p.keyHint,p.reason,p.error,p.plan,p.needsDirectConfirm,p.windows.map(w=>[w.key,w.usedPercent,w.usedUSD,w.status]),p.daily,p.models,p.totals,p.credits,p.balances,p.isAvailable,p.lastSuccessfulAt,p.stale,p.balanceView])]);
  // 额度重置提醒：订阅窗口从「用过」（剩余 < 100%）回到 100% 时提醒一次（5 小时窗口用满后恢复、
  // 周窗口刷新都算）。只在前后两次都是有效读数时比较：服务刚启动、上一次不可用、这次降级都不报。
  // 开关在「用量 → Codex」里（settings.notifyReset），实际投递走通知岛的统一提醒通道（notify）。
@@ -824,16 +919,27 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
  }
  // claudeDirect 表示这一轮是用户在界面上确认过「按直连请求一次」：Claude 跳过网络闸门，
  // 并且不受 60 秒硬下限拦住（否则确认完还拿的是刚才被跳过的那份）。
+ // 等当前这一轮读取收尾：手动换 Key / 清除 Key 前要先让可能正在进行的刷新结束，
+ // 否则 refresh() 会直接复用那份旧读数的 Promise，把刚保存的新 Key 冲掉。
+ async function settleReading(){
+  while(reading){
+   const current=reading;
+   await current.catch(()=>{});
+   if(reading===current)break;
+  }
+ }
  async function refresh(force=false,{claudeDirect=false}={}){
   if(closed)return state;
   if(reading)return reading;
   reading=(async()=>{
    const nowMs=now();
+   // 显示设置 / 顺序等写入是异步的：先等落盘，避免紧接着的刷新读到旧设置。
+   await saving;
    await loadSettings();
    cursorAuthReading=null;
    const results=await Promise.all(providers.map(async p=>{
     const id=p.id,cached=cache.get(id);
-    const stamp=snapshot=>{snapshot.enabled=isEnabled(id);snapshot.range=rangeFor(id,snapshot.windows);return snapshot;};
+    const stamp=snapshot=>{snapshot.enabled=isEnabled(id);snapshot.range=rangeFor(id,snapshot.windows);if(id==='deepseek'){snapshot.stale=!!snapshot.lastSuccessfulAt&&(!!snapshot.error||nowMs-snapshot.lastSuccessfulAt>=netIntervalMs);snapshot.balanceView=balanceViewFor(snapshot,settings.balance);}return snapshot;};
     // 关闭的来源不再读数据库 / 发起网络请求；重新打开时由 setEnabled 触发一次强制刷新。
     if(!isEnabled(id)&&!force){
      if(cached)return stamp(cached.snapshot);
@@ -842,10 +948,10 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
     if(cached&&nowMs<cached.hardNextAt&&!(claudeDirect&&id==='claude'))return stamp(cached.snapshot);
     if(cached&&!force&&nowMs<cached.nextAt)return stamp(cached.snapshot);
     let snapshot;
-    try{snapshot=id==='codex'?await readCodex(nowMs):id==='claude'?await readClaude(nowMs,{direct:claudeDirect}):id==='agy'?await readAgy(nowMs):id==='cursor'?await readCursor(nowMs):id==='grok'?await readGrok(nowMs):await readOpenCodeGo(nowMs);}
+    try{snapshot=id==='codex'?await readCodex(nowMs):id==='claude'?await readClaude(nowMs,{direct:claudeDirect}):id==='agy'?await readAgy(nowMs):id==='deepseek'?await readDeepSeek(nowMs):id==='cursor'?await readCursor(nowMs):id==='grok'?await readGrok(nowMs):id==='opencode-go'?await readOpenCodeGo(nowMs):null;}
     catch(e){
      const reason=describe(e,'读取用量失败：');
-     const base=cached?.snapshot.available?{...cached.snapshot,error:reason}:{...p,available:false,reason,error:null,windows:[],keySource:'',keyHint:''};
+     const base=cached?.snapshot.available?{...cached.snapshot,error:reason}:{...p,available:false,reason,error:null,windows:[],keySource:id==='deepseek'&&settings.keyTargets.deepseek===deepseekBalanceURL&&settings.keys.deepseek?'manual':'',keyHint:'',...(id==='deepseek'?{kind:'balance',balances:[],isAvailable:null,lastSuccessfulAt:null,stale:false,source:'api'}:{})};
      snapshot={...base,...(['cursor','grok'].includes(id)?{source:'api',estimated:false}:{}),needsDirectConfirm:e?.needsDirectConfirm===true,updatedAt:nowMs};
     }
     if(snapshot.error===undefined)snapshot.error=null;
@@ -854,7 +960,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
     // 免得每分钟白试一次打不通的接口；手动强制刷新不受退避限制（网络类最多 60 秒试一次）。
     const api=snapshot.source==='api';
     const degraded=!api&&!!snapshot.error&&!!snapshot.keySource;
-    const failed=snapshot.available!==true||degraded||(['cursor','grok'].includes(id)&&!!snapshot.error);
+    const failed=snapshot.available!==true||degraded||(['deepseek','cursor','grok'].includes(id)&&!!snapshot.error);
     let nextAt;
     if(failed){
      const attempts=(backoff.get(id)||0)+1;
@@ -935,6 +1041,29 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   signature=signatureOf(state);emit();
   return state;
  }
+ // 余额来源的刘海显示方式：{mode:'balance'|'percent', currency:'CNY'|'USD', denominator:'100.00'}。
+ // 只改显示、不重新联网；当前快照里已经有余额，立即按新设置重算并推送（网页与刘海同时更新）。
+ function setBalanceDisplay(input={}){
+  const next={...settings.balance};
+  if(input.mode!==undefined){
+   if(!balanceModes.includes(input.mode))throw Object.assign(userError('刘海显示方式无效'),{status:400});
+   next.mode=input.mode;
+  }
+  if(input.currency!==undefined){
+   if(!balanceCurrencies.includes(input.currency))throw Object.assign(userError('显示币种无效'),{status:400});
+   next.currency=input.currency;
+  }
+  if(input.denominator!==undefined){
+   const denominator=cleanDenominator(input.denominator);
+   if(!denominator)throw Object.assign(userError('占比分母必须是大于 0 的金额，最多两位小数'),{status:400});
+   next.denominator=denominator;
+  }
+  settings.balance=next;
+  void saveSettings();
+  state={...state,providers:state.providers.map(p=>p.id==='deepseek'?{...p,balanceView:balanceViewFor(p,next)}:p)};
+  signature=signatureOf(state);emit();
+  return state;
+ }
  // 额度重置提醒的开关（订阅窗口回到 100% 时提醒一次）。
  function setNotifyReset(enabled){
   settings.notifyReset=enabled!==false;
@@ -945,23 +1074,42 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
  }
  // 手动填写的 Token / API Key：先拿它调一次官方接口验证，通过才保存（文件权限 0600）。
  async function setKey(id,raw,{direct=false}={}){
+  if(!keyProviders.includes(id))return {ok:false,message:'不支持为该额度来源设置密钥'};
+  await saving;await settleReading();await loadSettings();
   const key=cleanToken(raw);
+  if(key.length>8192||/[\r\n]/.test(key))return {ok:false,message:'API Key 格式无效'};
   if(!key)return {ok:false,message:id==='claude'?'请输入 OAuth Token':'请输入 API Key'};
   try{
    // 验证用的就是真接口，拿到的那份直接当缓存，别再打一次网络（Claude 的请求要省着发）。
-   const snap=id==='claude'?await readClaude(now(),{accessToken:key,keySource:'manual',direct}):null;
+   const snap=id==='claude'?await readClaude(now(),{accessToken:key,keySource:'manual',direct}):id==='deepseek'?await readDeepSeek(now(),key):null;
    const windows=snap?snap.windows:await readAPI(key,now());
+   const previousKey=settings.keys[id],previousTarget=settings.keyTargets[id];
    settings.keys[id]=key;
-   await saveSettings();
+   if(id==='deepseek')settings.keyTargets.deepseek=deepseekBalanceURL;
+   if(!await saveSettings()){
+    if(previousKey===undefined)delete settings.keys[id];else settings.keys[id]=previousKey;
+    if(previousTarget===undefined)delete settings.keyTargets[id];else settings.keyTargets[id]=previousTarget;
+    throw userError('密钥已验证，但配置保存失败，请检查本机文件权限后重试');
+   }
    if(snap)cache.set(id,{snapshot:snap,nextAt:now()+netIntervalMs,hardNextAt:now()+netHardMinMs});else cache.delete(id);
+   await settleReading();
    await refresh();
-   return {ok:true,message:'已保存并验证：'+windows.map(w=>w.label+' 剩 '+Math.round(w.remainingPercent)+'%').join('、'),snapshot:state};
+   return {ok:true,message:id==='deepseek'?'已保存并验证 DeepSeek 官方余额（按币种分别显示）':'已保存并验证：'+windows.map(w=>w.label+' 剩 '+Math.round(w.remainingPercent)+'%').join('、'),snapshot:state};
   }catch(e){return {ok:false,needsDirectConfirm:e?.needsDirectConfirm===true,message:e?.userFacing?e.message:'验证失败：'+(e?.message||e)};}
  }
  async function clearKey(id){
+  if(!keyProviders.includes(id))throw Object.assign(userError('不支持为该额度来源清除密钥'),{status:400});
+  await saving;await settleReading();await loadSettings();
+  const previousKey=settings.keys[id],previousTarget=settings.keyTargets[id];
   delete settings.keys[id];
-  await saveSettings();
+  delete settings.keyTargets[id];
+  if(!await saveSettings()){
+   if(previousKey!==undefined)settings.keys[id]=previousKey;
+   if(previousTarget!==undefined)settings.keyTargets[id]=previousTarget;
+   throw userError('密钥配置清除失败，请检查本机文件权限后重试');
+  }
   cache.delete(id);
+  await settleReading();
   await refresh(true);
   return state;
  }
@@ -976,6 +1124,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
    settings.keychain=true;
    await saveSettings();
    cache.set('claude',{snapshot:snap,nextAt:now()+netIntervalMs,hardNextAt:now()+netHardMinMs});
+   await settleReading();
    await refresh();
    return {ok:true,message:'已读取钥匙串里的 Claude Code 登录：'+snap.windows.map(w=>w.label+' 剩 '+Math.round(w.remainingPercent)+'%').join('、'),snapshot:state};
   }catch(e){return {ok:false,needsDirectConfirm:e?.needsDirectConfirm===true,message:e?.userFacing?e.message:'验证失败：'+(e?.message||e)};}
@@ -996,6 +1145,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   setOrder,
   cycleRange,
   setEnabled,
+  setBalanceDisplay,
   setNotifyReset,
   setKey,
   clearKey,
