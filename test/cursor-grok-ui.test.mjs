@@ -62,7 +62,9 @@ test('额度 UI：Cursor / Grok 分栏可导航，窗口与补充明细按真实
  await p.nodes['#rowUsageCursor'].querySelector('.switch').change(false);assert.equal(p.calls[1].body.id,'cursor');
  p.run('showIslandPane("quota-grok")');assert.equal(p.panes[1].hidden,false);
 });
-test('额度 UI：来源图标与侧栏按快照顺序排列，失败原因和上次数据同时可见',()=>{
+test('额度 UI：来源图标与侧栏按快照顺序排列，失败原因和上次数据同时可见',async()=>{
+ const png=await fs.readFile(new URL('../public/provider-grok.png',import.meta.url));
+ assert.equal(png.subarray(0,8).toString('hex'),'89504e470d0a1a0a','Grok Bot 头像必须是实际 PNG 资源');
  const rows=snapshots();rows[0].error='网络拒绝';rows[1]={...rows[1],available:false,reason:'请运行 cursor-agent login'};
  const p=page(rows);p.run('renderUsage();renderQuotaOrder(usageData)');
  assert.deepEqual(p.nodes['#quotaNav'].children.map(b=>b.dataset.islandPane),['quota-grok','quota-cursor']);
@@ -73,6 +75,6 @@ test('额度 UI：来源图标与侧栏按快照顺序排列，失败原因和�
  for(const id of ['cursor','grok']){
   assert.ok(html.includes('data-island-pane="quota-'+id+'" draggable="true"'));
   assert.ok(html.includes('data-island-pane-content="quota-'+id+'"'));
-  assert.ok(html.includes('id="provider-'+id+'"'));assert.equal(p.run('quotaSymbols.'+id),'provider-'+id);
+  assert.ok(html.includes('id="provider-'+id+'"'));assert.equal(p.run('quotaSymbols.'+id),id==='grok'?'/provider-grok.png':'provider-'+id);
  }
 });

@@ -12,7 +12,8 @@ private final class IslandDisplayDriver: NSObject {
         self.render = render
         super.init()
         link = view.displayLink(target: self, selector: #selector(tick(_:)))
-        link?.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 60)
+        let rate = Float(view.window?.screen?.maximumFramesPerSecond ?? 60)
+        link?.preferredFrameRateRange = CAFrameRateRange(minimum: min(60, rate), maximum: rate, preferred: rate)
     }
     func start() { link?.add(to: .main, forMode: .common) }
     func stop() { link?.invalidate(); link = nil }
@@ -656,6 +657,10 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         islandLayoutTimer = nil
         if #available(macOS 14.0, *) { (islandDisplayDriver as? IslandDisplayDriver)?.stop() }
         islandDisplayDriver = nil
+        // 中断时先把系统窗口收至当前可见尺寸；拖动、换屏和反向都从呈现位置接续。
+        if let frame = islandModel.layout.frame { notchWindow?.setFrame(frame, display: false) }
+        islandModel.layout.frame = nil
+        islandModel.layout.envelope = nil
         islandFrameTarget = nil
         islandBarTarget = nil
     }
@@ -666,10 +671,14 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         if let screen { currentScreenSignature = Self.signature(screen) }
         let targetLayout = layout ?? islandModel.barLayout
         if islandFrameTarget == frame, islandBarTarget == targetLayout { return }
+        // 先保留精确呈现值，不能读中断后被 AppKit 对齐到像素的窗口尺寸。
+        let startFrame = islandModel.layout.frame ?? window.frame, startLayout = islandModel.barLayout
         stopIslandLayoutAnimation()
         islandFrameTarget = frame
         islandBarTarget = targetLayout
-        let startFrame = window.frame, startLayout = islandModel.barLayout
+        // 文字、列表与输入框直接按目标宽度排好；补间只改变外层裁切，避免每帧重新换行、量高。
+        let contentWidth = IslandLayoutTween.barFrame(width: frame.width, height: islandModel.barHeight, layout: targetLayout).width
+        if islandModel.expanded, islandModel.layout.contentWidth != contentWidth { islandModel.layout.contentWidth = contentWidth }
         guard startFrame != frame || startLayout != targetLayout else { return }
         guard animated, window.isVisible, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
             islandModel.barLayout = targetLayout
@@ -677,25 +686,35 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             applyDetail(islandModel.detailMetrics)
             return
         }
+        // 动画期间系统窗口只扩到两端尺寸的包络，不再每帧向 WindowServer 提交 resize。
+        let envelope = startFrame.union(frame)
+        islandModel.layout.envelope = envelope
+        islandModel.layout.frame = startFrame
+        window.setFrame(envelope, display: false)
         let started = CACurrentMediaTime()
+        let duration = IslandLayoutTween.duration(from: startFrame, to: frame)
         let render: (Double) -> Void = { [weak self, weak window] timestamp in
             guard let self, let window else { return }
-            let t = min(1, max(0, (timestamp - started) / 0.30))
+            let t = min(1, max(0, (timestamp - started) / duration))
             let progress = IslandLayoutTween.progress(t)
             let step = IslandLayoutTween.sample(from: startFrame, to: frame, fromLayout: startLayout,
                                                 toLayout: targetLayout, progress: progress)
-            // 一帧内提交两翼与窗口，避免 SwiftUI 再叠一层独立动画。
+            // 同一帧只更新轻量外壳与两翼，避免 SwiftUI 再叠一层独立动画。
             var transaction = Transaction()
             transaction.disablesAnimations = true
-            withTransaction(transaction) { self.islandModel.barLayout = step.layout }
-            window.setFrame(step.frame, display: false)
-            self.islandHosting?.layoutSubtreeIfNeeded()
-            window.displayIfNeeded()
+            withTransaction(transaction) {
+                self.islandModel.barLayout = step.layout
+                self.islandModel.layout.frame = step.frame
+            }
+            // 布局与绘制交给本轮 AppKit 提交，不能在显示回调里强制重排整棵 SwiftUI 视图树。
             if t >= 1 {
                 self.islandLayoutTimer?.invalidate()
                 self.islandLayoutTimer = nil
                 if #available(macOS 14.0, *) { (self.islandDisplayDriver as? IslandDisplayDriver)?.stop() }
                 self.islandDisplayDriver = nil
+                window.setFrame(frame, display: false)
+                self.islandModel.layout.frame = nil
+                self.islandModel.layout.envelope = nil
                 self.applyDetail(self.islandModel.detailMetrics)
             }
         }
@@ -788,8 +807,9 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     // 透明窗口包络比真正画出的面板宽，不能把两侧空白也算作持续悬停。
     private func islandContainsPointer(_ mouse: NSPoint = NSEvent.mouseLocation) -> Bool {
         guard let panel = notchWindow, panel.isVisible, islandModel.onScreen else { return false }
-        let bar = IslandLayoutTween.barFrame(width: panel.frame.width, height: islandModel.barHeight, layout: islandModel.barLayout)
-        let visible = NSRect(x: panel.frame.minX + bar.minX, y: panel.frame.minY, width: bar.width, height: panel.frame.height)
+        let frame = islandModel.layout.frame ?? panel.frame
+        let bar = IslandLayoutTween.barFrame(width: frame.width, height: islandModel.barHeight, layout: islandModel.barLayout)
+        let visible = NSRect(x: frame.minX + bar.minX, y: frame.minY, width: bar.width, height: frame.height)
         return visible.contains(mouse)
     }
 
@@ -1048,7 +1068,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             case .leftMouseDown:
                 self.hideDetail()
                 self.islandDragStartMouseX = NSEvent.mouseLocation.x
-                self.islandDragStartOriginX = panel.frame.origin.x
+                self.islandDragStartOriginX = (self.islandModel.layout.frame ?? panel.frame).origin.x
                 self.islandDragging = false
             case .leftMouseDragged:
                 guard let startMouse = self.islandDragStartMouseX, let startOrigin = self.islandDragStartOriginX else { return event }
@@ -2293,10 +2313,18 @@ struct IslandBarLayout: Equatable {
 
 // 线性插值同时作用于窗口与分区；曲线只在调用端计算一次。
 enum IslandLayoutTween {
-    // 平滑加速与收尾，端点速度为零；窗口和两翼共用这一条曲线。
+    // 首帧即响应、末尾平滑减速；中途反向仍从当前呈现值接续。
     static func progress(_ time: Double) -> CGFloat {
         let t = min(1, max(0, time))
-        return CGFloat(t * t * t * (t * (t * 6 - 15) + 10))
+        return CGFloat(1 - pow(1 - t, 3))
+    }
+    static func duration(from: NSRect, to: NSRect) -> Double {
+        let distance = max(abs(to.width - from.width), abs(to.height - from.height))
+        return 0.18 + 0.10 * min(1, Double(distance) / 400)
+    }
+    // SwiftUI 以左上角为原点；包络只承载动画，可见区域仍沿原来的屏幕坐标移动。
+    static func viewport(frame: NSRect, envelope: NSRect) -> NSRect {
+        NSRect(x: frame.minX - envelope.minX, y: envelope.maxY - frame.maxY, width: frame.width, height: frame.height)
     }
     static func barFrame(width: CGFloat, height: CGFloat, layout: IslandBarLayout) -> NSRect {
         guard layout.notched else { return NSRect(x: 0, y: 0, width: width, height: height) }
@@ -2620,7 +2648,11 @@ final class IslandModel: ObservableObject {
     @Published var screenAwake = true
     // 顶部栏的分区（左右两翼宽度 + 中间的刘海让位）：由原生按当前屏幕算好（见 IslandBarGeometry.layout），
     // SwiftUI 只是照着排——有真实刘海时头像与状态图标必须排在刘海两侧，不能排进刘海里。
-    @Published var barLayout = IslandBarGeometry.layout(left: 19 + IslandMetrics.itemSpacing + IslandMetrics.dividerWidth, right: 0, notch: 0)
+    let layout = IslandLayoutState()
+    var barLayout: IslandBarLayout {
+        get { layout.barLayout }
+        set { if layout.barLayout != newValue { layout.barLayout = newValue } }
+    }
     // 折叠态最多显示几个头像：有真实刘海时少一些（见 IslandMetrics），由原生按屏幕设置。
     @Published var avatarLimit = IslandMetrics.maxAvatars
     // 状态变化自动亮起的展开态：由 app 在「等你回答」或结束/终止时置 true，过几秒（或鼠标移入时）清掉。
@@ -2737,6 +2769,14 @@ final class IslandModel: ObservableObject {
     }
 }
 
+// 每帧变化只通知外壳与顶部栏；会话、Todo、管家和明细卡不订阅动画坐标。
+final class IslandLayoutState: ObservableObject {
+    @Published var barLayout = IslandBarGeometry.layout(left: 19 + IslandMetrics.itemSpacing + IslandMetrics.dividerWidth, right: 0, notch: 0)
+    @Published var contentWidth: CGFloat = 0
+    @Published var frame: NSRect?
+    var envelope: NSRect?
+}
+
 // 通知岛面板：黑色卡片贴住刘海，折叠时只有一条胶囊，展开时向下列出会话。
 // 形状与层级参考 CodeIsland（NotchPanelShape）：顶部贴屏幕边，底部连续曲率圆角。
 struct IslandView: View {
@@ -2778,45 +2818,39 @@ struct IslandView: View {
     @State private var quotaOrderDraft: [String] = []
 
     var body: some View {
-        GeometryReader { geometry in
-            let rect = IslandLayoutTween.barFrame(width: geometry.size.width, height: model.barHeight, layout: model.barLayout)
-            VStack(spacing: 0) {
-                bar
-                if model.expanded && model.sessionListHeight > 0 {
-                    Rectangle().fill(.white.opacity(0.14)).frame(height: 0.5).padding(.horizontal, 12)
-                    list
-                }
-                if todo.snapshot.enabled {
-                    IslandTodoView(snapshot: todo.snapshot, onManage: { onTodo(nil) }, onOpen: { onTodo($0) }, onCreate: { draft in
-                        todo.create(title: draft.title, date: draft.date, listID: draft.listID, bucket: draft.bucket, details: draft.details)
-                    }, onUpdate: { id, draft in
-                        todo.create(title: draft.title, date: draft.date, listID: draft.listID, details: draft.details, editingID: id)
-                    }, onDelete: { todo.remove(id: $0) }, onCompose: onTodoCompose, onShowCompleted: { todo.setShowCompleted($0) }, onComplete: { todo.complete(id: $0, completed: $1) }, active: model.expanded, inputMonitor: todoInputMonitor)
-                    .frame(height: model.expanded ? todo.snapshot.height : 0, alignment: .bottom)
-                    .clipped().allowsHitTesting(model.expanded).accessibilityHidden(!model.expanded)
-                }
-                if model.expanded {
-                    if let butler = model.butler, butler.enabled {
-                        IslandButlerList(butler: butler, avatarForProject: { model.avatarImage($0) }, viewportHeight: model.butlerListHeight,
-                            onSelect: onButler, onCompose: onButlerCompose, onFocus: onButlerFocus, onQuote: onButlerQuote,
-                            onMeasure: { height in if model.butlerContentHeight != height { model.butlerContentHeight = height } })
-                        if model.butlerReply.isOpen {
-                            IslandButlerComposer(draft: $model.butlerReply, onSend: onButlerSend, onClose: onButlerClose, onFocus: onButlerFocus,
-                                onMeasure: { height in if model.butlerComposerHeight != height { model.butlerComposerHeight = height } })
-                        }
-                    }
-                }
-            }
-            .frame(width: rect.width, height: geometry.size.height, alignment: .top)
-            .background(IslandShape(bottomRadius: model.expanded ? 22 : 12).fill(.black))
-            .clipShape(IslandShape(bottomRadius: model.expanded ? 22 : 12))
-            // 补间过程保持刘海让位区居中，列表与胶囊共用相同宽度。
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .offset(x: rect.minX)
-        }
+        IslandSurface(layout: model.layout, barHeight: model.barHeight, expanded: model.expanded, bar: bar, content: expandedContent)
         .onChange(of: model.butlerReply.height) { _ in onButlerResize() }
         .onChange(of: model.butlerContentHeight) { _ in onButlerResize() }
         .onChange(of: model.butlerComposerHeight) { _ in onButlerResize() }
+    }
+
+    private var expandedContent: some View {
+        VStack(spacing: 0) {
+            if model.expanded && model.sessionListHeight > 0 {
+                Rectangle().fill(.white.opacity(0.14)).frame(height: 0.5).padding(.horizontal, 12)
+                list
+            }
+            if todo.snapshot.enabled {
+                IslandTodoView(snapshot: todo.snapshot, onManage: { onTodo(nil) }, onOpen: { onTodo($0) }, onCreate: { draft in
+                    todo.create(title: draft.title, date: draft.date, listID: draft.listID, bucket: draft.bucket, details: draft.details)
+                }, onUpdate: { id, draft in
+                    todo.create(title: draft.title, date: draft.date, listID: draft.listID, details: draft.details, editingID: id)
+                }, onDelete: { todo.remove(id: $0) }, onCompose: onTodoCompose, onShowCompleted: { todo.setShowCompleted($0) }, onComplete: { todo.complete(id: $0, completed: $1) }, active: model.expanded, inputMonitor: todoInputMonitor)
+                .frame(height: model.expanded ? todo.snapshot.height : 0, alignment: .bottom)
+                .clipped().allowsHitTesting(model.expanded).accessibilityHidden(!model.expanded)
+            }
+            if model.expanded {
+                if let butler = model.butler, butler.enabled {
+                    IslandButlerList(butler: butler, avatarForProject: { model.avatarImage($0) }, viewportHeight: model.butlerListHeight,
+                        onSelect: onButler, onCompose: onButlerCompose, onFocus: onButlerFocus, onQuote: onButlerQuote,
+                        onMeasure: { height in if model.butlerContentHeight != height { model.butlerContentHeight = height } })
+                    if model.butlerReply.isOpen {
+                        IslandButlerComposer(draft: $model.butlerReply, onSend: onButlerSend, onClose: onButlerClose, onFocus: onButlerFocus,
+                            onMeasure: { height in if model.butlerComposerHeight != height { model.butlerComposerHeight = height } })
+                    }
+                }
+            }
+        }
     }
 
     // 额度圆环的悬停：明细卡跟着鼠标停的那一家换（并排显示时尤其重要）。移开时保留焦点——
@@ -2872,7 +2906,7 @@ struct IslandView: View {
     // 见 IslandBarLayout）。头像从左端帽向内排，状态从刘海右侧向外排。
     // 刘海屏中间间距固定，顶部栏独立于列表宽度定位；外接屏仍用可伸缩间距。
     private var bar: some View {
-        HStack(spacing: 0) {
+        IslandBarContent(layout: model.layout, height: model.barHeight, leading:
             HStack(spacing: IslandMetrics.itemSpacing) {
                 // 默认图标（没有活跃会话时的置灰 bobo）固定靠左，占住会话头像的位置。
                 if model.busy.isEmpty {
@@ -2904,17 +2938,7 @@ struct IslandView: View {
                 // bobo / 会话头像与右边的状态图标之间用一条细竖线分开；两边的间距与图标之间一样。
                 Capsule().fill(.white.opacity(0.2)).frame(width: IslandMetrics.dividerWidth, height: IslandMetrics.dividerHeight)
             }
-            .padding(.leading, IslandMetrics.barEdge)
-            .frame(width: model.barLayout.left, alignment: .leading)
-            .clipped()
-            // 中间的可伸缩间距：折叠时正好等于让位区宽度（内容贴住刘海两侧），展开时吸收多出来的宽度——
-            // 内容因此贴住面板两端，与外接屏一致；有真实刘海时这段也保证不小于「刘海 + 两侧各 notchGap」，
-            // 内容不会排进摄像头模组那块物理上看不见的区域。
-            if model.barLayout.notched {
-                Color.clear.frame(width: model.barLayout.keepOut)
-            } else {
-                Spacer(minLength: model.barLayout.keepOut)
-            }
+            .padding(.leading, IslandMetrics.barEdge), trailing:
             HStack(spacing: IslandMetrics.itemSpacing) {
                 // 额度圆环：折叠态（以及「点击切换」方式）只有当前选中的那一枚；「展开并排」方式在展开时
                 // 按设置并排显示各来源——画几枚由原生按屏幕剩余空间算好（见 Bobo.islandSize 的 quotaChipLimit）。
@@ -2955,10 +2979,7 @@ struct IslandView: View {
                     NotchIconButton(icon: "power", tint: Color(red: 1.0, green: 0.40, blue: 0.40), tooltip: "退出 bobo", action: onQuit)
                 }
             }
-            .frame(width: model.barLayout.right, alignment: .leading)
-            .clipped()
-        }
-        .frame(height: model.barHeight)
+        )
         .contentShape(Rectangle())
         .onTapGesture(perform: onActivate)
         // 快照里的顺序与草稿一致（服务端已接受拖动结果）时丢掉草稿，之后以服务端顺序为准。
@@ -2982,6 +3003,54 @@ struct IslandView: View {
             .padding(.bottom, 9)
         }
         .frame(height: model.sessionListHeight - 0.5)
+    }
+}
+
+// 几何变化留在轻量容器里；传入的内容保持身份与排版宽度，不在显示回调里重建。
+private struct IslandSurface<Bar: View, Content: View>: View {
+    @ObservedObject var layout: IslandLayoutState
+    var barHeight: CGFloat
+    var expanded: Bool
+    var bar: Bar
+    var content: Content
+    var body: some View {
+        GeometryReader { geometry in
+            let viewport = layout.frame.flatMap { frame in layout.envelope.map { IslandLayoutTween.viewport(frame: frame, envelope: $0) } }
+                ?? NSRect(origin: .zero, size: geometry.size)
+            let rect = IslandLayoutTween.barFrame(width: viewport.width, height: barHeight, layout: layout.barLayout)
+            VStack(spacing: 0) {
+                bar
+                content
+                    .frame(width: layout.contentWidth > 0 ? layout.contentWidth : rect.width, alignment: .top)
+                    .frame(width: rect.width, alignment: .top)
+                    .clipped()
+            }
+            .frame(width: rect.width, height: viewport.height, alignment: .top)
+            .background(IslandShape(bottomRadius: expanded ? 22 : 12).fill(.black))
+            .clipShape(IslandShape(bottomRadius: expanded ? 22 : 12))
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .offset(x: viewport.minX + rect.minX, y: viewport.minY)
+        }
+    }
+}
+
+private struct IslandBarContent<Leading: View, Trailing: View>: View {
+    @ObservedObject var layout: IslandLayoutState
+    var height: CGFloat
+    var leading: Leading
+    var trailing: Trailing
+    var body: some View {
+        HStack(spacing: 0) {
+            leading.frame(width: layout.barLayout.left, alignment: .leading).clipped()
+            // 刘海屏固定保留摄像头区域；外接屏允许中间留白吸收剩余宽度。
+            if layout.barLayout.notched {
+                Color.clear.frame(width: layout.barLayout.keepOut)
+            } else {
+                Spacer(minLength: layout.barLayout.keepOut)
+            }
+            trailing.frame(width: layout.barLayout.right, alignment: .leading).clipped()
+        }
+        .frame(height: height)
     }
 }
 

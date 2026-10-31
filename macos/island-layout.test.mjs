@@ -352,6 +352,106 @@ for mode in 0...2 {
 `);
 });
 
+test('通知岛动画：逐帧坐标不会重发业务状态，正文宽度保持目标值', {skip:process.platform!=='darwin'}, async()=>{
+ const declarations=await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {');
+ const model=await swiftSlice('enum IslandDetailKind:','// 通知岛面板：黑色卡片贴住刘海');
+ await checkSwift(declarations+'\n'+model,`
+let model = IslandModel()
+var contentUpdates = 0, geometryUpdates = 0
+let contentWatch = model.objectWillChange.sink { contentUpdates += 1 }
+let geometryWatch = model.layout.objectWillChange.sink { geometryUpdates += 1 }
+model.layout.contentWidth = 620
+for i in 0..<120 {
+ model.barLayout = IslandBarLayout(left: CGFloat(80+i), keepOut: 180, right: CGFloat(80+i), notched: true)
+}
+precondition(contentUpdates == 0, "动画坐标不能让整个会话、待办、管家与明细卡重新更新")
+precondition(geometryUpdates == 121 && model.layout.contentWidth == 620, "只更新外壳，正文不能跟着补间宽度反复换行")
+let current = model.barLayout
+model.barLayout = current
+precondition(geometryUpdates == 121, "重复布局不能额外发布更新")
+model.hovering = true
+precondition(contentUpdates == 1 && model.expanded, "业务状态变化仍须正常通知内容")
+withExtendedLifetime((contentWatch, geometryWatch)) {}
+`);
+});
+
+test('通知岛动画：首帧即响应，小幅反向更快到位，收尾单调且精确', {skip:process.platform!=='darwin'}, async()=>{
+ await checkSwift(await swiftSlice('struct IslandBarLayout:','// 顶部栏的排布计算（纯函数'),`
+let a = NSRect(x: 300, y: 968, width: 400, height: 32)
+let b = NSRect(x: 190, y: 480, width: 620, height: 520)
+let duration = IslandLayoutTween.duration(from: a, to: b)
+precondition(duration >= 0.18 && duration <= 0.28)
+precondition(IslandLayoutTween.progress((1.0/120) / duration) > 0.08, "120Hz 的第一帧就应有可见响应")
+precondition(IslandLayoutTween.progress(-1) == 0 && IslandLayoutTween.progress(2) == 1)
+var previous: CGFloat = 0
+for frame in 0...120 {
+ let progress = IslandLayoutTween.progress(Double(frame)/120)
+ precondition(progress >= previous && progress <= 1, "尺寸不能过冲或回弹")
+ previous = progress
+}
+let near = NSRect(x: 295, y: 958, width: 410, height: 42)
+precondition(IslandLayoutTween.duration(from: near, to: a) < duration, "小幅反向不能重新等待完整展开时长")
+precondition(IslandLayoutTween.duration(from: a, to: b) == IslandLayoutTween.duration(from: b, to: a))
+`);
+});
+
+test('通知岛动画：系统窗口只在起止调整尺寸，中途反向接续且结束释放驱动', {skip:process.platform!=='darwin'}, async()=>{
+ const declarations=await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {');
+ const model=await swiftSlice('enum IslandDetailKind:','// 通知岛面板：黑色卡片贴住刘海');
+ const driver=await swiftSlice('@available(macOS 14.0, *)\nprivate final class IslandDisplayDriver:', '@main');
+ const animation=await swiftSlice('    private func stopIslandLayoutAnimation()', '    // 调整面板窗口：');
+ await checkSwift(declarations+'\n'+model+'\n'+driver+`
+enum NSWorkspace { static let shared = ProbeWorkspace() }
+final class ProbeWorkspace { var accessibilityDisplayShouldReduceMotion = false }
+final class ProbeWindow: NSWindow {
+ var resizes = 0
+ override func setFrame(_ frameRect: NSRect, display flag: Bool) { resizes += 1; super.setFrame(frameRect, display: flag) }
+}
+final class Probe {
+ let islandModel = IslandModel()
+ var notchWindow: ProbeWindow?
+ var islandHosting: NSView?
+ var islandLayoutTimer: Timer?, islandDisplayDriver: AnyObject?
+ var islandFrameTarget: NSRect?, islandBarTarget: IslandBarLayout?
+ var currentScreenSignature = ""
+ static func signature(_ screen: NSScreen) -> String { "probe" }
+ func applyDetail(_ metrics: DetailMetrics) {}
+ func animate(_ frame: NSRect, _ layout: IslandBarLayout, animated: Bool = true) { applyIslandFrame(frame, animated: animated, screen: nil, layout: layout) }
+`+animation+`
+}`,`
+let app = NSApplication.shared
+let probe = Probe()
+let a = NSRect(x: 200, y: 600, width: 240, height: 32)
+let b = NSRect(x: 100, y: 300, width: 440, height: 332)
+let closed = IslandBarLayout(left: 50, keepOut: 140, right: 50, notched: true)
+let open = IslandBarLayout(left: 150, keepOut: 140, right: 150, notched: true)
+let window = ProbeWindow(contentRect: a, styleMask: [.borderless], backing: .buffered, defer: false)
+window.isReleasedWhenClosed = false
+probe.notchWindow = window
+probe.islandModel.barLayout = closed
+window.orderFrontRegardless()
+window.resizes = 0
+probe.animate(b, open)
+RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+precondition(window.frame == b && probe.islandModel.barLayout == open)
+precondition(window.resizes <= 2, "补间不能每帧 resize 系统窗口")
+precondition(probe.islandLayoutTimer == nil && probe.islandDisplayDriver == nil && probe.islandModel.layout.frame == nil)
+probe.animate(a, closed)
+RunLoop.main.run(until: Date().addingTimeInterval(0.06))
+let midway = probe.islandModel.layout.frame!
+probe.animate(b, open)
+precondition(probe.islandModel.layout.frame == midway, "反向时必须沿当前可见区域接续")
+RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+precondition(window.frame == b && probe.islandModel.layout.frame == nil && probe.islandModel.layout.envelope == nil)
+probe.animate(a, closed, animated: false)
+precondition(window.frame == a && probe.islandModel.barLayout == closed && probe.islandLayoutTimer == nil && probe.islandDisplayDriver == nil)
+NSWorkspace.shared.accessibilityDisplayShouldReduceMotion = true
+probe.animate(b, open)
+precondition(window.frame == b && probe.islandModel.barLayout == open && probe.islandModel.layout.frame == nil && probe.islandLayoutTimer == nil && probe.islandDisplayDriver == nil, "减弱动态效果必须直接到位，不能启动动画驱动")
+window.orderOut(nil)
+`);
+});
+
 test('通知岛动画：非对称两翼变化时让位中心与顶边保持稳定，中途反向连续', {skip:process.platform!=='darwin'}, async()=>{
  await checkSwift(await swiftSlice('struct IslandBarLayout:','// 顶部栏的排布计算（纯函数'),`
 func near(_ a: CGFloat, _ b: CGFloat) { precondition(abs(a-b) < 0.00001, "坐标不连续或锚点漂移") }
@@ -359,6 +459,7 @@ let collapsed = IslandBarLayout(left: 110, keepOut: 180, right: 60, notched: tru
 let expanded = IslandBarLayout(left: 110, keepOut: 180, right: 114, notched: true)
 let a = NSRect(x: 500-400/2, y: 1000-32, width: 400, height: 32)
 let b = NSRect(x: 500-500/2, y: 1000-210, width: 500, height: 210)
+let envelope = a.union(b)
 for i in 0...60 {
  let step = IslandLayoutTween.sample(from: a, to: b, fromLayout: collapsed, toLayout: expanded, progress: CGFloat(i)/60)
  let top = IslandLayoutTween.barFrame(width: step.frame.width, height: 32, layout: step.layout)
@@ -369,6 +470,11 @@ for i in 0...60 {
  near(step.frame.minX + top.minX + step.layout.left + step.layout.keepOut, 590)
  near(center, 500)
  near(step.frame.maxY, 1000)
+ let viewport = IslandLayoutTween.viewport(frame: step.frame, envelope: envelope)
+ near(viewport.minX + envelope.minX, step.frame.minX)
+ near(envelope.maxY - viewport.minY, step.frame.maxY)
+ near(viewport.width, step.frame.width)
+ near(viewport.height, step.frame.height)
  precondition(step.frame.width-step.layout.left-step.layout.right >= step.layout.keepOut)
 }
 let mid = IslandLayoutTween.sample(from: a, to: b, fromLayout: collapsed, toLayout: expanded, progress: 0.4)
@@ -880,6 +986,8 @@ precondition(!active.islandModel.hovering)
 NSEvent.mouseLocation = NSPoint(x: 650, y: 900)
 active.tick()
 precondition(active.islandModel.hovering, "从透明包络走到可见面板，没有新的 mouseEntered 也要接管悬停")
+active.islandModel.layout.frame = NSRect(x: 596, y: 970, width: 320, height: 30)
+precondition(active.contains(NSPoint(x: 650, y: 985)) && !active.contains(NSPoint(x: 650, y: 900)), "动画期间按可见区域判定悬停，不能把下方透明窗口包络算进去")
 `);
 });
 
