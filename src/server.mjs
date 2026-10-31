@@ -350,7 +350,7 @@ const server=http.createServer(async(req,res)=>{
     const id=b.id===undefined?'opencode-go':b.id,direct=b.direct===true;
     if(!keyProviders.includes(id))fail('不支持的额度密钥来源');
     if(b.keychain)return json(await usage.readKeychain(id,{direct}));
-    if(b.clear)return json({ok:true,message:id==='deepseek'?'已清除 DeepSeek 官方余额 Key':'已清除手动 Token，改回读取本机登录',snapshot:await usage.clearKey(id)});
+    if(b.clear)return json({ok:true,message:id==='deepseek'?'已清除手动填写的 DeepSeek 官方余额 Key，自动回退到环境变量或 zsh 配置':'已清除手动 Token，改回读取本机登录',snapshot:await usage.clearKey(id)});
     return json(await usage.setKey(id,b.key,{direct}));
    }
    // 「直连时也请求」：没有 VPN / 代理时也携带登录请求 Claude（默认关，见 usage.mjs 的 claudeGate）。
@@ -490,7 +490,7 @@ const server=http.createServer(async(req,res)=>{
     return json({ok:true});
    }fail('不存在的接口：'+req.method+' '+url.pathname,404);
   }
-  const assets={'/stream.js':['stream.js','text/javascript'],'/markdown.js':['markdown.js','text/javascript'],'/todo.js':['todo.js','text/javascript'],'/agent-format.js':['agent-format.js','text/javascript'],'/codex-format.js':['codex-format.js','text/javascript'],'/icon.png':['icon.png','image/png'],'/reminders.png':['reminders.png','image/png'],'/bobo-avatar.png':['bobo-avatar.png','image/png'],'/':['index.html','text/html'],'/app.js':['app.js','text/javascript'],'/style.css':['style.css','text/css'],
+  const assets={'/stream.js':['stream.js','text/javascript'],'/markdown.js':['markdown.js','text/javascript'],'/todo.js':['todo.js','text/javascript'],'/agent-format.js':['agent-format.js','text/javascript'],'/codex-format.js':['codex-format.js','text/javascript'],'/icon.png':['icon.png','image/png'],'/reminders.png':['reminders.png','image/png'],'/bobo-avatar.png':['bobo-avatar.png','image/png'],'/provider-grok.png':['provider-grok.png','image/png'],'/':['index.html','text/html'],'/app.js':['app.js','text/javascript'],'/style.css':['style.css','text/css'],
    // 通知岛面板：独立的小页面，给桌面壳的透明悬浮窗用（浏览器访问也正常）。
    '/panel.html':['panel.html','text/html'],'/panel.css':['panel.css','text/css'],'/panel.js':['panel.js','text/javascript']};
   const asset=assets[url.pathname];if(!asset)fail('Not found',404);

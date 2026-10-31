@@ -22,6 +22,9 @@ test('主窗入口及其模块依赖都能通过 HTTP 加载，避免整页点�
   const reminderIcon=await fetch(base+'/reminders.png');
   assert.equal(reminderIcon.status,200);assert.equal(reminderIcon.headers.get('content-type'),'image/png');
   assert.deepEqual(Buffer.from(await reminderIcon.arrayBuffer()),await fs.readFile(new URL('../public/reminders.png',import.meta.url)));
+  const grokIcon=await fetch(base+'/provider-grok.png');
+  assert.equal(grokIcon.status,200,'Grok Bot 头像必须能从静态白名单访问');assert.equal(grokIcon.headers.get('content-type'),'image/png');
+  assert.deepEqual(Buffer.from(await grokIcon.arrayBuffer()),await fs.readFile(new URL('../public/provider-grok.png',import.meta.url)));
   assert.equal((await fetch(base+'/not-a-public-file.js')).status,404,'静态资源仍使用白名单');
  }finally{child.kill();await new Promise(r=>child.once('exit',r));await fs.rm(home,{recursive:true,force:true});}
 });

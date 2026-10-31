@@ -31,12 +31,34 @@ test('密钥白名单：未知来源、Codex、Antigravity 在读取设置和网
  assert.equal(calls,0);
  assert.equal(JSON.parse(await fs.readFile(path.join(home,'.bobo/usage.json'),'utf8')).keys,undefined);
 });
-test('DeepSeek：不读取 AI、环境变量或代理商登录中的已有密钥',async t=>{
+test('DeepSeek：读取 zsh 配置里的 DEEPSEEK_API_KEY，忽略 OPENAI_API_KEY，不复制落盘',async t=>{
+ const home=await fixture(t);let calls=[];
+ await fs.writeFile(path.join(home,'.zshrc'),'#export DEEPSEEK_API_KEY=commented-out\nexport OPENAI_API_KEY=not-this-one\nexport DEEPSEEK_API_KEY="private-zsh-key" # DeepSeek 官方 Key\n');
+ const usage=createUsage({home,env:{},now:()=>NOW,fetchImpl:async(url,options)=>{calls.push({url,options});return response(body());}});t.after(()=>usage.stop());
+ const snap=row(await usage.refresh());
+ assert.equal(snap.keySource,'zsh');assert.equal(snap.keyHint,'DEEPSEEK_API_KEY');assert.equal(snap.available,true);
+ assert.equal(calls.length,1);assert.equal(calls[0].options.headers.authorization,'Bearer private-zsh-key');
+ assert.doesNotMatch(await fs.readFile(path.join(home,'.bobo/usage.json'),'utf8'),/private-zsh-key/);
+});
+test('DeepSeek：环境变量 DEEPSEEK_API_KEY 优先于 zsh 配置，手动 Key 优先于两者；OPENAI_API_KEY 不参与',async t=>{
+ const home=await fixture(t);let calls=[];
+ await fs.writeFile(path.join(home,'.zshrc'),'export DEEPSEEK_API_KEY=zsh-key\n');
+ const usage=createUsage({home,env:{DEEPSEEK_API_KEY:'env-key',OPENAI_API_KEY:'env-openai-key'},now:()=>NOW,fetchImpl:async(url,options)=>{calls.push(options.headers.authorization);return response(body());}});t.after(()=>usage.stop());
+ const fromEnv=row(await usage.refresh());assert.equal(fromEnv.keySource,'env');assert.equal(fromEnv.keyHint,'DEEPSEEK_API_KEY');assert.equal(calls[0],'Bearer env-key');
+ const saved=await usage.setKey('deepseek','manual-key');assert.equal(saved.ok,true);assert.equal(row(saved.snapshot).keySource,'manual');assert.equal(calls.at(-1),'Bearer manual-key');
+});
+test('DeepSeek：只有 OPENAI_API_KEY 时不读取它',async t=>{
+ const home=await fixture(t);let calls=0;
+ await fs.writeFile(path.join(home,'.zshrc'),'export OPENAI_API_KEY=not-deepseek\n');
+ const usage=createUsage({home,env:{OPENAI_API_KEY:'not-deepseek'},fetchImpl:async()=>{calls++;throw Error('不应联网');}});t.after(()=>usage.stop());
+ const snap=row(await usage.refresh());assert.equal(snap.available,false);assert.match(snap.reason,/DEEPSEEK_API_KEY/);assert.equal(calls,0);
+});
+test('DeepSeek：完全没有 Key 时提示配置 zsh，不联网也不读 AI 设置',async t=>{
  const home=await fixture(t);let calls=0;
  await fs.writeFile(path.join(home,'.bobo/ai.json'),JSON.stringify({baseUrl:'https://gateway.example.invalid',apiKey:'private-existing-key'}));
- const usage=createUsage({home,env:{DEEPSEEK_API_KEY:'private-existing-key',OPENAI_API_KEY:'private-existing-key'},fetchImpl:async()=>{calls++;throw Error('不应联网');}});t.after(()=>usage.stop());
- const snap=row(await usage.refresh());assert.equal(snap.available,false);assert.equal(snap.isAvailable,null);assert.equal(snap.lastSuccessfulAt,null);assert.deepEqual(snap.balances,[]);assert.match(snap.reason,/不会自动读取或复制/);assert.equal(calls,0);
- const saved=await fs.readFile(path.join(home,'.bobo/usage.json'),'utf8');assert.doesNotMatch(saved,/private-existing-key/);
+ const usage=createUsage({home,env:{},fetchImpl:async()=>{calls++;throw Error('不应联网');}});t.after(()=>usage.stop());
+ const snap=row(await usage.refresh());assert.equal(snap.available,false);assert.equal(snap.isAvailable,null);assert.equal(snap.lastSuccessfulAt,null);assert.deepEqual(snap.balances,[]);assert.match(snap.reason,/DEEPSEEK_API_KEY/);assert.equal(calls,0);
+ assert.doesNotMatch(await fs.readFile(path.join(home,'.bobo/usage.json'),'utf8'),/private-existing-key/);
 });
 test('DeepSeek：显式 Key 只去官方固定目标，禁止重定向，验证缓存不重复请求，清除无回退',async t=>{
  const home=await fixture(t);let calls=[];

@@ -6,7 +6,18 @@ import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 
-test('Todo：日期分类、权限、写回、系统变更、异步竞争与原生布局（隔离系统提醒事项）',{skip:process.platform!=='darwin'},async()=>{
+test('Todo：输入胶囊的提醒事项图标打开系统应用，tobo 入口保留在更多菜单',async()=>{
+ const source=await fs.readFile(new URL('./Todo.swift',import.meta.url),'utf8');
+ const buttons=source.split('\n').filter(line=>line.includes('Button')&&line.includes('TodoRemindersMark'));
+ assert.equal(buttons.length,2,'收起态与展开态均需提供系统提醒事项入口');
+ for(const button of buttons){
+  assert.match(button,/Button\s*\{\s*TodoNavigation\.open\(\)\s*\}\s*label:/,'图标不能复用打开 tobo 的 onManage 回调');
+  assert.match(button,/\.help\("打开提醒事项"\)\.accessibilityLabel\("提醒事项"\)/);
+ }
+ assert.match(source,/Button\("打开 tobo", action: onManage\)/,'更多菜单仍可打开 tobo');
+});
+
+test('Todo：日期分类、权限、写回、系统变更、异步竞争、布局与弹窗外观（隔离系统提醒事项）',{skip:process.platform!=='darwin'},async()=>{
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'bobo-todo-'));
  try{
   const file=path.join(dir,'Check.swift'),binary=path.join(dir,'check');
@@ -82,6 +93,16 @@ import SwiftUI
         precondition(blank.isEmpty, "空白清理忽略日期、提醒与优先级")
         blank.details.notes = "备注仍在"; precondition(!blank.isEmpty, "备注不能因清空标题被自动删除")
         blank.details.notes = ""; blank.details.url = "https://example.com"; precondition(!blank.isEmpty)
+        var verticalSwipe = TodoSwipeMotion()
+        verticalSwipe.update(x: -2, y: 12); verticalSwipe.update(x: -80, y: 1)
+        precondition(verticalSwipe.horizontal == false, "纵向滚动锁定后不能中途变成删除手势")
+        var horizontalSwipe = TodoSwipeMotion()
+        horizontalSwipe.update(x: -3, y: 1)
+        precondition(horizontalSwipe.horizontal == nil, "轻微抖动不拦截列表滚动")
+        horizontalSwipe.update(x: -80, y: 1)
+        precondition(horizontalSwipe.horizontal == true && horizontalSwipe.offset(revealed: false) == -TodoSwipeMotion.width, "左滑最多只展开删除按钮")
+        var closingSwipe = TodoSwipeMotion(); closingSwipe.update(x: 100, y: 0)
+        precondition(closingSwipe.offset(revealed: true) == 0 && closingSwipe.offset(revealed: false) == 0, "右滑收起，不把事项拉出右侧边界")
         let boundary = TodoGrouping.columns([reminder("seventh", "2026-11-05"), reminder("eighth", "2026-11-06")], now: now, calendar: calendar)
         precondition(boundary[1].items.map(\.id) == ["seventh"] && boundary[2].items.map(\.id) == ["eighth"], "包含未来第七天，排除第八天")
         precondition(TodoGrouping.dateComponents("2026-02-30", calendar: calendar) == nil)
@@ -191,6 +212,26 @@ import SwiftUI
         precondition(TodoNavigation.reminderURL("11111111-2222-3333-4444-555555555555")?.absoluteString == "x-apple-reminderkit://REMCDReminder/11111111-2222-3333-4444-555555555555/details")
 
         NSApplication.shared.setActivationPolicy(.prohibited)
+        let originalAppearance = NSApplication.shared.appearance
+        defer { NSApplication.shared.appearance = originalAppearance }
+        func calendars(in view: NSView) -> [NSDatePicker] { (view as? NSDatePicker).map { [$0] } ?? view.subviews.flatMap { calendars(in: $0) } }
+        for appearance: NSAppearance.Name in [.aqua, .darkAqua] {
+            NSApplication.shared.appearance = NSAppearance(named: appearance)
+            let anchor = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 40))
+            let window = NSWindow(contentRect: anchor.frame, styleMask: .borderless, backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false; window.contentView = anchor; window.orderBack(nil)
+            let popover = NSPopover(); popover.animates = false
+            popover.contentViewController = NSHostingController(rootView: TodoOptionPopover {
+                DatePicker("日期", selection: .constant(now), displayedComponents: .date).datePickerStyle(.graphical).labelsHidden()
+            })
+            popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+            try await settle { popover.isShown && popover.contentViewController?.view.window != nil }
+            let view = popover.contentViewController!.view
+            try await settle { !calendars(in: view).isEmpty }
+            precondition(view.window!.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua, "浅色系统下弹窗底板也必须使用深色外观")
+            precondition(calendars(in: view).allSatisfy { $0.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua }, "原生日历不能出现浅色底白字")
+            popover.close(); window.close()
+        }
         var snapshot = TodoSnapshot(); snapshot.enabled = true; snapshot.authorization = .allowed
         snapshot.columns = TodoGrouping.columns((0..<40).map { reminder("待办\($0)", "2026-10-29") }, now: now, calendar: calendar)
         precondition(snapshot.height == 216 && snapshot.count == 40, "缩略布局有高度上限但保留全部事项")

@@ -1707,8 +1707,9 @@ function renderDeepSeekBalance(provider){
  if(provider?.error)note.push('⚠ '+provider.error);
  note.push('充值余额是当前剩余金额，不是累计充值。刷新遵循缓存与失败退避。');
  $('#usageDeepseekNote').textContent=note.join('；');
- $('#usageDeepseekKeyStatus').textContent=provider?.keySource==='manual'?'已保存专用于官方余额的手动 Key':'未配置 · 请主动填写官方 Key';
- $('#usageDeepseekKeyClear').disabled=provider?.keySource!=='manual';
+ const source=provider?.keySource,name=provider?.keyHint||'DEEPSEEK_API_KEY';
+ $('#usageDeepseekKeyStatus').textContent=source==='manual'?'已保存专用于官方余额的手动 Key':source==='env'?'环境变量 '+name:source==='zsh'?'zsh 配置 '+name+'（~/.zshrc 等，只读）':'未配置 · 可在 zsh 配置，或在此填写';
+ $('#usageDeepseekKeyClear').disabled=source!=='manual';
 }
 function renderDeepSeekLedger(ledger,error=''){
  const number=value=>value===null||value===undefined?'—':Number(value).toLocaleString('zh-CN');

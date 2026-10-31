@@ -30,6 +30,10 @@ const codexUsageURL='https://chatgpt.com/backend-api/wham/usage';
 const opencodeUsageURL='https://opencode.ai/zen/go/v1/usage';
 const claudeUsageURL='https://api.anthropic.com/api/oauth/usage';
 const deepseekBalanceURL='https://api.deepseek.com/user/balance';
+// DeepSeek 官方余额 Key 的来源顺序：手动填写 > 进程环境变量 > zsh 配置（zshrc 等）。
+// 只认 DEEPSEEK_API_KEY，不借用 OPENAI_API_KEY（即使某些环境把它指向 DeepSeek，也可能随时被别的工具改掉）。
+const deepseekKeyNames=Object.freeze(['DEEPSEEK_API_KEY']);
+const zshConfigFiles=Object.freeze(['.zshenv','.zprofile','.zshrc','.zlogin']);
 const cursorUsageURL='https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage';
 const grokUsageURL='https://cursor.com/api/dashboard/get-sand-usage-status';
 // 用量接口对认不出的客户端限流更凶，User-Agent 要像 Claude Code 自己（CodexBar 同样固定成 claude-code/<版本>；
@@ -67,6 +71,30 @@ const userError=message=>Object.assign(Error(message),{userFacing:true});
 const describe=(e,prefix)=>e?.userFacing?e.message:prefix+(e?.message||e);
 // 手动粘贴的 Token 常带引号或 "Bearer " 前缀：先清掉再验证 / 保存。
 const cleanToken=v=>String(v||'').trim().replace(/^["']|["']$/g,'').replace(/^Bearer\s+/i,'').trim();
+// 从 zsh 配置文本里读出 export KEY=value（只解析字面量，不执行任何 shell 命令）。
+// 跳过注释行；带引号的值取引号内内容，不带引号时丢掉行内注释（`sk-… # 备注`）。
+// 含 $ 或反引号的值需要变量展开才能确定，直接忽略，免得把 `$OTHER_KEY` 当 Key 发出去。
+export function zshExportedKeys(text,names=deepseekKeyNames){
+ const keys=new Map();
+ for(const line of String(text||'').split(/\r?\n/)){
+  const match=line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/);
+  if(!match||!names.includes(match[1]))continue;
+  let value=match[2].trim();
+  const quote=value[0];
+  if(quote==='"'||quote==="'"){
+   const end=value.indexOf(quote,1);
+   if(end<1)continue;
+   value=value.slice(1,end);
+  }else{
+   const comment=value.search(/\s#/);
+   if(comment>=0)value=value.slice(0,comment);
+   value=value.trim();
+  }
+  if(!value||/[$`]/.test(value)||/\s/.test(value)||value.length>8192)continue;
+  keys.set(match[1],value);
+ }
+ return keys;
+}
 // 余额来源的刘海显示：余额模式在图标上方外圈绕排两位小数；占比模式按「余额 ÷ 分母」画百分比圆环。
 // 默认人民币与 100 元分母，接口没返回所选币种时自动退回第一个可用币种。
 const balanceModes=Object.freeze(['balance','percent']),balanceCurrencies=Object.freeze(['CNY','USD']);
@@ -301,7 +329,7 @@ export function claudeSnapshot(body,nowMs){
 }
 
 // 官方金额保持十进制字符串；不转浮点数、不混合币种，也不从余额倒推消耗或累计充值。
-export function deepseekSnapshot(body,nowMs){
+export function deepseekSnapshot(body,nowMs,{keySource='manual',keyHint=''}={}){
  if(typeof body?.is_available!=='boolean'||!Array.isArray(body.balance_infos)||!body.balance_infos.length)throw userError('DeepSeek 余额接口没有返回有效余额');
  const seen=new Set(),decimal=value=>typeof value==='string'&&/^-?\d+(?:\.\d+)?$/.test(value)&&value.length<=200;
  const balances=body.balance_infos.map(row=>{
@@ -309,7 +337,7 @@ export function deepseekSnapshot(body,nowMs){
   seen.add(row.currency);
   return {currency:row.currency,total:row.total_balance,granted:row.granted_balance,toppedUp:row.topped_up_balance};
  });
- return {id:'deepseek',name:'DeepSeek',symbol:'sparkles',kind:'balance',available:true,estimated:false,source:'api',keySource:'manual',keyHint:'',plan:'',credits:null,windows:[],balances,isAvailable:body.is_available,lastSuccessfulAt:nowMs,stale:false,error:null,updatedAt:nowMs};
+ return {id:'deepseek',name:'DeepSeek',symbol:'sparkles',kind:'balance',available:true,estimated:false,source:'api',keySource,keyHint,plan:'',credits:null,windows:[],balances,isAvailable:body.is_available,lastSuccessfulAt:nowMs,stale:false,error:null,updatedAt:nowMs};
 }
 
 // 订阅窗口：Cursor Total 是补充明细（aside），不参与圆环范围切换。
@@ -380,6 +408,8 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
  let sqlite=null,order=providers.map(p=>p.id),state=empty(),signature='',listeners=new Set(),timer=null,reading=null,closed=false,localRowsCache=null,localDbStamp='';
  const cache=new Map(),backoff=new Map();
  let cursorAuthReading=null;
+ // DeepSeek 最近一次解析到的 Key 来源（'manual' / 'env' / 'zsh'）与变量名，失败时也保留给界面看。
+ let deepseekSource='',deepseekHint='';
  // 持久化设置（~/.bobo/usage.json）：各来源的显示顺序（order，折叠胶囊显示顺序里第一个可用且开启的）、
  // 各来源的启停、手动填的 API Key、额度重置提醒、各来源圆环显示哪一档窗口（ranges，见 cycleRange）；
  // keychain 记「用户允许读过 macOS 钥匙串里的 Claude Code 登录」，没答应过就一次都不读（见 claudeAuth）；
@@ -540,18 +570,41 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   return localSnapshot(list||[],nowMs,false,rowsError||null,'','');
  }
 
- // ---- DeepSeek：仅显式填写的官方 Key，不读取 AI 设置、环境变量或其它服务的凭据。 ----
- async function readDeepSeek(nowMs,key=settings.keyTargets.deepseek===deepseekBalanceURL?settings.keys.deepseek:''){
-  if(!key)throw userError('请填写 DeepSeek 官方 API Key；不会自动读取或复制 AI 设置里的密钥');
+ // ---- DeepSeek：官方余额 Key 依次读手动填写、环境变量、zsh 配置（只读，不写回 zsh）。 ----
+ // 应用从 Finder 启动时拿不到 shell 里 export 的变量，所以还要解析 ~/.zshrc 等文件；
+ // 解析器只认字面量赋值，不执行任何命令，也不把读到的 Key 保存到 usage.json。
+ async function zshDeepseekKey(){
+  const found=new Map();
+  for(const file of zshConfigFiles){
+   let text;try{text=await fs.readFile(path.join(home,file),'utf8');}catch{continue;}
+   for(const [name,value] of zshExportedKeys(text))found.set(name,{value,file});
+  }
+  for(const name of deepseekKeyNames){
+   const hit=found.get(name);if(hit)return {key:hit.value,keySource:'zsh',keyName:name,keyFile:hit.file};
+  }
+  return null;
+ }
+ async function deepseekKey(){
+  if(settings.keyTargets.deepseek===deepseekBalanceURL&&settings.keys.deepseek)return {key:settings.keys.deepseek,keySource:'manual',keyName:''};
+  for(const name of deepseekKeyNames){
+   const raw=cleanToken(env[name]);
+   if(raw)return {key:raw,keySource:'env',keyName:name};
+  }
+  return (await zshDeepseekKey())||{key:'',keySource:'',keyName:''};
+ }
+ async function readDeepSeek(nowMs,override=null){
+  const resolved=override?{key:override,keySource:'manual',keyName:''}:await deepseekKey();
+  deepseekSource=resolved.keySource;deepseekHint=resolved.keySource==='manual'?'':resolved.keyName||'';
+  if(!resolved.key)throw userError('未找到 DeepSeek 官方 API Key：可在下方填写，或在 ~/.zshrc / ~/.zshenv 里配置 DEEPSEEK_API_KEY');
   const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),codexTimeoutMs);
   try{
    // 目标固定且禁止重定向，代理商 Key 应留在它自己的 AI 接口配置中。
-   const response=await fetchImpl(deepseekBalanceURL,{headers:{authorization:'Bearer '+key,accept:'application/json','user-agent':'bobo'},redirect:'error',signal:controller.signal});
-   if(response.status===401||response.status===403)throw userError('DeepSeek 官方余额接口拒绝了当前 Key，请检查是否为官方 Key 及其权限');
+   const response=await fetchImpl(deepseekBalanceURL,{headers:{authorization:'Bearer '+resolved.key,accept:'application/json','user-agent':'bobo'},redirect:'error',signal:controller.signal});
+   if(response.status===401||response.status===403)throw userError('DeepSeek 官方余额接口拒绝了当前 Key（来源：'+(resolved.keySource==='manual'?'手动填写':resolved.keyName)+'），请检查是否为官方 Key 及其权限');
    if(response.status===429)throw userError('DeepSeek 官方余额接口请求受限，稍后会自动重试');
    if(!response.ok)throw userError('DeepSeek 官方余额接口返回 '+response.status);
    let body;try{body=await response.json();}catch{throw userError('DeepSeek 官方余额接口返回的不是 JSON');}
-   return deepseekSnapshot(body,nowMs);
+   return deepseekSnapshot(body,nowMs,{keySource:resolved.keySource,keyHint:deepseekHint});
   }catch(e){if(e?.userFacing)throw e;throw userError('无法连接 DeepSeek 官方余额接口，请检查网络后重试');}
   finally{clearTimeout(timeout);}
  }
@@ -951,7 +1004,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
     try{snapshot=id==='codex'?await readCodex(nowMs):id==='claude'?await readClaude(nowMs,{direct:claudeDirect}):id==='agy'?await readAgy(nowMs):id==='deepseek'?await readDeepSeek(nowMs):id==='cursor'?await readCursor(nowMs):id==='grok'?await readGrok(nowMs):id==='opencode-go'?await readOpenCodeGo(nowMs):null;}
     catch(e){
      const reason=describe(e,'读取用量失败：');
-     const base=cached?.snapshot.available?{...cached.snapshot,error:reason}:{...p,available:false,reason,error:null,windows:[],keySource:id==='deepseek'&&settings.keyTargets.deepseek===deepseekBalanceURL&&settings.keys.deepseek?'manual':'',keyHint:'',...(id==='deepseek'?{kind:'balance',balances:[],isAvailable:null,lastSuccessfulAt:null,stale:false,source:'api'}:{})};
+     const base=cached?.snapshot.available?{...cached.snapshot,error:reason}:{...p,available:false,reason,error:null,windows:[],keySource:id==='deepseek'?deepseekSource:'',keyHint:id==='deepseek'?deepseekHint:'',...(id==='deepseek'?{kind:'balance',balances:[],isAvailable:null,lastSuccessfulAt:null,stale:false,source:'api'}:{})};
      snapshot={...base,...(['cursor','grok'].includes(id)?{source:'api',estimated:false}:{}),needsDirectConfirm:e?.needsDirectConfirm===true,updatedAt:nowMs};
     }
     if(snapshot.error===undefined)snapshot.error=null;

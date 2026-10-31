@@ -472,6 +472,105 @@ private struct TodoInputRegion: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) { monitor?.view = nsView }
 }
 
+struct TodoSwipeMotion {
+    static let width: CGFloat = 68
+    private(set) var translation = CGSize.zero
+    private(set) var horizontal: Bool?
+    mutating func update(x: CGFloat, y: CGFloat) {
+        translation.width += x; translation.height += y
+        if horizontal == nil && max(abs(translation.width), abs(translation.height)) >= 6 {
+            horizontal = abs(translation.width) > abs(translation.height) * 1.3
+        }
+    }
+    func offset(revealed: Bool) -> CGFloat { min(0, max(-Self.width, (revealed ? -Self.width : 0) + translation.width)) }
+}
+
+// SwiftUI 的 ScrollView 不提供 macOS 横滑操作；只接管锁定为横向的滚轮事件，纵向继续交给列表。
+private struct TodoSwipeRegion: NSViewRepresentable {
+    var enabled: Bool
+    var onChange: (TodoSwipeMotion) -> Void
+    var onEnd: (Bool) -> Void
+    final class SwipeView: NSView {
+        var enabled = true
+        var onChange: (TodoSwipeMotion) -> Void = { _ in }
+        var onEnd: (Bool) -> Void = { _ in }
+        private var monitor: Any?
+        private var motion = TodoSwipeMotion()
+        private var tracking = false
+        private var suppressMomentum = false
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow(); stop()
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self else { return event }; return self.scroll(event)
+            }
+        }
+        func stop() { if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil; tracking = false }
+        private func scroll(_ event: NSEvent) -> NSEvent? {
+            guard enabled, event.window === window else { return event }
+            if !event.momentumPhase.isEmpty { return suppressMomentum ? nil : event }
+            let discrete = event.phase.isEmpty
+            if event.phase.contains(.began) || discrete {
+                tracking = bounds.contains(convert(event.locationInWindow, from: nil))
+                motion = TodoSwipeMotion(); suppressMomentum = false
+            }
+            guard tracking else { return event }
+            motion.update(x: event.scrollingDeltaX, y: event.scrollingDeltaY)
+            let horizontal = motion.horizontal == true
+            if horizontal { onChange(motion) }
+            if discrete || event.phase.contains(.ended) || event.phase.contains(.cancelled) {
+                tracking = false; suppressMomentum = horizontal
+                if horizontal { onEnd(event.phase.contains(.cancelled)) }
+            }
+            return horizontal ? nil : event
+        }
+    }
+    func makeNSView(context: Context) -> SwipeView { let view = SwipeView(); updateNSView(view, context: context); return view }
+    func updateNSView(_ view: SwipeView, context: Context) { view.enabled = enabled; view.onChange = onChange; view.onEnd = onEnd }
+    static func dismantleNSView(_ view: SwipeView, coordinator: ()) { view.stop() }
+}
+
+private struct IslandTodoSwipeRow<Content: View>: View {
+    @Binding var revealed: Bool
+    var enabled: Bool
+    var title: String
+    var onDelete: () -> Void
+    @ViewBuilder var content: Content
+    @State private var offset: CGFloat?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private var position: CGFloat { offset ?? (revealed ? -TodoSwipeMotion.width : 0) }
+    private func settle(_ cancelled: Bool) {
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
+            if !cancelled { revealed = position < -TodoSwipeMotion.width * 0.4 }
+            offset = nil
+        }
+    }
+    var body: some View {
+        ZStack(alignment: .trailing) {
+            Button(action: onDelete) {
+                VStack(spacing: 3) {
+                    Image(systemName: "trash").font(.system(size: 13)).foregroundStyle(Color.white)
+                        .frame(width: 56, height: 28).background(Color(red: 1, green: 0.23, blue: 0.25), in: Capsule())
+                    Text("删除").font(.system(size: 10)).foregroundStyle(Color(white: 0.65))
+                }.frame(width: TodoSwipeMotion.width)
+            }.buttonStyle(.plain).accessibilityLabel("删除：\(title)")
+                .opacity(min(1, -position / TodoSwipeMotion.width)).allowsHitTesting(revealed && offset == nil)
+                .accessibilityHidden(!revealed)
+            content.frame(minHeight: 50).background(Color(white: 0.14), in: RoundedRectangle(cornerRadius: 8))
+                .allowsHitTesting(!revealed)
+                .overlay { if revealed { Color.clear.contentShape(Rectangle()).onTapGesture { withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) { revealed = false } } } }
+                .offset(x: position)
+        }.clipped()
+            .background(TodoSwipeRegion(enabled: enabled, onChange: { motion in
+                offset = motion.offset(revealed: revealed)
+            }, onEnd: settle))
+            .accessibilityElement(children: .contain)
+            .accessibilityAction(named: Text(revealed ? "收起删除" : "显示删除")) { if enabled { withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) { revealed.toggle() } } }
+            .onChange(of: enabled) { value in if !value { revealed = false; offset = nil } }
+    }
+}
+
 struct IslandTodoView: View {
     var snapshot: TodoSnapshot
     var onManage: () -> Void
@@ -488,9 +587,11 @@ struct IslandTodoView: View {
     @State private var draft: TodoDraft?
     @State private var composerOpen = false
     @State private var editing: IslandTodoEdit?
+    @State private var swipedItem: String?
 
     private func begin(_ bucket: TodoBucket) {
         guard finishEdit(save: true) else { return }
+        swipedItem = nil
         draft = TodoDraft(bucket: bucket); composerOpen = true
         onCompose(true)
     }
@@ -501,6 +602,7 @@ struct IslandTodoView: View {
     }
     private func resumeComposer() {
         guard finishEdit(save: true) else { return }
+        swipedItem = nil
         if draft == nil { draft = TodoDraft() }
         composerOpen = true; onCompose(true)
     }
@@ -508,6 +610,7 @@ struct IslandTodoView: View {
     private func beginEdit(_ item: TodoItem, bucket: TodoBucket) {
         guard item.editable else { onOpen(item.id); return }
         guard editing?.itemID != item.id, finishEdit(save: true) else { return }
+        swipedItem = nil
         if composerOpen { hideComposer() }
         let value = TodoDraft.editing(item, bucket: bucket)
         editing = IslandTodoEdit(itemID: item.id, original: value, draft: value)
@@ -534,12 +637,12 @@ struct IslandTodoView: View {
                 }
                 HStack(spacing: 0) {
                     ForEach(snapshot.columns) { column in
-                        IslandTodoColumn(column: column, editing: editing, error: snapshot.error, lists: snapshot.lists, inputMonitor: inputMonitor,
+                        IslandTodoColumn(column: column, editing: editing, error: snapshot.error, lists: snapshot.lists, inputMonitor: inputMonitor, swipedItem: $swipedItem,
                             onEdit: { beginEdit($0, bucket: column.bucket) }, onEditChange: { if editing?.draft.id == $0.id { editing?.draft = $0 } },
                             onSaveEdit: saveEdit, onCancelEdit: { finishEdit(save: false) }, onComplete: { id, completed in
                                 let removing = editing?.itemID == id && editing?.draft.isEmpty == true
                                 if (editing?.itemID != id || finishEdit(save: true)) && !removing { onComplete(id, completed) }
-                            }, onAdd: { begin(column.bucket) })
+                            }, onDelete: { id in if finishEdit(save: true) && onDelete(id) { swipedItem = nil } }, onAdd: { begin(column.bucket) })
                             .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
                             .overlay(alignment: .leading) {
                                 if column.bucket != .today { Rectangle().fill(.white.opacity(0.07)).frame(width: 0.5).padding(.vertical, 8) }
@@ -569,11 +672,12 @@ struct IslandTodoView: View {
         }
         .animation(reduceMotion ? nil : .timingCurve(0.2, 0.8, 0.2, 1, duration: 0.18), value: composerOpen)
         .onChange(of: active) { value in
-            if !value { dismissInput() }
+            if !value { dismissInput(); swipedItem = nil }
             else if composerOpen || editing != nil { onCompose(true) }
         }
         .onChange(of: snapshot.columns) { columns in
             if let editing, !columns.contains(where: { $0.items.contains(where: { $0.id == editing.itemID }) }) { finishEdit(save: false) }
+            if let swipedItem, !columns.contains(where: { $0.items.contains(where: { $0.id == swipedItem }) }) { self.swipedItem = nil }
         }
         .onAppear { inputMonitor?.dismiss = dismissInput }
         .onDisappear { inputMonitor?.dismiss = nil; onCompose(false) }
@@ -586,7 +690,7 @@ struct IslandTodoView: View {
     }
     private var quickInput: some View {
         HStack(spacing: 8) {
-            Button(action: onManage) { TodoRemindersMark(size: 16) }.help("打开 tobo").accessibilityLabel("tobo").accessibilityIdentifier("island-todo-manage")
+            Button { TodoNavigation.open() } label: { TodoRemindersMark(size: 16) }.help("打开提醒事项").accessibilityLabel("提醒事项").accessibilityIdentifier("island-todo-manage")
             Button(action: resumeComposer) {
                 Text("todo？tobo！").font(.system(size: 12)).foregroundStyle(Color(white: 0.68))
                     .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
@@ -633,11 +737,13 @@ private struct IslandTodoColumn: View {
     var error: String
     var lists: [TodoList]
     var inputMonitor: TodoInputMonitor?
+    @Binding var swipedItem: String?
     var onEdit: (TodoItem) -> Void
     var onEditChange: (TodoDraft) -> Void
     var onSaveEdit: (TodoDraft) -> Void
     var onCancelEdit: () -> Void
     var onComplete: (String, Bool) -> Void
+    var onDelete: (String) -> Void
     var onAdd: () -> Void
     @State private var hoveredItem: String?
     var body: some View {
@@ -657,6 +763,7 @@ private struct IslandTodoColumn: View {
                 ScrollView(.vertical, showsIndicators: false) {
                     LazyVStack(spacing: 2) {
                         ForEach(column.items) { item in
+                            IslandTodoSwipeRow(revealed: Binding(get: { swipedItem == item.id }, set: { if $0 { swipedItem = item.id } else if swipedItem == item.id { swipedItem = nil } }), enabled: item.editable && editing?.itemID != item.id, title: item.title, onDelete: { onDelete(item.id) }) {
                             HStack(alignment: .top, spacing: 8) {
                                 Button { onComplete(item.id, !item.completed) } label: {
                                     Image(systemName: item.completed ? "checkmark.circle.fill" : "circle").font(.system(size: 14)).foregroundStyle(item.completed ? Color.green : Color(white: 0.65))
@@ -677,6 +784,7 @@ private struct IslandTodoColumn: View {
                             }.padding(.horizontal, 12).padding(.vertical, 10).frame(maxWidth: .infinity, alignment: .leading)
                                 .background(.white.opacity(hoveredItem == item.id ? 0.05 : 0), in: RoundedRectangle(cornerRadius: 8))
                                 .onHover { hoveredItem = $0 ? item.id : nil }
+                            }
                         }
                     }.padding(.top, 4).padding(.bottom, 44)
                 }.accessibilityLabel("\(column.title)事项，可滚动")
@@ -685,8 +793,22 @@ private struct IslandTodoColumn: View {
     }
 }
 
+// 独立弹窗要同时声明原生外观与实色底板，不能只把 SwiftUI 文字切成深色模式。
+struct TodoOptionPopover<Content: View>: View {
+    var width: CGFloat = 270
+    @ViewBuilder var content: Content
+    var body: some View {
+        content.frame(width: width).padding(12)
+            .font(.system(size: 13)).buttonStyle(.plain).foregroundStyle(.primary)
+            .tint(Color(red: 0.4, green: 0.72, blue: 1))
+            .background(Color(white: 0.14)).preferredColorScheme(.dark)
+    }
+}
+
 private struct IslandTodoCreateCard: View {
-    private enum Option { case date, alarm, notes, organize, url }
+    private enum Option { case date, time, alarm, notes, organize, url
+        var floats: Bool { self != .notes && self != .url }
+    }
     @State private var draft: TodoDraft
     @State private var dateEnabled: Bool
     @State private var timeEnabled = false
@@ -738,36 +860,83 @@ private struct IslandTodoCreateCard: View {
             HStack(spacing: 5) {
                 Image(systemName: icon).font(.system(size: 11))
                 if value == .date && dateEnabled && !inline { Text(dueDate, format: .dateTime.month().day()).font(.system(size: 10)) }
+                if value == .time && dateEnabled && timeEnabled && !inline { Text(timeText).font(.system(size: 10)).monospacedDigit() }
             }.padding(.horizontal, inline ? 4 : 6).frame(height: inline ? 22 : 24)
                 .foregroundStyle(active ? Color(red: 0.35, green: 0.7, blue: 1) : Color(white: 0.85))
-                .background(Color.white.opacity(option == value ? 0.08 : 0), in: Capsule())
+                .background(Color.white.opacity(option == value || active ? 0.08 : 0), in: Capsule())
         }.help(label).accessibilityLabel(label).accessibilityValue(option == value ? "已展开" : "已收起")
-            .popover(isPresented: Binding(get: { inline && option == value }, set: { if !$0 && option == value { option = nil } }), arrowEdge: .bottom) {
-                optionFields.frame(width: 270).padding(12).foregroundStyle(Color.white).environment(\.colorScheme, .dark)
+            .popover(isPresented: Binding(get: { value.floats && option == value }, set: { if !$0 && option == value { option = nil } }), arrowEdge: .bottom) {
+                TodoOptionPopover(width: value == .time ? 200 : 270) { optionFields(value) }
             }
     }
-    @ViewBuilder private var optionFields: some View {
-        if option == .notes { field("备注", $draft.details.notes) }
-        if option == .date {
+    private var timeText: String {
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.dateFormat = "HH:mm"
+        return formatter.string(from: dueDate)
+    }
+    private func selectDate(_ date: Date) {
+        let calendar = Calendar.current
+        let time = calendar.dateComponents([.hour, .minute], from: dueDate)
+        dueDate = calendar.date(bySettingHour: time.hour ?? 9, minute: time.minute ?? 0, second: 0, of: date) ?? date
+        dateEnabled = true
+    }
+    private func selectTime(_ hour: Int) {
+        guard let date = Calendar.current.date(bySettingHour: hour, minute: 0, second: 0, of: dueDate) else { return }
+        dueDate = date; dateEnabled = true; timeEnabled = true; option = nil
+    }
+    private func choice(_ title: String, icon: String, subtitle: String? = nil, selected: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: icon).foregroundStyle(.secondary).frame(width: 16)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).monospacedDigit()
+                    if let subtitle { Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary) }
+                }
+                Spacer(minLength: 0)
+                if selected { Image(systemName: "checkmark").foregroundStyle(.tint) }
+            }.padding(.horizontal, 8).padding(.vertical, 7).contentShape(Rectangle())
+                .background(selected ? Color.white.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 8))
+        }.accessibilityLabel(subtitle.map { title + "，" + $0 } ?? title)
+    }
+    @ViewBuilder private func optionFields(_ value: Option) -> some View {
+        if value == .date {
             VStack(spacing: 10) {
-                HStack { Text("日期"); Spacer(); if dateEnabled { DatePicker("日期", selection: $dueDate, displayedComponents: .date).labelsHidden() }; Toggle("日期", isOn: $dateEnabled).labelsHidden().toggleStyle(.switch) }
+                choice("无日期", icon: "calendar.badge.minus", selected: !dateEnabled) { dateEnabled = false; timeEnabled = false; option = nil }
+                HStack(spacing: 8) {
+                    Button { selectDate(Date()); option = nil } label: {
+                        Text("今天").frame(maxWidth: .infinity).frame(height: 28).contentShape(Rectangle())
+                    }
+                    Button { selectDate(Calendar.current.date(byAdding: .day, value: 1, to: Date())!); option = nil } label: {
+                        Text("明天").frame(maxWidth: .infinity).frame(height: 28).contentShape(Rectangle())
+                    }
+                }.foregroundStyle(.tint).buttonStyle(.bordered)
                 Divider()
-                HStack { Text("时间").foregroundStyle(Color(white: dateEnabled ? 0.95 : 0.65)); Spacer(); if dateEnabled && timeEnabled { DatePicker("时间", selection: $dueDate, displayedComponents: .hourAndMinute).labelsHidden() }; Toggle("时间", isOn: $timeEnabled).labelsHidden().toggleStyle(.switch).disabled(!dateEnabled) }
-            }.padding(12).background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 12))
+                DatePicker("日期", selection: Binding(get: { dueDate }, set: { selectDate($0) }), displayedComponents: .date).datePickerStyle(.graphical).labelsHidden()
+                    .padding(8).frame(maxWidth: .infinity).background(Color(white: 0.11), in: RoundedRectangle(cornerRadius: 10))
+            }
         }
-        if option == .alarm {
+        if value == .time {
+            VStack(spacing: 0) {
+                choice("无", icon: "clock", selected: !timeEnabled) { timeEnabled = false; option = nil }
+                ForEach([9, 12, 15, 18, 21], id: \.self) { hour in
+                    choice(String(format: "%02d:00", hour), icon: "clock", subtitle: [9: "上午", 12: "中午", 15: "下午", 18: "晚上", 21: "夜间"][hour], selected: dateEnabled && timeEnabled && timeText == String(format: "%02d:00", hour)) { selectTime(hour) }
+                }
+                Divider().padding(.vertical, 6)
+                HStack {
+                    Text("自定")
+                    Spacer()
+                    DatePicker("自定时间", selection: Binding(get: { dueDate }, set: { dueDate = $0; dateEnabled = true; timeEnabled = true }), displayedComponents: .hourAndMinute).labelsHidden()
+                }.padding(.horizontal, 8).padding(.vertical, 6)
+            }
+        }
+        if value == .alarm {
             HStack { Text("提醒我"); Spacer(); if alarmEnabled { DatePicker("提醒时间", selection: $alarmDate).labelsHidden() }; Toggle("提醒我", isOn: $alarmEnabled).labelsHidden().toggleStyle(.switch) }
-                .padding(12).background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 12))
         }
-        if option == .organize {
+        if value == .organize {
             VStack(spacing: 10) {
                 HStack { Text("列表"); Spacer(); Picker("列表", selection: $draft.listID) { Text("系统默认").tag(""); ForEach(lists) { Text($0.title).tag($0.id) } }.labelsHidden().pickerStyle(.menu).buttonStyle(.bordered).frame(maxWidth: 240) }
                 Divider()
                 HStack { Text("优先级"); Spacer(); Picker("优先级", selection: $draft.details.priority) { Text("无").tag(0); Text("低").tag(9); Text("中").tag(5); Text("高").tag(1) }.labelsHidden().pickerStyle(.menu).buttonStyle(.bordered).frame(maxWidth: 240) }
-            }.padding(12).background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 12))
-        }
-        if option == .url {
-            field("URL", $draft.details.url).padding(12).background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 12))
+            }
         }
     }
     var body: some View {
@@ -781,22 +950,24 @@ private struct IslandTodoCreateCard: View {
                 }
             }
                 VStack(alignment: .leading, spacing: 8) {
-                    if !inline { optionFields }
+                    if option == .notes || !draft.details.notes.isEmpty { field("备注", $draft.details.notes) }
+                    if option == .url || !draft.details.url.isEmpty { field("URL", $draft.details.url) }
                     if !error.isEmpty { Text(error).font(.system(size: 11)).foregroundStyle(.orange) }
                     if lists.isEmpty { Text("没有可写列表，请在提醒事项中先创建列表。").font(.system(size: 11)).foregroundStyle(.orange) }
                 }.font(.system(size: 11))
-            HStack(spacing: inline ? 4 : 8) {
-                HStack(spacing: inline ? 2 : 6) {
+            HStack(spacing: 4) {
+                HStack(spacing: 2) {
                     if !inline {
-                        Button(action: onManage) { TodoRemindersMark(size: 16).frame(width: 24, height: 24) }.help("打开 tobo").accessibilityLabel("tobo")
+                        Button { TodoNavigation.open() } label: { TodoRemindersMark(size: 16).frame(width: 24, height: 24) }.help("打开提醒事项").accessibilityLabel("提醒事项")
                     }
-                    tool(.date, "calendar", "日期与时间", active: dateEnabled)
+                    tool(.date, "calendar", "日期", active: dateEnabled)
+                    tool(.time, "clock", "时间", active: dateEnabled && timeEnabled)
                     tool(.alarm, "bell", "提醒时间", active: alarmEnabled)
                     tool(.notes, "note.text", "备注", active: !draft.details.notes.isEmpty)
                     tool(.organize, "list.bullet", "列表与优先级", active: draft.details.priority > 0)
                     tool(.url, "link", "URL", active: !draft.details.url.isEmpty)
                 }
-                Spacer(minLength: inline ? 0 : 8)
+                Spacer(minLength: 0)
                 Button(action: save) { Image(systemName: "return").font(.system(size: 11)).foregroundStyle(Color.white).frame(width: inline ? 22 : 28, height: inline ? 22 : 24).background(Color.blue.opacity(0.65), in: Capsule()) }
                     .disabled((draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !(inline && draft.isEmpty)) || lists.isEmpty).accessibilityIdentifier("island-todo-create")
                     .accessibilityLabel(inline ? (draft.isEmpty ? "删除空白事项" : "保存提醒事项") : "添加提醒事项").help(inline ? "回车保存" : "回车添加")
