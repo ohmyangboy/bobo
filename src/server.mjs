@@ -22,6 +22,8 @@ import { createLinks } from './links.mjs';
 import { createTerminals } from './terminals.mjs';
 import { createBrowser } from './browser.mjs';
 import { createUpdate } from './update.mjs';
+import { createAwake } from './awake.mjs';
+import { createLoginItem } from './login-item.mjs';
 import { pruneBackups } from './backups.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -31,6 +33,8 @@ import { randomBytes, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 const here=path.dirname(fileURLToPath(import.meta.url)),root=path.join(here,'..');
 const home=process.env.BOBO_HOME||os.homedir();
+const awake=createAwake({home,executable:path.join(root,'bin/awake')});
+const loginItem=createLoginItem();
 const ai=createAI(home);
 const reader=createSkillReader({home,ai,resolveSkill:skill});
 const port=Number(process.env.PORT||4318), token=randomBytes(24).toString('hex');
@@ -235,6 +239,8 @@ const server=http.createServer(async(req,res)=>{
    if(req.headers['x-bobo-token']!==token)fail('请刷新页面后重试',403);
    if(req.headers.origin&&req.headers.origin!=='http://'+req.headers.host)fail('跨站请求被拒绝',403);
    if(req.method==='GET'&&url.pathname==='/api/startup')return json(await startup());
+   if(req.method==='GET'&&url.pathname==='/api/awake/settings')return json(await awake.settings());
+   if(req.method==='GET'&&url.pathname==='/api/app/login-item')return json(await loginItem.snapshot());
    if(req.method==='GET'&&url.pathname==='/api/skills')return json(await list(url.searchParams.has('refresh')));
     // 技能 → Agent：本机已安装且支持的 Agent 清单（含逐技能安装状态用的 agentLinks）。
     if(req.method==='GET'&&url.pathname==='/api/skill/agents')return json(await skills.agents());
@@ -299,6 +305,8 @@ const server=http.createServer(async(req,res)=>{
    }
    if(req.method!=='POST')fail('不存在的接口',404);
    const b=await body(req,url.pathname==='/api/butler/reply'?23*1024*1024:1100000);
+   if(url.pathname==='/api/awake/settings')return json(await awake.save(b));
+   if(url.pathname==='/api/app/login-item')return json(await loginItem.save(b));
    if(url.pathname==='/api/ai/settings')return json(await ai.save(b));
    if(url.pathname==='/api/butler/settings')return json(await butler.saveSettings(b));
    if(url.pathname==='/api/butler/refresh')return json(await butler.refresh());

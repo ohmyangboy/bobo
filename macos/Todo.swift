@@ -657,20 +657,23 @@ struct IslandTodoView: View {
                     if composerOpen, let draft {
                         IslandTodoCreateCard(initial: draft, lists: snapshot.lists, error: snapshot.error, inputMonitor: inputMonitor, onManage: onManage, showCompleted: snapshot.showCompleted, onShowCompleted: { onShowCompleted(!snapshot.showCompleted) }, onDraftChange: { if draft.id == $0.id { self.draft = $0 } }, onCancel: hideComposer, onSave: { value in
                             if onCreate(value) { finish() }
-                        }).id(draft.id).fixedSize(horizontal: false, vertical: true).transition(.opacity)
+                        }).id(draft.id).fixedSize(horizontal: false, vertical: true)
+                            .transaction { $0.animation = nil }
+                            .transition(.opacity)
                     } else {
                         quickInput.transition(.opacity)
                     }
                 }
-                .frame(maxWidth: composerOpen ? 360 : 236)
+                .frame(maxWidth: composerOpen ? 360 : 128)
                 .background(Color(white: 0.12).opacity(composerOpen ? 0.85 : 0), in: RoundedRectangle(cornerRadius: 26))
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26))
                 .overlay(RoundedRectangle(cornerRadius: 26).stroke(.white.opacity(0.14), lineWidth: 0.5))
+                .clipShape(RoundedRectangle(cornerRadius: 26))
                 .shadow(color: .black.opacity(0.2), radius: 10, y: 3)
                 .padding(.horizontal, 32).padding(.vertical, 18)
+                .animation(reduceMotion ? nil : .timingCurve(0.2, 0.8, 0.2, 1, duration: 0.18), value: composerOpen)
             }
         }
-        .animation(reduceMotion ? nil : .timingCurve(0.2, 0.8, 0.2, 1, duration: 0.18), value: composerOpen)
         .onChange(of: active) { value in
             if !value { dismissInput(); swipedItem = nil }
             else if composerOpen || editing != nil { onCompose(true) }
@@ -692,9 +695,9 @@ struct IslandTodoView: View {
         HStack(spacing: 8) {
             Button { TodoNavigation.open() } label: { TodoRemindersMark(size: 16) }.help("打开提醒事项").accessibilityLabel("提醒事项").accessibilityIdentifier("island-todo-manage")
             Button(action: resumeComposer) {
-                Text("todo？tobo！").font(.system(size: 12)).foregroundStyle(Color(white: 0.68))
-                    .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-            }.accessibilityLabel("todo？tobo！").help("添加提醒事项")
+                Text("tobo!").font(.system(size: 12)).foregroundStyle(Color(white: 0.68))
+                    .frame(maxWidth: .infinity).contentShape(Rectangle())
+            }.accessibilityLabel("tobo!").help("添加提醒事项")
             TodoMoreMenu(showCompleted: snapshot.showCompleted, onManage: onManage, onShowCompleted: { onShowCompleted(!snapshot.showCompleted) })
         }.padding(.horizontal, 14).padding(.vertical, 10)
     }
@@ -983,7 +986,14 @@ private struct IslandTodoCreateCard: View {
             .onChange(of: timeEnabled) { _ in changed() }
             .onChange(of: alarmEnabled) { _ in changed() }
             .onChange(of: alarmDate) { _ in changed() }
-            .task { await Task.yield(); titleFocused = true }.onExitCommand(perform: onCancel)
+            .task {
+                // 原生 field editor 不参与胶囊的淡入 / 缩放，等展开落定后再获取焦点。
+                if !inline && !reduceMotion {
+                    do { try await Task.sleep(nanoseconds: 180_000_000) } catch { return }
+                } else { await Task.yield() }
+                guard !Task.isCancelled else { return }
+                titleFocused = true
+            }.onExitCommand(perform: onCancel)
     }
     private func changed() { onDraftChange(value()) }
     private func value() -> TodoDraft {

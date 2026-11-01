@@ -28,6 +28,8 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     private var islandHosting: NSHostingView<IslandView>?
     private let islandModel = IslandModel()
     private let todoInputMonitor = TodoInputMonitor()
+    private let awakeController = AwakeIslandController()
+    private static let barOrderKey = "bobo.island.barOrder"
     private let todoStore = TodoStore(repository: EventKitTodoRepository(), defaults: .standard)
     private var todoBridge: TodoWebBridge?
     private var todoObserver: AnyCancellable?
@@ -97,6 +99,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     private var attempts = 0
 
     static func main() {
+        if let code = BoboLoginItem.runIfRequested(Array(CommandLine.arguments.dropFirst())) { exit(code) }
         let app = NSApplication.shared
         let delegate = Bobo()
         app.delegate = delegate
@@ -111,7 +114,15 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         setupMainMenu()
         setupStatusMenu()
         setupWindow()
+        islandModel.barOrder = UserDefaults.standard.stringArray(forKey: Self.barOrderKey) ?? []
         setupNotch()
+        awakeController.onActiveChanged = { [weak self] active in
+            guard let self else { return }
+            self.islandModel.awakeActive = active
+            self.scheduleIslandLayout()
+        }
+        awakeController.tokenProvider = { [weak self] in self?.apiToken ?? "" }
+        awakeController.start()
         todoObserver = todoStore.$snapshot.sink { [weak self] snapshot in
             guard let self else { return }
             self.islandModel.todoContentHeight = snapshot.height
@@ -305,6 +316,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         notchWindow.isMovableByWindowBackground = false
         notchWindow.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 2)
         notchWindow.backgroundColor = .clear
+        notchWindow.appearance = NSAppearance(named: .darkAqua)
         notchWindow.isOpaque = false
         notchWindow.hasShadow = false
         notchWindow.isReleasedWhenClosed = false
@@ -312,6 +324,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         notchWindow.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         let hosting = IslandHostingView(rootView: IslandView(
             model: islandModel,
+            awake: awakeController,
             todo: todoStore,
             todoInputMonitor: todoInputMonitor,
             onTodo: { [weak self] id in
@@ -356,6 +369,11 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
                 guard let self, !self.islandDragging else { return }
                 // 面板并排的圆环按住拖动：写 usage.json 的 order，与网页「通知岛 → 内容 → 额度显示顺序」同一份。
                 self.postIsland("/api/usage/order", ["ids": ids])
+            },
+            onBarReorder: { [weak self] ids in
+                guard let self, !self.islandDragging else { return }
+                self.islandModel.barOrder = ids
+                UserDefaults.standard.set(ids, forKey: Self.barOrderKey)
             },
             onQuotaDrag: { [weak self] dragging in
                 guard let self else { return }
@@ -457,7 +475,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
 
     // 前台应用（排除 bobo 自己）是否正处于全屏：进入全屏会切到一个专属空间，窗口铺满整块屏幕
     // （连菜单栏/刘海那一条也占掉）。这时通知岛要让位——它带着 .fullScreenAuxiliary，会一直顶在全屏内容上。
-    // 判定复用取窗口的同一段逻辑：前台应用的 layer 0 窗口与某块屏幕的完整 frame 完全重合即为全屏。
+    // 判定复用取窗口的同一段逻辑，同时识别 Chrome 在刘海下方铺满的全屏主窗口与分离工具栏。
     private func frontmostFullScreenCached(force: Bool = false) -> Bool {
         let now = Date()
         if force || fullScreenCheckedAt == nil || now.timeIntervalSince(fullScreenCheckedAt!) >= 1 {
@@ -468,25 +486,27 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     }
 
     private func frontmostAppFullScreen() -> Bool {
-        // 只看前台主窗口（略过全屏工具栏），不能让后面的旧全屏窗口继续把通知岛藏住。
-        guard let rect = frontmostWindowBounds() else { return false }
-        // 窗口 bounds 是 Quartz 坐标（左上角原点），按显示器 ID 取 bounds，避免上下排列多屏误判。
-        let displays = NSScreen.screens.compactMap { screen -> CGRect? in
-            guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else { return nil }
-            return CGDisplayBounds(id)
-        }
-        return IslandWindowGeometry.isFullScreen(rect, displays: displays)
+        frontmostWindowBounds(fullScreenOnly: true) != nil
     }
 
     // 前台应用（排除 bobo 自己）最上面那个普通窗口的位置；拿不到就返回 nil（保持当前屏幕）。
-    private func frontmostWindowBounds() -> CGRect? {
+    private func frontmostWindowBounds(fullScreenOnly: Bool = false) -> CGRect? {
         guard let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return nil }
         guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
-        let displays = NSScreen.screens.compactMap { screen -> CGRect? in
+        // 使用 Quartz 坐标；刘海安全区来自对应屏幕，不能套用主屏高度或普通窗口的 visibleFrame。
+        let screens = NSScreen.screens.compactMap { screen -> (CGRect, CGFloat)? in
             guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else { return nil }
-            return CGDisplayBounds(id)
+            return (CGDisplayBounds(id), screen.safeAreaInsets.top)
         }
-        return IslandWindowGeometry.frontmostBounds(windows, pid: front.processIdentifier, displays: displays)
+        let displays = screens.map { $0.0 }
+        let cameraSafeAreas = screens.compactMap { bounds, inset -> CGRect? in
+            guard inset > 0 else { return nil }
+            return CGRect(x: bounds.minX, y: bounds.minY + inset, width: bounds.width, height: bounds.height - inset)
+        }
+        if fullScreenOnly {
+            return IslandWindowGeometry.fullScreenBounds(windows, pid: front.processIdentifier, displays: displays, cameraSafeAreas: cameraSafeAreas)
+        }
+        return IslandWindowGeometry.frontmostBounds(windows, pid: front.processIdentifier, displays: displays, cameraSafeAreas: cameraSafeAreas)
     }
 
     // 屏幕配置变化时 macOS 发通知，但此刻 NSScreen.screens 可能还没更新：立刻 + 0.5 秒各处理一次。
@@ -544,10 +564,10 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         let notch = notched ? notchWidth(screen) : 0
         islandModel.avatarLimit = IslandBarGeometry.avatarCapacity(screenWidth: screen.frame.width, keepOut: notch > 0 ? notch + IslandMetrics.notchGap * 2 : IslandMetrics.itemSpacing)
         let plan = islandModel.avatarPlan
-        // 额度圆环画几枚：折叠态与「点击切换」方式只有当前选中的那一枚，「展开并排」方式在展开时
-        // 按设置并排显示各来源，数量由中轴线到屏幕右缘的剩余空间决定（自适应，见 IslandBarGeometry.quotaChips）。
+        // 默认折叠只显示当前额度；头像撑宽了两翼时，用右侧已有空位补充其它额度，不再额外撑宽。
+        // 展开时仍按设置与屏幕空间取舍（见 IslandBarGeometry.quotaChips）。
         islandModel.quotaChipLimit = quotaChipLimit(for: screen, keepOut: notch > 0 ? notch + IslandMetrics.notchGap * 2 : IslandMetrics.itemSpacing)
-        // 内容宽度按同一套图标规格算：头像（空位时是默认的置灰 bobo）+ 额度圆环 + 设备 + 网络（+ 展开时的设置与退出）。
+        // 内容宽度按同一套图标规格算：头像（空位时是默认的置灰 bobo）+ 额度圆环 + 设备 + 网络（+ 展开时的 awake、设置与退出）。
         // 头像按脸宽（19）算：圆环外沿是 22，这样画面里每一段间距看起来都是同一个 itemSpacing。
         let widths = IslandBarGeometry.contentWidths(
             faces: islandModel.busy.isEmpty ? 1 : plan.shown,
@@ -556,7 +576,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             device: islandModel.device != nil,
             network: islandModel.network != nil,
             actionButtons: islandModel.expanded,
-            wideQuota: wideQuotaWidth(for: screen))
+            awake: islandModel.expanded, quotaWidths: islandModel.barQuotaProviders.map { IslandMetrics.quotaChipWidth($0, barHeight: islandBarHeight(screen)) })
         // 刘海屏上下同宽，列表沿用顶部内容宽度；外接屏保留原有展开宽度。
         let minWidth: CGFloat = islandModel.expanded ? min(todoStore.snapshot.enabled ? 620 : 480, screen.frame.width - IslandMetrics.screenEdgeMargin * 2) : 0
         let layout = IslandBarGeometry.layout(left: widths.left, right: widths.right, notch: notch, minWidth: minWidth)
@@ -567,34 +587,25 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         return NSSize(width: width, height: islandBarHeight(screen) + islandModel.expandedContentHeight)
     }
 
-    // 余额 chip 的额外宽度（余额模式且刘海够高时）；百分比模式与普通额度一样保持 22。
-    private func wideQuotaWidth(for screen: NSScreen) -> CGFloat {
-        let barHeight = islandBarHeight(screen), size = IslandMetrics.balanceChipSize(barHeight: barHeight)
-        guard size > IslandMetrics.itemSize else { return 0 }
-        if islandModel.expanded, islandModel.settings.quotaView == "expand" {
-            // 展开并排时宁可多留一点：余额 chip 在展示集合里就按宽的那枚算（被 limit 截掉只是浪费几 pt）。
-            return islandModel.usage?.subscriptions.contains { $0.kind == "balance" && $0.balanceMode != "percent" } == true ? size : 0
+    // 顶栏显示几枚额度图标。折叠态只填充头像已撑出的对称翼宽，不为补充图标增加面板宽度。
+    private func quotaChipLimit(for screen: NSScreen, keepOut: CGFloat, expanded: Bool? = nil) -> Int {
+        let expanded = expanded ?? islandModel.expanded
+        let baseline = islandModel.usage?.displayed?.hasQuotaIndicator == true ? 1 : 0
+        guard islandModel.settings.quotaView == "expand", let quota = islandModel.usage else { return baseline }
+        let candidates = quota.barProviders(count: quota.subscriptions.count, expanded: expanded)
+        let widths = candidates.map { IslandMetrics.quotaChipWidth($0, barHeight: islandBarHeight(screen)) }
+        if expanded {
+            return IslandBarGeometry.quotaChips(count: widths.count, limit: islandModel.settings.quotaCount,
+                screenWidth: screen.frame.width, keepOut: keepOut, device: islandModel.device != nil,
+                network: islandModel.network != nil, actionButtons: true, awake: true, quotaWidths: widths)
         }
-        guard let shown = islandModel.usage?.displayed else { return 0 }
-        return shown.kind == "balance" && shown.balanceMode != "percent" ? size : 0
-    }
-
-    // 顶部栏该画几枚额度圆环（写进 IslandModel.quotaChipLimit，SwiftUI 只按它渲染前几家）：
-    // 折叠态与「点击切换」方式恒为当前选中的那一枚（没有窗口可画时 0 枚）；「展开并排」方式在展开时
-    // 把可用来源交给 IslandBarGeometry.quotaChips 按屏幕剩余空间取数量。
-    private func quotaChipLimit(for screen: NSScreen, keepOut: CGFloat) -> Int {
-        guard islandModel.expanded, islandModel.settings.quotaView == "expand" else {
-            return islandModel.usage?.displayed?.hasQuotaIndicator == true ? 1 : 0
-        }
-        return IslandBarGeometry.quotaChips(
-            count: islandModel.usage?.subscriptions.count ?? 0,
-            limit: islandModel.settings.quotaCount,
-            screenWidth: screen.frame.width,
-            keepOut: keepOut,
-            device: islandModel.device != nil,
-            network: islandModel.network != nil,
-            actionButtons: islandModel.expanded,
-            wideQuota: wideQuotaWidth(for: screen))
+        guard baseline > 0, Self.hasNotch(screen), abs(islandOffset) < 1 else { return baseline }
+        let capacity = IslandBarGeometry.avatarCapacity(screenWidth: screen.frame.width, keepOut: keepOut)
+        let plan = IslandBarGeometry.avatars(islandModel.busy.count, cap: capacity)
+        let left = IslandBarGeometry.contentWidths(faces: islandModel.busy.isEmpty ? 1 : plan.shown, hidden: plan.hidden,
+            quota: 0, device: false, network: false, actionButtons: false).left
+        return IslandBarGeometry.balancedQuotaChips(left: left, quotaWidths: widths,
+            limit: islandModel.settings.quotaCount, device: islandModel.device != nil, network: islandModel.network != nil, awake: false)
     }
 
     // 窗口包络始终以屏幕中心加拖动偏移定位；刘海屏的顶部栏在包络内独立对齐。
@@ -884,7 +895,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         panel.hasShadow = true
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
-        let hosting = IslandHostingView(rootView: IslandDetailView(model: islandModel))
+        let hosting = IslandHostingView(rootView: IslandDetailView(model: islandModel, awake: awakeController))
         hosting.onHoverChange = { [weak self] hovering in
             guard let self else { return }
             if hovering { self.detailHideWork?.cancel() } else { self.scheduleDetailHide() }
@@ -1066,6 +1077,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     // 明细卡弹出时顺手让服务端立刻采一次最新数据：磁盘常驻采样约 60 秒一轮、网络延迟约 6 秒一轮、额度也各有节奏，
     // 等下一轮太慢；数据变了服务端会经状态流推回来，卡片跟着刷新。
     private func refreshDetail(_ kind: IslandDetailKind) {
+        if kind == .awake { return }
         let path = kind == .quota ? "/api/usage?refresh=1" : kind == .device ? "/api/devices?refresh=1" : "/api/network?refresh=1"
         guard !apiToken.isEmpty, let url = URL(string: "http://127.0.0.1:4318" + path) else { return }
         var request = URLRequest(url: url)
@@ -1192,10 +1204,11 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         let notch = notched ? notchWidth(screen) : 0
         let limit = IslandBarGeometry.avatarCapacity(screenWidth: screen.frame.width, keepOut: notch > 0 ? notch + IslandMetrics.notchGap * 2 : IslandMetrics.itemSpacing)
         let plan = IslandBarGeometry.avatars(islandModel.busy.count, cap: limit)
-        let quota = islandModel.usage?.displayed?.hasQuotaIndicator == true ? 1 : 0
+        let quota = quotaChipLimit(for: screen, keepOut: notch > 0 ? notch + IslandMetrics.notchGap * 2 : IslandMetrics.itemSpacing, expanded: false)
+        let quotaWidths = (islandModel.usage?.barProviders(count: quota, expanded: false) ?? []).map { IslandMetrics.quotaChipWidth($0, barHeight: islandBarHeight(screen)) }
         let widths = IslandBarGeometry.contentWidths(faces: islandModel.busy.isEmpty ? 1 : plan.shown, hidden: plan.hidden, quota: quota,
                                                      device: islandModel.device != nil, network: islandModel.network != nil, actionButtons: false,
-                                                     wideQuota: wideQuotaWidth(for: screen))
+                                                     awake: false, quotaWidths: quotaWidths)
         let layout = IslandBarGeometry.layout(left: widths.left, right: widths.right, notch: notch)
         let barWidth = IslandBarGeometry.envelope(layout)
         return IslandBarGeometry.width(layout, minWidth: barWidth, maxWidth: screen.frame.width - IslandMetrics.screenEdgeMargin * 2)
@@ -1679,6 +1692,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         return true
     }
     func applicationWillTerminate(_ notification: Notification) {
+        awakeController.stopMonitoring()
         menuBarWatchTimer?.invalidate()
         if let islandOutsideMonitor { NSEvent.removeMonitor(islandOutsideMonitor) }
         if let islandLocalOutsideMonitor { NSEvent.removeMonitor(islandLocalOutsideMonitor) }
@@ -1761,7 +1775,7 @@ private final class IslandHostingView<Content: View>: NSHostingView<Content> {
 
 // 单个行 / 控件的悬停：非激活面板上 SwiftUI 的 onHover 收不到事件（见 IslandHostingView 注释），
 // 所以这里同样用 .activeAlways 的跟踪区自己上报；hitTest 返回 nil，鼠标点击照常透传给底下的 SwiftUI 按钮。
-private final class HoverTrackingView: NSView {
+final class HoverTrackingView: NSView {
     var onHoverChange: ((Bool) -> Void)?
     private var tracking: NSTrackingArea?
     var hoverRegion: IslandHoverRegion {
@@ -1811,7 +1825,7 @@ private struct HoverReporter: NSViewRepresentable {
 }
 
 // 明细卡另外保留对真实图标区域的弱引用，半秒后弹出时再读取，布局变化不会留下旧热区。
-private struct DetailHoverReporter: NSViewRepresentable {
+struct DetailHoverReporter: NSViewRepresentable {
     var onChange: (Bool, IslandHoverRegion) -> Void
     func makeNSView(context: Context) -> HoverTrackingView {
         let view = HoverTrackingView()
@@ -1828,7 +1842,17 @@ private struct DetailHoverReporter: NSViewRepresentable {
 
 // WindowServer 的屏幕窗口按前后顺序排列；全屏判定与自动选屏共用最上面的可见普通窗口。
 enum IslandWindowGeometry {
-    static func frontmostBounds(_ windows: [[String: Any]], pid: pid_t, displays: [CGRect]) -> CGRect? {
+    static func frontmostBounds(_ windows: [[String: Any]], pid: pid_t, displays: [CGRect], cameraSafeAreas: [CGRect] = []) -> CGRect? {
+        selection(windows, pid: pid, displays: displays, cameraSafeAreas: cameraSafeAreas).frontmost
+    }
+
+    static func fullScreenBounds(_ windows: [[String: Any]], pid: pid_t, displays: [CGRect], cameraSafeAreas: [CGRect] = []) -> CGRect? {
+        let result = selection(windows, pid: pid, displays: displays, cameraSafeAreas: cameraSafeAreas)
+        guard let frontmost = result.frontmost, result.fullScreen.contains(frontmost) else { return nil }
+        return frontmost
+    }
+
+    private static func selection(_ windows: [[String: Any]], pid: pid_t, displays: [CGRect], cameraSafeAreas: [CGRect]) -> (frontmost: CGRect?, fullScreen: [CGRect]) {
         let bounds = windows.compactMap { window -> CGRect? in
             guard let owner = window[kCGWindowOwnerPID as String] as? pid_t, owner == pid,
                   let layer = window[kCGWindowLayer as String] as? Int, layer == 0,
@@ -1837,17 +1861,29 @@ enum IslandWindowGeometry {
                   let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary), rect.width > 0, rect.height > 0 else { return nil }
             return rect
         }
-        let fullScreenDisplays = displays.filter { display in bounds.contains { isFullScreen($0, displays: [display]) } }
-        return bounds.first { rect in
+        func toolbar(_ rect: CGRect, above main: CGRect) -> Bool {
+            abs(rect.minX - main.minX) < 1 && abs(rect.width - main.width) < 1
+                && rect.minY <= main.minY + 1 && rect.maxY > main.minY
+                && rect.maxY <= main.minY + main.height * 0.2
+        }
+        let fullScreen = bounds.enumerated().compactMap { index, rect -> CGRect? in
+            if isFullScreen(rect, displays: displays) { return rect }
+            // 刘海屏现场：显示器 1470×956，视频主窗口 (0,33,1470,923)，安全区为 32pt。
+            // 仅匹配安全区还会命中最大化普通窗口；必须同时有前置、同宽的分离工具栏作为全屏证据。
+            let fillsCameraArea = cameraSafeAreas.contains { area in
+                abs(rect.minX - area.minX) < 1 && abs(rect.width - area.width) < 1
+                    && abs(rect.minY - area.minY) < 2 && abs(rect.maxY - area.maxY) < 1
+            }
+            guard fillsCameraArea, bounds.prefix(index).contains(where: { toolbar($0, above: rect) }) else { return nil }
+            return rect
+        }
+        let frontmost = bounds.first { rect in
             guard displays.contains(where: { !rect.intersection($0).isEmpty }) else { return false }
             // Chrome 的全屏工具栏也是 layer 0，甚至收在屏幕顶边之外。只有同屏存在全屏主窗口时，
             // 才略过贴住顶边、横跨整屏的短条；前面的普通窗口仍优先，不能被后面的旧全屏窗口压住。
-            let toolbar = fullScreenDisplays.contains { display in
-                abs(rect.minX - display.minX) < 1 && abs(rect.width - display.width) < 1
-                    && rect.minY <= display.minY + 1 && rect.maxY <= display.minY + display.height * 0.2
-            }
-            return !toolbar
+            return !fullScreen.contains { toolbar(rect, above: $0) }
         }
+        return (frontmost, fullScreen)
     }
 
     static func isFullScreen(_ rect: CGRect, displays: [CGRect]) -> Bool {
@@ -2020,7 +2056,7 @@ struct IslandQuotaBalanceView: Decodable, Equatable {
     }
 }
 
-// 一家额度的快照（Codex 走 chatgpt.com，Claude Code 走 api.anthropic.com，OpenCode Go 读本机数据库估算，agy 走本地语言服务 / CLI）。
+// 一家额度的快照（Codex 走 chatgpt.com，Claude Code 走 api.anthropic.com，OpenCode Go 只显示官方额度，本机库仅作历史，agy 走本地语言服务 / CLI）。
 struct IslandQuotaProvider: Decodable, Equatable {
     var id = "", name = "", symbol = "", available = false, enabled = true, estimated = false, plan = ""
     // 圆环显示这一家的哪一档窗口（session / week / month …）：服务端记住，点圆环循环（见 Bobo.onQuotaRange）。
@@ -2093,6 +2129,13 @@ struct IslandQuota: Decodable, Equatable {
         selectable.first { $0.id == selected } ?? selectable.first
     }
     var switchable: Bool { selectable.count > 1 }
+    // 折叠补充图标时始终保留当前来源；展开时仍按服务端的额度顺序展示。
+    func barProviders(count: Int, expanded: Bool) -> [IslandQuotaProvider] {
+        guard count > 0 else { return [] }
+        if expanded { return Array(subscriptions.prefix(count)) }
+        guard let displayed, displayed.showable else { return [] }
+        return Array(([displayed] + subscriptions.filter { $0.id != displayed.id }).prefix(count))
+    }
 }
 
 // 设备快照（服务端 devices.mjs 挂在状态流里）：折叠胶囊的额度右边那枚设备指示读它。
@@ -2281,6 +2324,9 @@ enum IslandMetrics {
     // 余额 chip 在 22pt 里放不下能看清的数字：按刘海高度放大到 32pt（余额横排在上、图标在下），
     // 外接屏 / 矮菜单栏退回 24pt。百分比模式继续保持 22pt，与其他额度一致。
     static func balanceChipSize(barHeight: CGFloat) -> CGFloat { min(32, max(24, barHeight)) }
+    static func quotaChipWidth(_ provider: IslandQuotaProvider, barHeight: CGFloat) -> CGFloat {
+        provider.kind == "balance" && provider.balanceMode != "percent" ? balanceChipSize(barHeight: barHeight) : itemSize
+    }
     static let actionGlyphSize: CGFloat = quotaIconSize
     static let fillIdle: Double = 0.12
     static let fillHover: Double = 0.22
@@ -2465,33 +2511,86 @@ enum IslandLayoutTween {
 }
 
 // 顶部栏的排布计算（纯函数，方便单独验证）：内容宽度、面板宽度、栏内分区、折叠头像的取舍。
+// 顶栏的混排顺序：系统图标保留用户的位置，额度槽位跟随 usage.json 的来源顺序。
+enum IslandBarOrder {
+    static let controls = ["device", "network", "awake", "settings", "quit"]
+    static func providers(in order: [String]) -> [String] {
+        order.filter { $0.hasPrefix("quota:") }.map { String($0.dropFirst(6)) }
+    }
+    static func resolved(saved: [String], providers: [String]) -> [String] {
+        let quotas = providers.map { "quota:" + $0 }
+        let valid = Set(quotas + controls)
+        var seen = Set<String>()
+        var result = saved.filter { valid.contains($0) && seen.insert($0).inserted }
+        let missing = quotas.filter { !seen.contains($0) }
+        result.insert(contentsOf: missing, at: result.firstIndex(where: { controls.contains($0) }) ?? result.count)
+        result.append(contentsOf: controls.filter { !seen.contains($0) })
+        var index = 0
+        return result.map { id in
+            guard id.hasPrefix("quota:") else { return id }
+            defer { index += 1 }
+            return quotas[index]
+        }
+    }
+    static func reordered(_ shown: [String], id: String, translation: CGFloat, widths: [CGFloat]) -> [String] {
+        guard let start = shown.firstIndex(of: id), translation.isFinite else { return shown }
+        var edge: CGFloat = 0
+        let centers = shown.indices.map { index -> CGFloat in
+            let width = widths.indices.contains(index) ? widths[index] : IslandMetrics.itemSize
+            defer { edge += width + IslandMetrics.itemSpacing }
+            return edge + width / 2
+        }
+        let position = centers[start] + translation
+        let target = centers.indices.min { abs(centers[$0] - position) < abs(centers[$1] - position) } ?? start
+        var next = shown.filter { $0 != id }
+        next.insert(id, at: target)
+        return next
+    }
+}
+
 enum IslandBarGeometry {
     // 两侧内容的宽度（不含端帽）：左侧是会话头像 + 分隔线（放不下时最后一格换成「+N」徽标，
     // 尺寸与头像脸一致），右侧是额度圆环（展开并排时可能有几枚）+ 设备 + 网络（+ 展开时的设置与退出）。
     // 间距与图标规格共用 IslandMetrics。
-    static func contentWidths(faces: Int, hidden: Int, quota: Int, device: Bool, network: Bool, actionButtons: Bool, wideQuota: CGFloat = 0) -> (left: CGFloat, right: CGFloat) {
+    static func contentWidths(faces: Int, hidden: Int, quota: Int, device: Bool, network: Bool, actionButtons: Bool, wideQuota: CGFloat = 0, awake: Bool = false, quotaWidths: [CGFloat] = []) -> (left: CGFloat, right: CGFloat) {
         // 头像之间、头像与徽标 / 分隔线之间都是同一个间距；分隔线自己也占一格的宽度。
         var left = CGFloat(faces) * IslandMetrics.glyphSize + IslandMetrics.itemSpacing * CGFloat(faces) + IslandMetrics.dividerWidth
         if hidden > 0 { left += IslandMetrics.itemSpacing + IslandMetrics.glyphSize }
-        let chips = max(0, quota) + (device ? 1 : 0) + (network ? 1 : 0) + (actionButtons ? 2 : 0)
+        let chips = max(0, quota) + (device ? 1 : 0) + (network ? 1 : 0) + (awake ? 1 : 0) + (actionButtons ? 2 : 0)
         let networkInset = network ? IslandMetrics.itemSize - IslandMetrics.networkItemWidth : 0
         // 余额圆环可能比普通 22pt 更宽（见 balanceChipSize）：只在真正画着余额 chip 时补差额。
-        let wideExtra = quota > 0 ? max(0, wideQuota - IslandMetrics.itemSize) : 0
+        let wideExtra = quotaWidths.isEmpty
+            ? (quota > 0 ? max(0, wideQuota - IslandMetrics.itemSize) : 0)
+            : quotaWidths.prefix(max(0, quota)).reduce(CGFloat(0)) { $0 + max(0, $1 - IslandMetrics.itemSize) }
         return (left, CGFloat(chips) * IslandMetrics.itemSize + wideExtra - networkInset + IslandMetrics.itemSpacing * CGFloat(max(0, chips - 1)))
     }
 
     // 并排显示几枚额度圆环（纯函数）：count 是可用的来源数，limit 是用户设的上限（3 / 5 / 7），0 = 自适应。
     // 自适应按屏幕剩余空间算：面板以屏幕正中（展开后的中轴线）为轴，圆环从刘海右侧往右排，中轴线到屏幕
     // 右缘的那半屏里还要给设备、网络指示、设置 / 退出按钮与端帽留位置——装不下的不显示，至少留一枚。
-    static func quotaChips(count: Int, limit: Int, screenWidth: CGFloat, keepOut: CGFloat, device: Bool, network: Bool, actionButtons: Bool, wideQuota: CGFloat = 0) -> Int {
+    static func quotaChips(count: Int, limit: Int, screenWidth: CGFloat, keepOut: CGFloat, device: Bool, network: Bool, actionButtons: Bool, wideQuota: CGFloat = 0, awake: Bool = false, quotaWidths: [CGFloat] = []) -> Int {
         guard count > 0 else { return 0 }
         guard count > 1 else { return 1 }
         let space = (screenWidth - IslandMetrics.screenEdgeMargin * 2) / 2 - keepOut / 2 - IslandMetrics.barEdge
         func fits(_ shown: Int) -> Bool {
-            contentWidths(faces: 0, hidden: 0, quota: shown, device: device, network: network, actionButtons: actionButtons, wideQuota: wideQuota).right <= space
+            contentWidths(faces: 0, hidden: 0, quota: shown, device: device, network: network, actionButtons: actionButtons, wideQuota: wideQuota, awake: awake, quotaWidths: quotaWidths).right <= space
         }
         var shown = limit > 0 ? min(limit, count) : count
         while shown > 1, !fits(shown) { shown -= 1 }
+        return shown
+    }
+
+    // 两翼等宽时，头像可能撑出右侧空位。只补能放入原有翼宽的额度，少量头像时仍保持默认单图标。
+    static func balancedQuotaChips(left: CGFloat, quotaWidths: [CGFloat], limit: Int, device: Bool, network: Bool, awake: Bool) -> Int {
+        guard !quotaWidths.isEmpty else { return 0 }
+        func right(_ count: Int) -> CGFloat {
+            contentWidths(faces: 0, hidden: 0, quota: count, device: device, network: network,
+                actionButtons: false, awake: awake, quotaWidths: quotaWidths).right
+        }
+        let space = max(left, right(1))
+        let count = limit > 0 ? min(limit, quotaWidths.count) : quotaWidths.count
+        var shown = 1
+        while shown < count, right(shown + 1) <= space { shown += 1 }
         return shown
     }
 
@@ -2715,12 +2814,12 @@ struct IslandSnapshot: Decodable, Equatable {
 }
 
 // 悬停明细卡的内容类型：额度（额度圆环）、设备（设备指示）或网络（三枚灯珠指示）。
-enum IslandDetailKind: String { case quota, device, network }
+enum IslandDetailKind: String { case quota, device, network, awake }
 
 enum IslandDetailTarget: Equatable {
-    case quota(String), device, network
+    case quota(String), device, network, awake
     var kind: IslandDetailKind {
-        switch self { case .quota: return .quota; case .device: return .device; case .network: return .network }
+        switch self { case .quota: return .quota; case .device: return .device; case .network: return .network; case .awake: return .awake }
     }
 }
 
@@ -2743,8 +2842,8 @@ final class IslandModel: ObservableObject {
     @Published var settings = IslandSettings()
     // 本机 OpenCode Go 的额度估算（折叠胶囊右侧的剩余额度）。
     @Published var usage: IslandQuota?
-    // 顶部栏画几枚额度圆环：折叠态与「点击切换」方式恒为 1（当前选中的那家），「展开并排」方式由原生
-    // 按屏幕剩余空间算好（见 Bobo.islandSize）；0 = 没有可显示的额度。
+    // 顶部栏画几枚额度圆环：折叠默认 1，头像撑出的右侧空位可以补充；展开时按设置与屏幕空间计算。
+    // 「点击切换」方式仍只显示当前来源；0 = 没有可显示的额度。
     @Published var quotaChipLimit = 1
     // 鼠标正停在哪一枚额度圆环上：明细卡显示这一家（并排显示时跟着换）；移开时保留，下一枚圆环悬停时覆盖。
     @Published var quotaFocus: String?
@@ -2761,6 +2860,8 @@ final class IslandModel: ObservableObject {
     @Published var todoContentHeight: CGFloat = 0
     @Published var todoHasItems = false
     @Published var todoComposing = false
+    @Published var awakeActive = false
+    @Published var barOrder: [String] = []
     // 悬停明细卡：nil 为不显示；detailMetrics 由 SwiftUI 上报，原生用它定窗口尺寸（见 Bobo.applyDetail）。
     @Published var detail: IslandDetailKind?
     @Published var detailMetrics = DetailMetrics()
@@ -2791,6 +2892,18 @@ final class IslandModel: ObservableObject {
         sessions.filter { $0.state == "working" || $0.state == "waiting" || (($0.state == "idle" || $0.state == "error") && $0.acked != true) }
     }
     var top: IslandSession? { waiting ?? sessions.first { $0.state == "working" } ?? sessions.first }
+    var barQuotaProviders: [IslandQuotaProvider] {
+        usage?.barProviders(count: settings.quotaView == "expand" ? quotaChipLimit : 1,
+                            expanded: expanded && settings.quotaView == "expand") ?? []
+    }
+    // 收起只保留额度、系统状态与网络；awake 与操作按钮在展开后出现，计算宽度时遵循同一规则。
+    var visibleBarItems: Set<String> {
+        var items = Set(barQuotaProviders.map { "quota:" + $0.id })
+        if device != nil { items.insert("device") }
+        if network != nil { items.insert("network") }
+        if expanded { items.formUnion(["awake", "settings", "quit"]) }
+        return items
+    }
     // 展开：鼠标悬停，或（设置允许时）状态变化自动亮起（等你回答 3 秒、结束/终止 2 秒，见 revealIslandTemporarily）。
     var expanded: Bool { todoComposing || butlerReply.isOpen || hovering || (settings.autoExpand && autoRevealed) }
     @discardableResult func dismissTodoInput() -> Bool {
@@ -2808,7 +2921,7 @@ final class IslandModel: ObservableObject {
     }
     var todoHeight: CGFloat { expanded ? todoContentHeight : 0 }
     var expandedContentHeight: CGFloat { expanded ? sessionListHeight + butlerHeight + todoHeight : 0 }
-    var visible: Bool { settings.notch && (!settings.hideWhenIdle || !busy.isEmpty || butlerReply.isOpen || todoHasItems) }
+    var visible: Bool { settings.notch && (!settings.hideWhenIdle || !busy.isEmpty || butlerReply.isOpen || todoHasItems || awakeActive) }
     // 折叠常驻保留静态状态色；只有可见展开态才运行呼吸动画。
     var onScreen: Bool { visible && !yielding }
     var motionActive: Bool { onScreen && screenAwake && expanded }
@@ -2903,6 +3016,7 @@ final class IslandLayoutState: ObservableObject {
 // 形状与层级参考 CodeIsland（NotchPanelShape）：顶部贴屏幕边，底部连续曲率圆角。
 struct IslandView: View {
     @ObservedObject var model: IslandModel
+    let awake: AwakeIslandController
     @ObservedObject var todo: TodoStore
     var todoInputMonitor: TodoInputMonitor?
     var onTodo: (String?) -> Void
@@ -2924,6 +3038,7 @@ struct IslandView: View {
     var onQuotaRange: (String) -> Void
     // 圆环按住拖动排序：松手时给出完整顺序（未显示的来源保持原位）；dragging 用来压住面板自身的拖动。
     var onReorder: ([String]) -> Void
+    var onBarReorder: ([String]) -> Void
     var onQuotaDrag: (Bool) -> Void
     var onDevice: () -> Void
     // 点网络指示（三段竖条）：打开「设备 → 网络」分栏。
@@ -2933,11 +3048,13 @@ struct IslandView: View {
     // 额度 / 设备 / 网络指示的悬停变化：满半秒由原生弹明细卡（见 Bobo.detailHoverChanged）。
     var onDetail: (IslandDetailTarget, Bool, IslandHoverRegion) -> Void
     var onQuit: () -> Void
-    // 额度圆环的拖动排序：拖动期间按本地草稿顺序渲染（实时互换位置），松手把新顺序合并后提交给服务端；
-    // 草稿保留到快照里的顺序与它一致（或超时兜底），中间不会闪回旧顺序。
-    @State private var quotaDragId: String?
-    @State private var quotaDragBase: [String] = []
-    @State private var quotaOrderDraft: [String] = []
+    // 顶栏共用一份混排草稿；额度变更仍写回服务端，系统图标的位置记在原生偏好中。
+    @State private var barDragId: String?
+    @State private var barDragBase: [String] = []
+    @State private var barDragFullBase: [String] = []
+    @State private var barDragWidths: [CGFloat] = []
+    @State private var barOrderDraft: [String] = []
+    @State private var barSuppressClickUntil = Date.distantPast
 
     var body: some View {
         IslandSurface(layout: model.layout, barHeight: model.barHeight, expanded: model.expanded, bar: bar, content: expandedContent)
@@ -2983,49 +3100,88 @@ struct IslandView: View {
         }
     }
 
-    // 并排显示的圆环（拖动排序的草稿优先；草稿里认不出的来源按服务端顺序补在后面）。
-    private func quotaRowProviders(_ quota: IslandQuota) -> [IslandQuotaProvider] {
-        let shown = Array(quota.subscriptions.prefix(model.quotaChipLimit))
-        guard !quotaOrderDraft.isEmpty else { return shown }
-        let ordered = quotaOrderDraft.compactMap { id in shown.first { $0.id == id } }
-        return ordered + shown.filter { row in !quotaOrderDraft.contains(row.id) }
+    private var barProviders: [IslandQuotaProvider] { model.barQuotaProviders }
+    private var fullBarOrder: [String] {
+        if !barOrderDraft.isEmpty { return barOrderDraft }
+        return IslandBarOrder.resolved(saved: model.barOrder, providers: (model.usage?.providers ?? []).map(\.id))
     }
-
-    // 圆环按住拖动排序：拖动中实时互换位置（本地草稿），松手把「显示这几家」的新顺序合并进完整
-    // providers 顺序（未显示的来源保持原位）交给服务端；8pt 以内仍算点击（切换显示范围 / 来源）。
-    private func quotaReorderGesture(_ id: String) -> some Gesture {
-        DragGesture(minimumDistance: 8)
+    private var visibleBarOrder: [String] {
+        let visible = model.visibleBarItems
+        return fullBarOrder.filter { visible.contains($0) }
+    }
+    private var barActionAllowed: Bool { barDragId == nil && Date() >= barSuppressClickUntil }
+    private func barItemWidth(_ id: String) -> CGFloat {
+        if id == "network" { return IslandMetrics.networkItemWidth }
+        if let provider = barProviders.first(where: { "quota:" + $0.id == id }) {
+            return IslandMetrics.quotaChipWidth(provider, barHeight: model.barHeight)
+        }
+        return IslandMetrics.itemSize
+    }
+    // 坐标取屏幕坐标，图标换位后 translation 不会因自身位置改变而回跳；窄网络条与余额按实际宽度算。
+    private func barReorderGesture(_ id: String) -> some Gesture {
+        DragGesture(minimumDistance: 8, coordinateSpace: .global)
             .onChanged { value in
-                let shown = Array((model.usage?.subscriptions ?? []).prefix(model.quotaChipLimit)).map(\.id)
-                if quotaDragId != id {
-                    quotaDragId = id
-                    quotaDragBase = quotaOrderDraft.isEmpty ? shown : quotaOrderDraft
+                if barDragId != id {
+                    barDragId = id
+                    barDragBase = visibleBarOrder
+                    barDragFullBase = fullBarOrder
+                    barDragWidths = barDragBase.map(barItemWidth)
                     onQuotaDrag(true)
                 }
-                guard let start = quotaDragBase.firstIndex(of: id) else { return }
-                let step = IslandMetrics.itemSize + IslandMetrics.itemSpacing
-                let shift = Int((value.translation.width / step).rounded())
-                var next = quotaDragBase.filter { $0 != id }
-                next.insert(id, at: min(max(start + shift, 0), next.count))
-                if next != quotaOrderDraft { quotaOrderDraft = next }
+                barSuppressClickUntil = Date().addingTimeInterval(0.35)
+                let shown = IslandBarOrder.reordered(barDragBase, id: id, translation: value.translation.width, widths: barDragWidths)
+                let next = IslandMetrics.mergedQuotaOrder(full: barDragFullBase, shown: shown)
+                if next != barOrderDraft { barOrderDraft = next }
             }
             .onEnded { _ in
-                let draft = quotaOrderDraft
-                quotaDragId = nil
+                let draft = barOrderDraft
+                barDragId = nil
+                barSuppressClickUntil = Date().addingTimeInterval(0.35)
                 onQuotaDrag(false)
-                guard draft.count > 1 else { quotaOrderDraft = []; return }
+                guard !draft.isEmpty else { return }
+                onBarReorder(draft)
                 let full = (model.usage?.providers ?? []).map(\.id)
-                let merged = IslandMetrics.mergedQuotaOrder(full: full, shown: draft)
-                if merged != full { onReorder(merged) }
-                // 服务端推回新快照之前先留着草稿；顺序一致（见 bar 的 onChange）或 2 秒后丢掉。
+                let quotaIDs = IslandBarOrder.providers(in: draft)
+                if quotaIDs != full { onReorder(quotaIDs) }
+                else { barOrderDraft = [] }
+                // 等服务端接受额度顺序；系统图标的位置已经同步保存，失败时仍保留它们。
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                    if quotaDragId == nil, quotaOrderDraft == draft { quotaOrderDraft = [] }
+                    if barDragId == nil, barOrderDraft == draft { barOrderDraft = [] }
                 }
             }
+    }
+    @ViewBuilder private func barItem(_ id: String) -> some View {
+        if let provider = barProviders.first(where: { "quota:" + $0.id == id }) {
+            IslandQuotaChip(provider: provider, window: provider.displayWindow, barHeight: model.barHeight,
+                selected: model.expanded && model.settings.quotaView == "expand" && provider.id == model.usage?.displayed?.id,
+                onHover: quotaHover(provider.id))
+                .contentShape(Circle())
+                .onTapGesture {
+                    guard barActionAllowed else { return }
+                    if model.settings.quotaView == "expand" { onQuotaRange(provider.id) } else { onQuota() }
+                }
+        } else {
+            switch id {
+            case "awake":
+                IslandAwakeChip(awake: awake, animating: model.onScreen && model.screenAwake,
+                    allowsAction: { barActionAllowed }, onHover: { onDetail(.awake, $0, $1) })
+            case "device":
+                if let device = model.device {
+                    IslandDeviceChip(device: device, action: { if barActionAllowed { onDevice() } }, onHover: { onDetail(.device, $0, $1) })
+                }
+            case "network":
+                if let network = model.network {
+                    IslandNetworkChip(network: network, action: { if barActionAllowed { onNetwork() } }, onHover: { onDetail(.network, $0, $1) })
+                }
+            case "settings": NotchIconButton(icon: "gearshape", tooltip: "打开设置", action: { if barActionAllowed { onSettings() } })
+            case "quit": NotchIconButton(icon: "power", tint: Color(red: 1.0, green: 0.40, blue: 0.40), tooltip: "退出 bobo", action: { if barActionAllowed { onQuit() } })
+            default: EmptyView()
+            }
+        }
     }
 
     // 折叠态 / 展开态的顶部栏：左右两组内容各自排在刘海两侧的「翼」里（两翼宽度由原生按内容算好，
-    // 见 IslandBarLayout）。头像从左端帽向内排，状态从刘海右侧向外排。
+    // 见 IslandBarLayout）。头像贴左端帽，状态图标贴右端帽。
     // 刘海屏中间间距固定，顶部栏独立于列表宽度定位；外接屏仍用可伸缩间距。
     private var bar: some View {
         IslandBarContent(layout: model.layout, height: model.barHeight, leading:
@@ -3062,53 +3218,18 @@ struct IslandView: View {
             }
             .padding(.leading, IslandMetrics.barEdge), trailing:
             HStack(spacing: IslandMetrics.itemSpacing) {
-                // 额度圆环：折叠态（以及「点击切换」方式）只有当前选中的那一枚；「展开并排」方式在展开时
-                // 按设置并排显示各来源——画几枚由原生按屏幕剩余空间算好（见 Bobo.islandSize 的 quotaChipLimit）。
-                // 点某一枚：「展开并排」切这一家的显示范围，「点击切换」切来源；并排的几枚还能按住拖动排序。
-                if model.expanded, model.settings.quotaView == "expand", let quota = model.usage {
-                    ForEach(quotaRowProviders(quota), id: \.id) { provider in
-                        if provider.showable {
-                            IslandQuotaChip(provider: provider, window: provider.displayWindow,
-                                            barHeight: model.barHeight,
-                                            selected: provider.id == quota.displayed?.id,
-                                            onHover: quotaHover(provider.id))
-                                .contentShape(Circle())
-                                .onTapGesture { onQuotaRange(provider.id) }
-                                // 按住拖动调整来源顺序（写 usage.json 的 order，与网页「通知岛 → 内容 → 额度显示顺序」同一份）。
-                                .simultaneousGesture(quotaReorderGesture(provider.id))
-                                .opacity(quotaDragId == provider.id ? 0.6 : 1)
-                        }
-                    }
-                } else if let provider = model.usage?.displayed, provider.showable {
-                    // 「点击切换」方式点圆环切换来源；「展开并排」的折叠态点圆环换这一家的显示范围（展开看全部）。
-                    IslandQuotaChip(provider: provider, window: provider.displayWindow,
-                                    barHeight: model.barHeight,
-                                    onHover: quotaHover(provider.id))
-                        .contentShape(Circle())
-                        .onTapGesture {
-                            if model.settings.quotaView == "expand" { onQuotaRange(provider.id) } else { onQuota() }
-                        }
-                }
-                // 额度右边的设备指示（CPU 压力灯 + 磁盘 / 内存双弧）：始终显示，不随悬停出现。
-                if let device = model.device {
-                    IslandDeviceChip(device: device, action: onDevice, onHover: { onDetail(.device, $0, $1) })
-                }
-                // 设备右边的网络指示（三段竖条：上 = 延迟、中 = 下载、下 = 上传）。
-                if let network = model.network {
-                    IslandNetworkChip(network: network, action: onNetwork, onHover: { onDetail(.network, $0, $1) })
-                }
-                // 展开时一并显示操作按钮，布局也同时预留两格；跨越顶部栏不再改变宽度。
-                if model.expanded {
-                    NotchIconButton(icon: "gearshape", tooltip: "打开设置", action: onSettings)
-                    NotchIconButton(icon: "power", tint: Color(red: 1.0, green: 0.40, blue: 0.40), tooltip: "退出 bobo", action: onQuit)
+                ForEach(visibleBarOrder, id: \.self) { id in
+                    barItem(id)
+                        .simultaneousGesture(barReorderGesture(id))
+                        .opacity(barDragId == id ? 0.6 : 1)
                 }
             }
         )
         .contentShape(Rectangle())
         .onTapGesture(perform: onActivate)
-        // 快照里的顺序与草稿一致（服务端已接受拖动结果）时丢掉草稿，之后以服务端顺序为准。
-        .onChange(of: model.usage?.subscriptions.map(\.id) ?? []) { _, ids in
-            if quotaDragId == nil, !quotaOrderDraft.isEmpty, ids == quotaOrderDraft { quotaOrderDraft = [] }
+        // 额度快照确认后才放开草稿，避免拖动结束时先闪回旧顺序。
+        .onChange(of: model.usage?.providers.map(\.id) ?? []) { _, ids in
+            if barDragId == nil, !barOrderDraft.isEmpty, IslandBarOrder.providers(in: barOrderDraft) == ids { barOrderDraft = [] }
         }
     }
 
@@ -3172,7 +3293,8 @@ private struct IslandBarContent<Leading: View, Trailing: View>: View {
             } else {
                 Spacer(minLength: layout.barLayout.keepOut)
             }
-            trailing.frame(width: layout.barLayout.right, alignment: .leading).clipped()
+            trailing.padding(.trailing, IslandMetrics.barEdge)
+                .frame(width: layout.barLayout.right, alignment: .trailing).clipped()
         }
         .frame(height: height)
     }
@@ -4042,6 +4164,7 @@ struct IslandNetworkChip: View {
 // 卡片只负责画内容并量尺寸；显示、定位与隐藏都由 Bobo 管理（见 detailHoverChanged / applyDetail）。
 struct IslandDetailView: View {
     @ObservedObject var model: IslandModel
+    let awake: AwakeIslandController
     // 卡片里实际渲染的类型：面板隐藏（detail = nil）时保持上一次内容，重新打开同一种时尺寸不跳。
     @State private var shown: IslandDetailKind = .quota
     @State private var size: CGSize = .zero
@@ -4054,6 +4177,7 @@ struct IslandDetailView: View {
                 case .quota: IslandQuotaDetail(quota: model.usage, focus: model.quotaFocus, quotaView: model.settings.quotaView)
                 case .device: IslandDeviceDetail(device: model.device)
                 case .network: IslandNetworkDetail(network: model.network)
+                case .awake: IslandAwakeDetail(awake: awake)
                 }
             } else {
                 Color.clear.frame(width: 1, height: 1)

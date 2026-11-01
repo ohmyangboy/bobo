@@ -2,8 +2,8 @@
 // /backend-api/wham/usage，按 limit_window_seconds 归类窗口（18000 秒 = 5 小时、604800 秒 = 一周，
 // 与 CodexBar 的 CodexRateWindowNormalizer 一致）；Claude Code 读 ~/.claude/.credentials.json（或用户点
 // 「读取钥匙串」后读 macOS 钥匙串）里的 OAuth Token，调 api.anthropic.com 的 /api/oauth/usage
-// （与 CodexBar 的 Claude OAuth 路径一致）；OpenCode Go 读
-// ~/.local/share/opencode/opencode.db 里 opencode-go 的费用，按 CodexBar 的 12 / 30 / 60 美元口径估算。
+// （与 CodexBar 的 Claude OAuth 路径一致）；OpenCode Go 只用官方接口显示额度，
+// 本机 opencode.db 仅提供历史花费，不用于推断订阅状态或剩余额度。
 // Antigravity（agy）优先读本地 Language Server 的 RetrieveUserQuotaSummary，拿不到就退回 agy CLI 的 /usage 报告
 // （见下面的 readAgy）。
 // Codex 与 Claude Code 走的都是官方账号自己的接口、不改任何凭据（不刷新 token、不回写钥匙串）；本地库只读
@@ -15,7 +15,6 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-export const limits={session:12,week:30,month:60};
 export const providers=[
  {id:'codex',name:'Codex',symbol:'sparkles'},
  {id:'claude',name:'Claude Code',symbol:'sparkles'},
@@ -56,13 +55,13 @@ const usageSQL=`WITH m AS (
   FROM message
   WHERE json_valid(data) AND json_extract(data,'$.providerID')='opencode-go' AND json_extract(data,'$.role')='assistant'
 )
-SELECT createdMs,cost,model FROM (
+SELECT createdMs,cost,model,messageID FROM (
   SELECT CAST(COALESCE(json_extract(p.data,'$.time.created'),m.createdMs) AS INTEGER) createdMs,
-         CAST(json_extract(p.data,'$.cost') AS REAL) cost,m.model AS model
+         CAST(json_extract(p.data,'$.cost') AS REAL) cost,m.model AS model,m.id AS messageID
   FROM part p JOIN m ON m.id=p.message_id
   WHERE json_valid(p.data) AND json_extract(p.data,'$.type')='step-finish' AND json_type(p.data,'$.cost') IN ('integer','real')
   UNION ALL
-  SELECT m.createdMs,m.cost,m.model FROM m WHERE m.hasCost AND NOT EXISTS (
+  SELECT m.createdMs,m.cost,m.model,m.id AS messageID FROM m WHERE m.hasCost AND NOT EXISTS (
     SELECT 1 FROM part p WHERE p.message_id=m.id AND json_valid(p.data)
       AND json_extract(p.data,'$.type')='step-finish' AND json_type(p.data,'$.cost') IN ('integer','real'))
 ) WHERE createdMs>0 AND cost>=0;`;
@@ -179,16 +178,6 @@ export function curlUsage(proxy,headers,url=codexUsageURL,{method='GET',body}={}
    ...Object.entries(headers).map(([key,value])=>`header = ${quote(`${key}: ${value}`)}`)].join('\n')+'\n';
   child.stdin.end(config);
  });
-}
-// 周窗口固定用 UTC 周（周一开头），与 CodexBar 一致：本地日历周会在周一凌晨产生歧义。
-function utcWeek(nowMs){const d=new Date(nowMs),start=Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate()-((d.getUTCDay()+6)%7));return {startMs:start,endMs:start+7*dayMs};}
-// 账单月：把「最早一条用量记录」的日/时/分/秒当作锚点，取锚点在当前月（或上月）的时刻到下一次同锚点时刻。
-function anchorMonth(year,month,anchor){const y=year+Math.floor(month/12),m=((month%12)+12)%12,last=new Date(Date.UTC(y,m+1,0)).getUTCDate();return Date.UTC(y,m,Math.min(anchor.day,last),anchor.hour,anchor.minute,anchor.second,anchor.ms);}
-function monthBounds(nowMs,anchorMs){
- const a=new Date(anchorMs),n=new Date(nowMs),anchor={day:a.getUTCDate(),hour:a.getUTCHours(),minute:a.getUTCMinutes(),second:a.getUTCSeconds(),ms:a.getUTCMilliseconds()};
- const year=n.getUTCFullYear();let month=n.getUTCMonth(),start=anchorMonth(year,month,anchor);
- if(start>nowMs)start=anchorMonth(year,--month,anchor);
- return {startMs:start,endMs:anchorMonth(year,month+1,anchor)};
 }
 // 每日历史按设备本地日历分桶（和 CodexBar 的天键一致），跨时区时「今天」就是用户看到的今天。
 const dayKey=ms=>{const d=new Date(ms);return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());};
@@ -402,7 +391,9 @@ export async function readCursorAppAccessToken(home){
 
 export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,notify=null,execFileImpl=execFile,claudeNetwork=null,cursorKeychain=process.platform==='darwin'&&!env.BOBO_HOME&&!home.startsWith(os.tmpdir()),grokBotKeychain=cursorKeychain,readCursorAppAccessTokenImpl=readCursorAppAccessToken}={}){
  const dataDir=path.join(home,'.bobo'),settingsFile=path.join(dataDir,'usage.json');
- const opencodeDir=path.join(home,'.local/share/opencode'),dbFile=path.join(opencodeDir,'opencode.db'),authFile=path.join(opencodeDir,'auth.json');
+ const dataHome=path.isAbsolute(env.XDG_DATA_HOME||'')?env.XDG_DATA_HOME:path.join(home,'.local/share');
+ const opencodeDir=path.join(dataHome,'opencode'),authFile=path.join(opencodeDir,'auth.json');
+ const dbName=env.OPENCODE_DB||'opencode.db',dbFile=dbName===':memory:'?null:path.resolve(opencodeDir,dbName);
  const codexDir=env.CODEX_HOME||path.join(home,'.codex');
  const claudeDir=env.CLAUDE_CONFIG_DIR||path.join(home,'.claude');
  let sqlite=null,order=providers.map(p=>p.id),state=empty(),signature='',listeners=new Set(),timer=null,reading=null,closed=false,localRowsCache=null,localDbStamp='';
@@ -465,109 +456,126 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   return saving;
  }
 
- // ---- OpenCode Go：本机数据库（只读） ----
- async function readRows(){
-  if(sqlite===null)sqlite=import('node:sqlite').then(m=>m).catch(()=>false);
+ // ---- OpenCode Go：本机历史与现有 CLI 登录均只读，官方接口才提供额度 ----
+ async function withOpenCodeDb(read){
+  if(!dbFile)throw userError('OPENCODE_DB=:memory:，无法读取本机数据库');
+  if(sqlite===null)sqlite=import('node:sqlite').catch(()=>false);
   const mod=await sqlite;
-  if(!mod)throw userError('当前 Node 版本不支持读取 SQLite 用量（需要 Node 22.13 及以上）');
-  const stampFile=async file=>{const st=await fs.stat(file).catch(()=>null);return st?`${st.mtimeMs}:${st.size}:${st.ino||''}`:'';};
-  const stamp=(await Promise.all([dbFile,dbFile+'-wal',dbFile+'-shm'].map(stampFile))).join('|');
-  if(localRowsCache&&stamp===localDbStamp)return localRowsCache;
-  await fs.access(dbFile);
-  const open=file=>new mod.DatabaseSync(file,{readOnly:true,timeout:250});
-  const immutable='file:'+encodeURI(dbFile).replace(/[?#]/g,c=>'%'+c.charCodeAt(0).toString(16).toUpperCase())+'?immutable=1';
-  const sidecars=stamp.split('|').slice(1).some(Boolean);
-  let db;
-  if(sidecars)try{db=open(dbFile);}catch{db=open(immutable);}
-  else db=open(immutable);
-  try{
-   const rows=db.prepare(usageSQL).all();
-   // 大库不长期保留整批行对象，避免为了省 CPU 反而增加常驻内存；小库才复用。
-   localRowsCache=rows.length<=5000?rows:null;localDbStamp=stamp;
-   return rows;
-  }finally{db.close();}
+  if(!mod)throw userError('当前 Node 版本不支持读取 SQLite（需要 Node 22.13 及以上）');
+  const filePath=await fs.realpath(dbFile);
+  // 有 WAL 时必须读取实时状态；打开失败不能绕过 WAL 借用旧登录。
+  const sidecars=await Promise.all([filePath+'-wal',filePath+'-shm'].map(file=>fs.stat(file).then(()=>true,e=>{if(e.code==='ENOENT')return false;throw e;})));
+  const file=sidecars.some(Boolean)?filePath:'file:'+encodeURI(filePath).replace(/[?#]/g,c=>'%'+c.charCodeAt(0).toString(16).toUpperCase())+'?immutable=1';
+  const db=new mod.DatabaseSync(file,{readOnly:true,timeout:250});
+  try{return read(db);}finally{db.close();}
  }
- // API key：手动填写（~/.bobo/usage.json 的 keys.opencode-go）优先，其次是进程环境变量
- // OPENCODE_API_KEY（CodexBar 的顺序），最后才是 OpenCode CLI 自己的 auth.json（和终端登录共用）。
- async function opencodeKey(){
+ async function readRows(){
+  if(!dbFile)throw userError('OPENCODE_DB=:memory:，无法读取本机历史');
+  const stampFile=async file=>{const st=await fs.stat(file).catch(()=>null);return st?`${st.mtimeMs}:${st.size}:${st.ino||''}`:'';};
+  const filePath=await fs.realpath(dbFile);
+  const stamp=filePath+'|'+(await Promise.all([filePath,filePath+'-wal',filePath+'-shm'].map(stampFile))).join('|');
+  if(localRowsCache&&stamp===localDbStamp)return localRowsCache;
+  const rows=await withOpenCodeDb(db=>{
+   const tables=new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row=>row.name));
+   const legacy=tables.has('message')&&tables.has('part')?usageSQL:null;
+   const valid=row=>Number.isFinite(row.createdMs)&&row.createdMs>0&&Number.isFinite(row.cost)&&row.cost>=0;
+   const list=legacy?db.prepare(legacy).all().filter(valid):[],seen=new Set(list.map(row=>row.messageID));
+   if(tables.has('session_message'))list.push(...db.prepare(`SELECT id messageID,CAST(COALESCE(json_extract(data,'$.time.created'),time_created) AS INTEGER) createdMs,
+    CAST(json_extract(data,'$.cost') AS REAL) cost,COALESCE(json_extract(data,'$.model.id'),'') model
+    FROM session_message s WHERE type IN ('assistant','compaction') AND json_valid(data)
+    AND json_extract(data,'$.model.providerID')='opencode-go' AND json_type(data,'$.cost') IN ('integer','real')
+    `).all().filter(row=>valid(row)&&!seen.has(row.messageID)));
+   return list;
+  });
+  localRowsCache=rows.length<=5000?rows:null;localDbStamp=stamp;
+  return rows;
+ }
+ const validOpenCodeToken=key=>typeof key==='string'&&key.length>0&&!/[\s\x00-\x1f\x7f]/.test(key);
+ async function opencodeKey(nowMs){
+  // 显式选择的账号优先；被拒绝时不借用 CLI 中另一个账号。
   if(settings.keys['opencode-go'])return {key:settings.keys['opencode-go'],keySource:'manual'};
-  const raw=typeof env.OPENCODE_API_KEY==='string'?env.OPENCODE_API_KEY.trim().replace(/^["']|["']$/g,''):'';
-  if(raw)return {key:raw,keySource:'env'};
-  try{const auth=JSON.parse(await fs.readFile(authFile,'utf8'));const key=auth?.['opencode-go']?.key;if(typeof key==='string'&&key.trim())return {key:key.trim(),keySource:'auth'};}catch{}
+  const key=cleanToken(env.OPENCODE_API_KEY||'');
+  if(key)return {key,keySource:'env'};
+  if(!dbFile)return {key:'',keySource:''};
+  let modern;
+  try{
+   modern=await withOpenCodeDb(db=>{
+    if(!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='credential'").get())return null;
+    const rows=db.prepare("SELECT integration_id,value FROM credential WHERE active=1 AND integration_id IN ('opencode-go','opencode') ORDER BY CASE integration_id WHEN 'opencode-go' THEN 0 ELSE 1 END LIMIT 2").all();
+    if(!rows.length)return {key:'',keySource:'cli'};
+    if(rows.length>1&&rows[0].integration_id===rows[1].integration_id)throw Error('ambiguous');
+    const value=JSON.parse(rows[0].value);
+    const token=value.type==='key'?value.key:value.type==='oauth'&&Number.isSafeInteger(value.expires)&&value.expires>nowMs?value.access:null;
+    if(!validOpenCodeToken(token))throw Error('invalid');
+    return {key:token,keySource:'cli'};
+   });
+  }catch(e){if(e.code!=='ENOENT')throw Object.assign(userError('OpenCode CLI 登录不可用或已过期，请在 OpenCode 中重新连接账号'),{keySource:'cli'});}
+  if(modern)return modern; // V2 退出登录后也不能退回旧 auth.json。
+  try{
+   const auth=JSON.parse(await fs.readFile(authFile,'utf8')),value=auth?.['opencode-go'];
+   if(value?.type==='api'&&validOpenCodeToken(value.key))return {key:value.key,keySource:'auth'};
+  }catch{}
   return {key:'',keySource:''};
  }
  // 官方用量接口（权威）：usage.{rolling,weekly,monthly}.percent 是「已用百分比」（与 CodexBar 的解析一致，
  // 用 rate-limited 状态佐证：100% 已用时才是 rate-limited），resetsAt 是 ISO 时间。
- async function readAPI(key,nowMs){
+ async function readAPI(key,nowMs,keySource='manual'){
+  if(!validOpenCodeToken(key))throw userError('OpenCode Go API Key 格式无效，请更新凭据');
   const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),codexTimeoutMs);
   let response;
   try{
    response=await fetchImpl(opencodeUsageURL,{headers:{authorization:'Bearer '+key,accept:'application/json','user-agent':'bobo'},redirect:'error',signal:controller.signal});
   }catch(e){throw userError('连接 opencode.ai 失败：'+(e?.cause?.message||e?.message||e));}
   finally{clearTimeout(timeout);}
-  if(response.status===401||response.status===403)throw userError('OpenCode 用量接口拒绝了当前登录，请在终端重新 opencode auth login');
+  if(response.status===401||response.status===403){
+   const action=keySource==='manual'?'请更新或清除手动填写的 API Key':keySource==='env'?'请更新环境变量 OPENCODE_API_KEY':'请在 OpenCode 中重新连接账号';
+   throw userError(`OpenCode Go 未授权（HTTP ${response.status}），凭据失效或订阅不可用；${action}。仅凭此响应无法判断会员是否过期`);
+  }
   if(!response.ok)throw userError('OpenCode 用量接口返回 '+response.status);
   let body;
   try{body=await response.json();}catch{throw userError('OpenCode 用量接口返回的不是 JSON');}
   const usage=body?.usage||{},windows=[];
   for(const [name,key,label] of [['rolling','session','5 小时滚动'],['weekly','week','本周'],['monthly','month','账单月']]){
    const w=usage[name];
-   if(!w||typeof w.percent!=='number')continue;
+   if(!w||typeof w.percent!=='number'||!Number.isFinite(w.percent))continue;
    const usedPercent=clampPercent(w.percent),resetsAt=Date.parse(w.resetsAt||'')||0;
    const resetInSec=resetsAt?Math.max(0,Math.round((resetsAt-nowMs)/1000)):0;
-   windows.push({key,label,usedUSD:null,limitUSD:null,usedPercent,remainingPercent:round10(100-usedPercent),resetInSec,resetsAt:resetsAt||nowMs+resetInSec*1000,status:typeof w.status==='string'?w.status:''});
+   windows.push({key,label,usedUSD:null,limitUSD:null,usedPercent,remainingPercent:round10(100-usedPercent),resetInSec,resetsAt:resetsAt||null,status:['ok','rate-limited'].includes(w.status)?w.status:''});
   }
   if(!windows.length)throw userError('OpenCode 用量接口没有返回窗口数据');
   return windows;
  }
  function localSummary(list,nowMs){
-  const week=utcWeek(nowMs),month=monthBounds(nowMs,list.length?Math.min(...list.map(r=>r.createdMs)):nowMs),sessionStart=nowMs-sessionSeconds*1000;
-  let sessionCost=0,weekCost=0,monthCost=0,oldestSession=null,total=0;
+  let total=0;
   const since=new Date(nowMs);since.setDate(since.getDate()-(historyDays-1));
   const sinceStart=new Date(since.getFullYear(),since.getMonth(),since.getDate()).getTime(),daily=new Map(),models=new Map();
   for(const row of list){
    total+=row.cost;
-   if(row.createdMs>=sessionStart&&row.createdMs<nowMs){sessionCost+=row.cost;if(oldestSession===null||row.createdMs<oldestSession)oldestSession=row.createdMs;}
-   if(row.createdMs>=week.startMs&&row.createdMs<week.endMs)weekCost+=row.cost;
-   if(row.createdMs>=month.startMs&&row.createdMs<month.endMs)monthCost+=row.cost;
    if(row.createdMs<sinceStart||row.createdMs>nowMs)continue;
    const key=dayKey(row.createdMs),day=daily.get(key)||{day:key,costUSD:0,calls:0,models:new Set()};
    day.costUSD+=row.cost;day.calls++;day.models.add(row.model.trim()||'未知模型');daily.set(key,day);
    const model=row.model.trim()||'未知模型',bucket=models.get(model)||{name:model,costUSD:0,calls:0};
    bucket.costUSD+=row.cost;bucket.calls++;models.set(model,bucket);
   }
-  const win=(key,label,used,limit,resetSeconds)=>{const usedPercent=clampPercent(used/limit*100),reset=Math.max(0,Math.round(resetSeconds));return {key,label,usedUSD:roundUSD(used),limitUSD:limit,usedPercent,remainingPercent:round10(100-usedPercent),resetInSec:reset,resetsAt:nowMs+reset*1000,status:''};};
   return {
-   windows:[
-    win('session','5 小时滚动',sessionCost,limits.session,oldestSession===null?0:(oldestSession+sessionSeconds*1000-nowMs)/1000),
-    win('week','本周',weekCost,limits.week,(week.endMs-nowMs)/1000),
-    win('month','账单月',monthCost,limits.month,(month.endMs-nowMs)/1000)],
    daily:[...daily.values()].map(d=>({...d,costUSD:roundUSD(d.costUSD),models:[...d.models].sort()})).sort((a,b)=>a.day<b.day?-1:1),
    models:[...models.values()].map(m=>({...m,costUSD:roundUSD(m.costUSD)})).sort((a,b)=>b.costUSD-a.costUSD),
    totals:{costUSD:roundUSD(total),calls:list.length}};
  }
- const historyOf=local=>local?{daily:local.daily,models:local.models,totals:local.totals}:{daily:[],models:[],totals:{costUSD:0,calls:0}};
- // 接口不可用时的兜底：本机估算（金额窗口，12 / 30 / 60 美元上限），可以带一条说明为什么不走接口。
- function localSnapshot(list,nowMs,hasAuth,error,keySource='',key=''){
-  if(!list.length&&!hasAuth)throw userError(error||'未检测到 OpenCode Go 的本机用量');
-  return {id:'opencode-go',name:'OpenCode Go',symbol:'terminal',available:true,estimated:true,source:'local',keySource,keyHint:keySource==='manual'&&key?key.slice(-4):'',plan:'',credits:null,limits:{...limits},...localSummary(list,nowMs),error:error||null,updatedAt:nowMs};
- }
+ const openCodeSnapshot=(list,historyError,nowMs)=> ({id:'opencode-go',name:'OpenCode Go',symbol:'terminal',available:false,estimated:false,source:'api',keySource:'',keyHint:'',plan:'',credits:null,windows:[],historyAvailable:list!==null,historyError,...localSummary(list||[],nowMs),error:null,updatedAt:nowMs});
  async function readOpenCodeGo(nowMs){
-  const {key,keySource}=await opencodeKey();
-  let list=null,rowsError='';
-  try{list=await readRows();}catch(e){rowsError=describe(e,'');}
-  if(key){
-   try{
-    const windows=await readAPI(key,nowMs);
-    return {id:'opencode-go',name:'OpenCode Go',symbol:'terminal',available:true,estimated:false,source:'api',keySource,keyHint:keySource==='manual'?key.slice(-4):'',plan:'',credits:null,windows,...historyOf(list?localSummary(list,nowMs):null),error:null,updatedAt:nowMs};
-   }catch(e){
-    // 接口失败时退回本机估算，并在界面标出原因（例如网络不通、登录被拒）。
-    const note='OpenCode 额度接口失败，改用本机估算：'+(e?.userFacing?e.message:e?.message||e);
-    if(list||!rowsError)return localSnapshot(list||[],nowMs,true,note,keySource,key);
-    throw userError(note);
-   }
+  let list=null,historyError=null;
+  try{list=await readRows();}catch{historyError='无法读取本机 OpenCode 花费历史';}
+  const snapshot=openCodeSnapshot(list,historyError,nowMs);
+  try{
+   const {key,keySource}=await opencodeKey(nowMs);
+   snapshot.keySource=keySource;snapshot.keyHint=keySource==='manual'?key.slice(-4):'';
+   if(!key)return {...snapshot,reason:'未检测到可用的 OpenCode Go 登录，请在 OpenCode 中连接账号或填写 API Key；本机历史不能证明订阅或剩余额度'};
+   const windows=await readAPI(key,nowMs,keySource);
+   return {...snapshot,available:true,windows};
+  }catch(e){
+   return {...snapshot,keySource:e.keySource||snapshot.keySource,reason:describe(e,'读取官方额度失败：')};
   }
-  return localSnapshot(list||[],nowMs,false,rowsError||null,'','');
  }
 
  // ---- DeepSeek：官方余额 Key 依次读手动填写、环境变量、zsh 配置（只读，不写回 zsh）。 ----
@@ -951,7 +959,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
 
  // ---- 刷新与推送 ----
  // 只在「有效数据」变化时推送：倒计时（resetInSec/resetsAt/updatedAt）每分钟都会变，不参与比较。
- const signatureOf=s=>JSON.stringify([s.selected,s.providers.map(p=>[p.id,p.available,p.enabled,p.range,p.keySource,p.keyHint,p.reason,p.error,p.plan,p.needsDirectConfirm,p.windows.map(w=>[w.key,w.usedPercent,w.usedUSD,w.status]),p.daily,p.models,p.totals,p.credits,p.balances,p.isAvailable,p.lastSuccessfulAt,p.stale,p.balanceView])]);
+ const signatureOf=s=>JSON.stringify([s.selected,s.providers.map(p=>[p.id,p.available,p.enabled,p.range,p.keySource,p.keyHint,p.reason,p.error,p.plan,p.needsDirectConfirm,p.windows.map(w=>[w.key,w.usedPercent,w.usedUSD,w.status]),p.daily,p.models,p.totals,p.credits,p.balances,p.isAvailable,p.lastSuccessfulAt,p.stale,p.balanceView,p.historyAvailable,p.historyError])]);
  // 额度重置提醒：订阅窗口从「用过」（剩余 < 100%）回到 100% 时提醒一次（5 小时窗口用满后恢复、
  // 周窗口刷新都算）。只在前后两次都是有效读数时比较：服务刚启动、上一次不可用、这次降级都不报。
  // 开关在「用量 → Codex」里（settings.notifyReset），实际投递走通知岛的统一提醒通道（notify）。
@@ -1009,7 +1017,7 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
     }
     if(snapshot.error===undefined)snapshot.error=null;
     // 节奏：走网络（Codex / OpenCode 官方接口）3 分钟、最快 60 秒一次；纯本机读数每分钟都可以。
-    // 「有 Key 但接口失败、退回本机估算」也算失败：自动重试 2 / 4 / 8 / 10 分钟递增退避（成功后清零），
+    // 官方额度不可用时也算失败：自动重试 2 / 4 / 8 / 10 分钟递增退避（成功后清零），
     // 免得每分钟白试一次打不通的接口；手动强制刷新不受退避限制（网络类最多 60 秒试一次）。
     const api=snapshot.source==='api';
     const degraded=!api&&!!snapshot.error&&!!snapshot.keySource;
@@ -1134,8 +1142,12 @@ export function createUsage({home,now=Date.now,fetchImpl=fetch,env=process.env,n
   if(!key)return {ok:false,message:id==='claude'?'请输入 OAuth Token':'请输入 API Key'};
   try{
    // 验证用的就是真接口，拿到的那份直接当缓存，别再打一次网络（Claude 的请求要省着发）。
-   const snap=id==='claude'?await readClaude(now(),{accessToken:key,keySource:'manual',direct}):id==='deepseek'?await readDeepSeek(now(),key):null;
+   let snap=id==='claude'?await readClaude(now(),{accessToken:key,keySource:'manual',direct}):id==='deepseek'?await readDeepSeek(now(),key):null;
    const windows=snap?snap.windows:await readAPI(key,now());
+   if(id==='opencode-go'){
+    let list=null;try{list=await readRows();}catch{}
+    snap={...openCodeSnapshot(list,list===null?'无法读取本机 OpenCode 花费历史':null,now()),available:true,keySource:'manual',keyHint:key.slice(-4),windows};
+   }
    const previousKey=settings.keys[id],previousTarget=settings.keyTargets[id];
    settings.keys[id]=key;
    if(id==='deepseek')settings.keyTargets.deepseek=deepseekBalanceURL;

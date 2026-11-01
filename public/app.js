@@ -433,12 +433,15 @@ $('#aiSettingsForm').onsubmit=guard(async e=>{e.preventDefault();$('#aiSaveSetti
 $('#aiClearKey').onclick=guard(async()=>{await saveAISettings(true);await loadAISettings();toast('已清除手动保存的 Key');});
 
 // 「设置」页：左侧分类导航 + 右侧分区卡片。刘海与菜单栏相关的开关已搬到「通知岛」视图（见 renderIslandSettings）。
-const settingsPanes=['appearance','ai','about'];
+const settingsPanes=['general','appearance','ai','about'];
+let settingsPane='general';
 function showSettingsPane(name){
  const next=settingsPanes.includes(name)?name:settingsPanes[0];
+ settingsPane=next;
  for(const p of document.querySelectorAll('#settingsWorkspace [data-pane]'))p.hidden=p.dataset.pane!==next;
  for(const b of document.querySelectorAll('#settingsWorkspace [data-settings-pane]'))b.setAttribute('aria-pressed',String(b.dataset.settingsPane===next));
  $('#settingsActions').hidden=next!=='ai';
+ if(next==='general')loadLoginItemSettings();
  if(next==='ai')loadAIUsage().catch(e=>$('#aiUsageDetail').textContent=e.message);
  if(next==='appearance')requestAnimationFrame(()=>document.querySelectorAll('#settingsWorkspace .theme-switch').forEach(observeSeg));
 }
@@ -447,6 +450,40 @@ for(const b of document.querySelectorAll('#settingsWorkspace [data-settings-pane
  if(p==='island'){switchView('island').then(()=>showIslandPane('settings'));return;}
  showSettingsPane(p);
 };
+
+// bobo 自身的登录项由 macOS 管理，和「设备 → awake」的自动开启保持唤醒分别设置。
+let loginItemSettings=null,loginItemRun=0,loginItemSaving=false,loginItemError='';
+function renderLoginItemSettings(){
+ const row=$('#rowLaunchAtLogin');row.querySelector('.switch')?.remove();
+ const control=toggleSwitch(loginItemSettings?.registered===true,'登录时自动启动 bobo',async enabled=>{
+  ++loginItemRun;loginItemSaving=true;loginItemError='';
+  try{loginItemSettings=await api('app/login-item',{enabled});}
+  catch(e){loginItemError=e.message;throw e;}
+  finally{loginItemSaving=false;renderLoginItemSettings();}
+ });
+ control.querySelector('input').disabled=loginItemSaving||loginItemSettings?.supported!==true;
+ row.append(control);
+ $('#launchAtLoginNote').textContent=loginItemError||loginItemSettings?.reason||'正在读取系统登录项状态…';
+ $('#launchAtLoginSettings').hidden=loginItemSettings?.requiresApproval!==true;
+ $('#launchAtLoginSettings').disabled=loginItemSaving;
+}
+async function loadLoginItemSettings(){
+ if(loginItemSaving)return;
+ const run=++loginItemRun;
+ try{const value=await api('app/login-item');if(run!==loginItemRun)return;loginItemSettings=value;loginItemError='';}
+ catch(e){if(run!==loginItemRun)return;loginItemSettings=null;loginItemError=e.message;}
+ renderLoginItemSettings();
+}
+$('#launchAtLoginSettings').onclick=guard(async()=>{
+ ++loginItemRun;loginItemSaving=true;renderLoginItemSettings();
+ try{loginItemSettings=await api('app/login-item',{openSettings:true});loginItemError='';}
+ catch(e){loginItemError=e.message;throw e;}
+ finally{loginItemSaving=false;renderLoginItemSettings();}
+});
+window.addEventListener('focus',()=>{
+ if(islandView==='settings'&&settingsPane==='general')loadLoginItemSettings();
+});
+renderLoginItemSettings();
 
 // 更新入口在右上角的版本按钮（#appVersion）：默认显示版本号，检查中 / 下载中 / 已就绪会直接变成对应状态，
 // 点它执行「检查更新」或「重启并更新」；设置页只保留 app 信息，更新说明放在重启确认框里。
@@ -1116,7 +1153,7 @@ async function switchView(next){
  if(next==='agents'){await loadAgentProviders();if(!agentLoaded||!agentConfigLoaded)await loadAgentAll();else renderAgentList();requestAnimationFrame(()=>document.querySelectorAll('#agentsWorkspace .mode-switch').forEach(observeSeg));}
  if(next==='island'){openIsland();openUsage();requestAnimationFrame(()=>document.querySelectorAll('#islandWorkspace .segs, #islandWorkspace .set-tabs').forEach(observeSeg));}else{islandClose();usageClose();}
  if(next==='device')openDevice();else deviceClose();
- if(next==='settings'){await loadAISettings();requestAnimationFrame(()=>document.querySelectorAll('#settingsWorkspace .theme-switch').forEach(observeSeg));}
+ if(next==='settings'){if(settingsPane==='general')loadLoginItemSettings();await loadAISettings();requestAnimationFrame(()=>document.querySelectorAll('#settingsWorkspace .theme-switch').forEach(observeSeg));}
 }
 async function saveAgent(){
  if(!agentSel)return;
@@ -1400,7 +1437,7 @@ function renderIsland(){
  if(document.body.dataset.islandPane==='butler'&&butler?.revision!==butlerData?.revision)loadButler().catch(e=>$('#butlerStatus').textContent=e.message);
  if(!islandReady){islandReady=true;renderIslandSettings();}
 }
-// 通知岛左侧分类（参考 magpie 的来源列表）：Agent 连接（会话）与额度来源两组，底部固定「通知岛设置」。
+// 通知岛左侧分类：顶部是面板设置，下方是近况、会话与额度来源。
 // 行右侧是「圆点 + 状态文字」；分栏按 data-island-pane 切换，设置页内再用子页签（data-island-settings）切四个分页。
 const islandPanes=['opencode','codex','omp','claude','dsh','agy','butler','todo','quota-codex','quota-claude','quota-opencode','quota-agy','quota-deepseek','quota-cursor','quota-grok','settings'];
 function showIslandPane(name){
@@ -1564,6 +1601,33 @@ async function islandLoop(run){
 }
 function openIsland(){if(!windowActive||islandStream)return;islandStream=true;const run=++islandRun;islandLoop(run);watchTerminals();islandWatch=setInterval(watchTerminals,4000);islandClock=setInterval(refreshSessionTimes,1000);}
 function islandClose(){islandStream=null;islandRun++;islandController?.abort();islandController=null;islandReader?.cancel().catch(()=>{});islandReader=null;if(islandWatch){clearInterval(islandWatch);islandWatch=null;}if(islandClock){clearInterval(islandClock);islandClock=null;}}
+// awake 独立设置卡；沿用同一 HTTP token / Origin 校验，控件失败时恢复服务端值。
+let awakeSettings=null;
+function renderAwakeSettings(){
+ $('#awakeDuration').disabled=!awakeSettings;
+ if(awakeSettings)$('#awakeDuration').value=awakeSettings.defaultDuration;
+ for(const [id,key,label] of [['rowAwakeDisplaySleep','allowDisplaySleep','允许显示器睡眠'],['rowAwakeSystemSleep','allowSystemSleepOnDisplayOff','当显示器关闭时允许系统睡眠'],['rowAwakeLogin','launchAtLogin','登录时自动开启'],['rowAwakeScreensaver',null,'允许屏幕保护程序在闲置 45m 后运行']]){
+  const row=$('#'+id);row.querySelector('.switch')?.remove();
+  const control=toggleSwitch(key?awakeSettings?.[key]===true:false,label,value=>saveAwakeSetting(key,value));
+  control.querySelector('input').disabled=!key||!awakeSettings;
+  row.append(control);
+ }
+}
+async function saveAwakeSetting(key,value){
+ try{awakeSettings=await api('awake/settings',{[key]:value});$('#awakeSettingsNote').textContent='已保存，用于下次开启。';}
+ catch(e){$('#awakeSettingsNote').textContent=e.message;throw e;}
+}
+async function loadAwakeSettings(){
+ try{awakeSettings=await api('awake/settings');renderAwakeSettings();$('#awakeSettingsNote').textContent='设置用于下次开启。崩溃后 bobo 会检查恢复；也可从咖啡杯菜单选择「复位」。';}
+ catch(e){$('#awakeSettingsNote').textContent=e.message;}
+}
+$('#awakeDuration').onchange=async()=>{
+ const control=$('#awakeDuration');control.disabled=true;
+ try{await saveAwakeSetting('defaultDuration',control.value);}
+ catch(e){toast(e.message);}
+ finally{renderAwakeSettings();}
+};
+renderAwakeSettings();
 // 原生把主窗口 orderOut 时不一定触发 WKWebView 的 visibilitychange；显式同步页面生命周期，避免隐藏后仍保留流和定时器。
 let windowActive=true,nativeWindowActive=true;
 function setWindowActive(active){
@@ -1574,6 +1638,7 @@ function setWindowActive(active){
  startAppPolling();
  if(islandView==='island'){openIsland();openUsage();}
  if(islandView==='device')openDevice();
+ if(islandView==='settings'&&settingsPane==='general')loadLoginItemSettings();
 }
 window.__boboSetWindowActive=active=>{nativeWindowActive=active;setWindowActive(active&&!document.hidden);};
 // 终端归属只在通知岛打开时扫描：定期让服务端续期（10 秒），关掉视图后不再续期，服务端就停扫。
@@ -1789,7 +1854,7 @@ function renderUsage(){
  const resetRow=$('#rowUsageResetNotify');
  resetRow.querySelector('.switch')?.remove();
  resetRow.append(toggleSwitch(data?.notifyReset!==false,'额度重置时提醒',async value=>{usageData=await api('usage/reset-notify',{enabled:value});renderUsage();}));
- $('#usageKeyStatus').textContent=data?(local?.keySource==='manual'?'手动配置'+(local?.keyHint?'（尾号 '+local.keyHint+'）':''):local?.keySource==='env'?'环境变量 OPENCODE_API_KEY':local?.keySource==='auth'?'opencode 本机登录':'未配置（可退回本机估算）'):'读取中…';
+ $('#usageKeyStatus').textContent=data?(local?.keySource==='manual'?'手动配置'+(local?.keyHint?'（尾号 '+local.keyHint+'）':''):local?.keySource==='env'?'环境变量 OPENCODE_API_KEY':local?.keySource==='auth'?'opencode 本机登录':local?.keySource==='cli'?'OpenCode CLI 当前登录':'未配置（仅显示本机花费历史）'):'读取中…';
  $('#usageKeyClear').disabled=local?.keySource!=='manual';
  // Claude Code：登录来源（~/.claude/.credentials.json / 钥匙串 / 手动 Token / 环境变量）与额度窗口；
  // 直连（没有 VPN / 代理）时默认整个跳过请求，这里给一个显式开关。
@@ -1828,25 +1893,24 @@ function renderUsage(){
  const agyDefaultNote=agy?.keySource==='local-server'?'配额数据来自本地 Antigravity Language Server 接口（RetrieveUserQuotaSummary），只读不登录。':'配额数据来自 Antigravity CLI 的 /usage 报告（agy -p /usage --output-format json），只读本机登录。';
  $('#usageAgyNote').textContent=agyBits.join('；')||agyDefaultNote;
  // OpenCode Go：百分比来自官方用量接口（权威），每日花费/模型明细来自本机数据库（估算）。
- const keyLabel=local?.keySource==='manual'?'手动填写的 Key':local?.keySource==='env'?'环境变量 OPENCODE_API_KEY':local?.keySource==='auth'?'opencode 本机登录':'未配置';
- const localBits=[local?.source==='api'
-  ?'额度百分比与重置时间来自 opencode.ai 用量接口（'+keyLabel+'）'
-  :'额度按本机费用估算：5 小时 $12 / 本周 $30 / 账单月 $60，仅供参考'];
- if(local?.source==='api')localBits.push('每日花费与模型汇总来自本机 opencode.db（~/.local/share/opencode），只读、不联网');
- else localBits.push('数据来自 ~/.local/share/opencode/opencode.db 里 opencode-go 的调用费用，只读、不联网；实际额度以 opencode.ai 账单为准');
- if(local?.error)localBits.unshift('⚠ '+local.error);
+ const keyLabel=local?.keySource==='manual'?'手动填写的 Key':local?.keySource==='env'?'环境变量 OPENCODE_API_KEY':local?.keySource==='auth'?'OpenCode 旧版本机登录':local?.keySource==='cli'?'OpenCode CLI 当前登录':'未配置';
+ const localBits=[local?.available
+  ?'额度百分比与重置时间来自 OpenCode Go 官方用量接口（'+keyLabel+'）'
+  :'未读取到官方额度（'+keyLabel+'）；不会用本机费用推算剩余额度'];
+ localBits.push('每日花费与模型汇总只反映本机 OpenCode 历史，不代表订阅有效或账号剩余额度');
+ if(local?.historyError)localBits.push(local.historyError);
  $('#usageOpencodeNote').textContent=localBits.join('；');
  // 只有本机数据才有历史：最近 30 天按天汇总 + 按模型汇总。
  const days=$('#usageDays');days.replaceChildren();
- const daily=local?.available?local.daily:[];
- if(!daily.length){const p=document.createElement('div');p.className='usage-day muted';p.textContent='最近 30 天没有用量记录';days.append(p);}
+ const daily=local?.daily||[];
+ if(!daily.length){const p=document.createElement('div');p.className='usage-day muted';p.textContent=local?.historyError||'最近 30 天没有用量记录';days.append(p);}
  const maxDay=Math.max(...daily.map(d=>d.costUSD),0);
  for(const d of [...daily].reverse()){
   const time=new Date(d.day+'T00:00:00'),weekday='周'+'日一二三四五六'[time.getDay()];
   days.append(usageRow(d.day.slice(5)+' '+weekday,{ratio:maxDay?d.costUSD/maxDay:0,text:money(d.costUSD)+' · '+d.calls+' 次'}));
  }
  const models=$('#usageModels');models.replaceChildren();
- const rows=local?.available?local.models:[];
+ const rows=local?.models||[];
  if(!rows.length){const p=document.createElement('div');p.className='usage-day muted';p.textContent='暂无模型用量';models.append(p);}
  for(const m of rows)models.append(usageRow(m.name,{text:money(m.costUSD),sub:m.calls+' 次',cls:'model'}));
 }
@@ -1957,12 +2021,14 @@ function usageClose(){if(usageTimer){clearInterval(usageTimer);usageTimer=null;}
 // 进程列表另走按需接口（服务端缓存 1.5 秒）：只在设备视图可见、当前分栏有进程且页面在前台时每 3 秒拉一次，
 // 切走或切到后台立即停——这块的开销全在这里，不在服务端常驻采样里。
 let deviceData=null,networkData=null,deviceTimer=null,devicePane='cpu',processTimer=null,processRows='',processData=null,processSortSeen='',linksData=null,linksTimer=null,linksFollowup=null,linksLoading=false;
-const devicePanes=['cpu','memory','disk','network'];
+const devicePanes=['cpu','memory','disk','network','awake'];
 function showDevicePane(name){
  const next=devicePanes.includes(name)?name:devicePanes[0];
  devicePane=next;
  for(const p of document.querySelectorAll('#deviceWorkspace [data-device-pane-content]'))p.hidden=p.dataset.devicePaneContent!==next;
  for(const b of document.querySelectorAll('#deviceWorkspace [data-device-pane]'))b.setAttribute('aria-pressed',String(b.dataset.devicePane===next));
+ $('#deviceRefresh').hidden=next==='awake';
+ if(next==='awake')loadAwakeSettings();
  syncProcessPolling();
  syncLinksPolling();
 }
@@ -2246,7 +2312,7 @@ async function loadDevice(force=false){
  else{const e=devices.reason;$('#deviceState').textContent='不可用';$('#deviceState').title=e.message;}
  renderNetwork();
 }
-function openDevice(){if(!windowActive||deviceTimer)return;loadDevice();deviceTimer=setInterval(loadDevice,3000);syncProcessPolling();syncLinksPolling();}
+function openDevice(){if(!windowActive||deviceTimer)return;if(devicePane==='awake')loadAwakeSettings();loadDevice();deviceTimer=setInterval(loadDevice,3000);syncProcessPolling();syncLinksPolling();}
 function deviceClose(){if(deviceTimer){clearInterval(deviceTimer);deviceTimer=null;}syncProcessPolling();syncLinksPolling();}
 // 右下角的「刷新设备」：强制服务端立刻全量采一次（磁盘常驻采样约 60 秒一轮、网络延迟约 6 秒一轮，等不起）。
 $('#deviceRefresh').onclick=guard(async()=>{$('#deviceRefresh').disabled=true;try{await loadDevice(true);toast('已刷新设备信息');}finally{$('#deviceRefresh').disabled=false;}});

@@ -42,6 +42,17 @@ test('隔离环境：列表、文件增删改、冲突保护、路径保护、�
   assert.equal((await fetch(base+'/api/butler')).status,403);
   assert.equal((await req('butler/settings',{enabled:true},{Origin:'https://evil.example'})).status,403);
   assert.equal((await req('ai/settings',null,{Origin:'https://evil.example'})).status,403);
+  assert.equal((await fetch(base+'/api/awake/settings')).status,403);
+  assert.equal((await req('awake/settings',{allowDisplaySleep:true},{Origin:'https://evil.example'})).status,403);
+  assert.equal((await req('awake/settings')).data.defaultDuration,'1h');
+  assert.equal((await fetch(base+'/api/app/login-item')).status,403);
+  assert.equal((await req('app/login-item',{enabled:true},{Origin:'https://evil.example'})).status,403);
+  assert.equal((await req('app/login-item')).data.supported,false);
+  assert.equal((await req('app/login-item',{enabled:true})).status,400,'隔离服务不能修改真实登录项');
+  assert.equal((await req('app/login-item',{enabled:'true'})).status,400);
+  assert.equal((await req('awake/settings',{allowDisplaySleep:true})).data.allowDisplaySleep,true);
+  assert.equal((await req('awake/settings',{defaultDuration:'0s'})).status,400);
+  assert.equal((await req('awake/settings')).data.defaultDuration,'1h');
   assert.equal((await req('ai/settings',{keySource:'manual',baseUrl:'http://127.0.0.1:1/v1',model:'test',clearKey:true})).status,200);
   assert.equal((await req('skills',null,{Origin:'https://evil.example'})).status,403);
   // 用量接口：隔离环境里没有 OpenCode 数据库、Codex / Claude Code 登录与 agy 会话，所有额度来源都不可用但接口本身要正常。

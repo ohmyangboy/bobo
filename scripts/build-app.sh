@@ -31,7 +31,13 @@ icon_work="$(mktemp -d)"
 trap 'rm -rf "$icon_work"' EXIT
 
 # 1. 编译 Swift 壳（AppKit + WebKit）。
-xcrun swiftc -parse-as-library -O "$project_dir/macos/Bobo.swift" "$project_dir/macos/Todo.swift" "$project_dir/macos/IslandNotifications.swift" -o "$app_dir/Contents/MacOS/Bobo" -framework AppKit -framework WebKit -framework EventKit
+xcrun swiftc -parse-as-library -O "$project_dir/macos/Bobo.swift" "$project_dir/macos/Todo.swift" "$project_dir/macos/IslandNotifications.swift" "$project_dir/macos/Awake.swift" "$project_dir/macos/AwakeIsland.swift" "$project_dir/macos/LoginItem.swift" -o "$app_dir/Contents/MacOS/Bobo" -framework AppKit -framework WebKit -framework EventKit -framework IOKit -framework ServiceManagement
+
+# awake 的 @main 独立编译，不能混入 Bobo 的库模式编译。
+bash "$project_dir/scripts/build-awake.sh" "$out_dir/awake"
+mkdir -p "$app_dir/Contents/Resources/bin"
+cp "$out_dir/awake" "$app_dir/Contents/Resources/bin/awake"
+chmod 755 "$app_dir/Contents/Resources/bin/awake"
 
 # 2. 服务端与网页资源：src/ 与 public/ 原样保留结构，Bobo.swift 启动 Resources/src/server.mjs。
 cp "$project_dir/package.json" "$app_dir/Contents/Resources/"
@@ -75,6 +81,7 @@ cat > "$app_dir/Contents/Info.plist" <<PLIST
 PLIST
 
 if [[ -n "$identity" ]]; then
+  codesign --force --options runtime --timestamp --sign "$identity" "$app_dir/Contents/Resources/bin/awake"
   # Developer ID 签名：硬化运行时 + 安全时间戳（Apple 公证的前置条件）。
   # 时间戳服务偶发不可用（"The timestamp service is not available"），重试几次再放弃。
   signed=false
@@ -89,6 +96,7 @@ if [[ -n "$identity" ]]; then
   fi
   echo "签名：$identity"
 else
+  codesign --force --sign - "$app_dir/Contents/Resources/bin/awake"
   echo "警告：未找到 Developer ID Application 证书，使用 ad-hoc 签名（仅本机可用，无法公证）" >&2
   codesign --force --entitlements "$project_dir/macos/Bobo.entitlements" --sign - "$app_dir"
 fi

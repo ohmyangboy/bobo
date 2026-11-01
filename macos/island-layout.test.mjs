@@ -103,9 +103,9 @@ precondition(model.sessionListHeight == sessionHeight && model.expandedContentHe
 model.sessions = []
 model.todoContentHeight = 0
 model.butler = nil
-precondition(model.expanded && model.expandedContentHeight == 0, "关闭 Todo 和管家且无会话时，悬停只能左右展开，不能增加高度")
+precondition(model.expanded && model.expandedContentHeight == 0, "关闭 Todo 和管家且无会话时，不添加冗余状态行")
 model.todoContentHeight = 324
-precondition(model.expandedContentHeight == 324, "空会话不能在 Todo 上方预留文案或分隔线高度")
+precondition(model.expandedContentHeight == 324, "空会话不能添加占位文案或分隔线")
 `);
 });
 
@@ -541,6 +541,107 @@ test('通知岛计时：会话时长的文案分档', {skip:process.platform!=='
 // 额度并排显示的取舍（展开并排 + 自适应）：固定上限（3 / 5 / 7）只封顶，自适应按「中轴线到屏幕边缘」
 // 的剩余空间算——不管怎么变，排出来的宽度都不越过展开后的中轴线，装不下时至少留一枚。
 // 设备占标准一格，网络按窄条宽度计算。
+test('通知岛混排：系统图标位置保留，额度跟随来源顺序，窄图标按实际距离拖动', {skip:process.platform!=='darwin'}, async()=>{
+ await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {'),`
+ let initial = IslandBarOrder.resolved(saved: [], providers: ["codex", "agy"])
+ precondition(initial == ["quota:codex", "quota:agy", "device", "network", "awake", "settings", "quit"])
+ let saved = ["device", "quota:codex", "awake", "quota:agy", "network", "quit", "settings"]
+ let synced = IslandBarOrder.resolved(saved: saved, providers: ["agy", "codex"])
+ precondition(synced == ["device", "quota:agy", "awake", "quota:codex", "network", "quit", "settings"], "网页调整额度不能移动用户安排的系统图标")
+ precondition(IslandBarOrder.providers(in: synced) == ["agy", "codex"])
+ let sanitized = IslandBarOrder.resolved(saved: ["device", "device", "quota:removed", "unknown"], providers: ["codex"])
+ precondition(sanitized == ["quota:codex", "device", "network", "awake", "settings", "quit"])
+ let shown = ["quota:codex", "network", "device", "awake"]
+ let widths: [CGFloat] = [32, 12, 22, 22]
+ precondition(IslandBarOrder.reordered(shown, id: "network", translation: -38, widths: widths) == ["network", "quota:codex", "device", "awake"])
+ let dragged = IslandBarOrder.reordered(shown, id: "awake", translation: -1000, widths: widths)
+ precondition(dragged == ["awake", "quota:codex", "network", "device"])
+ precondition(IslandBarOrder.reordered(shown, id: "network", translation: .nan, widths: widths) == shown)
+ let full = ["quota:codex", "quota:hidden", "network", "device", "awake", "settings", "quit"]
+ let merged = IslandMetrics.mergedQuotaOrder(full: full, shown: dragged)
+ precondition(merged == ["awake", "quota:hidden", "quota:codex", "network", "device", "settings", "quit"], "隐藏的额度及操作按钮不能被拖动丢失")
+ let expanded = IslandBarOrder.resolved(saved: merged, providers: ["codex", "hidden"])
+ precondition(expanded.first == "awake" && expanded.contains("quota:hidden"))
+`);
+});
+
+test('通知岛折叠：头像撑宽时补额度图标，不增加两翼宽度，头像少时仍显示一枚', {skip:process.platform!=='darwin'}, async()=>{
+ await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {'),`
+ let quotaWidths: [CGFloat] = [22, 22, 22, 32, 22, 22, 22]
+ func content(_ faces: Int, _ quota: Int, _ widths: [CGFloat]) -> (left: CGFloat, right: CGFloat) {
+  IslandBarGeometry.contentWidths(faces: faces, hidden: 0, quota: quota, device: true, network: true,
+      actionButtons: false, quotaWidths: widths)
+ }
+ func shown(_ faces: Int, limit: Int = 0, widths: [CGFloat] = quotaWidths) -> Int {
+  IslandBarGeometry.balancedQuotaChips(left: content(faces, 1, widths).left, quotaWidths: widths,
+      limit: limit, device: true, network: true, awake: false)
+ }
+ precondition(shown(1) == 1, "头像少时不能主动增加图标或加宽默认胶囊")
+ precondition(shown(6) == 3, "六个头像撑出的空位应能补两枚额度，不能为隐藏的 awake 预留宽度")
+ precondition(shown(10) > shown(6))
+ precondition(shown(20, limit: 3) == 3, "补充仍遵守用户设置的并排上限")
+ precondition(IslandBarGeometry.balancedQuotaChips(left: 300, quotaWidths: [], limit: 0, device: true, network: true, awake: false) == 0)
+ for faces in 1...30 {
+  let count = shown(faces)
+  let baseline = content(faces, 1, quotaWidths), filled = content(faces, count, quotaWidths)
+  let old = IslandBarGeometry.layout(left: baseline.left, right: baseline.right, notch: 179)
+  let next = IslandBarGeometry.layout(left: filled.left, right: filled.right, notch: 179)
+  precondition(old == next, "补图标不能额外扩大窗口或推动左右边缘")
+  if count < quotaWidths.count {
+   precondition(content(faces, count + 1, quotaWidths).right > max(baseline.left, baseline.right), "已有空位还能放下图标时不应留空")
+  }
+ }
+ let wide: [CGFloat] = [32, 32, 22]
+ let exact = content(6, 3, wide)
+ precondition(exact.right == 140, "多枚宽余额图标要按实际宽度累加，不能低估")
+ precondition(shown(6, widths: wide) == 3)
+ precondition(IslandBarGeometry.quotaChips(count: wide.count, limit: 0, screenWidth: 450, keepOut: 193,
+     device: true, network: true, actionButtons: false, quotaWidths: wide) == 1)
+`);
+});
+
+test('通知岛额度列表：折叠补图标保留当前来源，展开与点击切换保持原有规则', {skip:process.platform!=='darwin'}, async()=>{
+ const data = await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {');
+ const model = await swiftSlice('enum IslandDetailKind:','// 通知岛面板：黑色卡片贴住刘海');
+ await checkSwift(data+'\n'+model,`
+ let json = #"{"available":true,"selected":"agy","providers":[{"id":"codex","available":true,"windows":[{"key":"session"}]},{"id":"agy","available":true,"windows":[{"key":"session"}]},{"id":"disabled","available":true,"enabled":false,"windows":[{"key":"session"}]},{"id":"offline","available":false,"windows":[{"key":"session"}]},{"id":"third","available":true,"windows":[{"key":"session"}]}]}"#
+ let quota = try! JSONDecoder().decode(IslandQuota.self, from: Data(json.utf8))
+ precondition(quota.barProviders(count: 0, expanded: false).isEmpty)
+ precondition(quota.barProviders(count: 2, expanded: false).map(\\.id) == ["agy", "codex"], "折叠时必须保留当前选中的来源")
+ precondition(quota.barProviders(count: 10, expanded: false).map(\\.id) == ["agy", "codex", "third"], "补充不能带出停用和不可用的来源")
+ let model = IslandModel()
+ model.usage = quota; model.quotaChipLimit = 3
+ precondition(model.barQuotaProviders.map(\\.id) == ["agy", "codex", "third"], "折叠视图必须真正使用补充后的数量")
+ model.hovering = true
+ precondition(model.barQuotaProviders.map(\\.id) == ["codex", "agy", "third"], "展开继续按原有额度顺序")
+ model.settings.quotaView = "cycle"
+ precondition(model.barQuotaProviders.map(\\.id) == ["agy"], "点击切换方式仍只显示当前来源")
+`);
+});
+
+test('通知岛收起状态：默认只显示当前额度、系统状态和网络，awake 展开后按保存顺序出现', {skip:process.platform!=='darwin'}, async()=>{
+ const data = await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {');
+ const model = await swiftSlice('enum IslandDetailKind:','// 通知岛面板：黑色卡片贴住刘海');
+ await checkSwift(data+'\n'+model,`
+ let model = IslandModel()
+ model.usage = try! JSONDecoder().decode(IslandQuota.self, from: Data(#"{"available":true,"selected":"codex","providers":[{"id":"codex","available":true,"windows":[{"key":"session"}]}]}"#.utf8))
+ model.device = IslandDevice()
+ model.network = IslandNetwork()
+ model.awakeActive = true
+ let saved = ["device", "awake", "quota:codex", "network", "quit", "settings"]
+ func shown() -> [String] { saved.filter { model.visibleBarItems.contains($0) } }
+ precondition(shown() == ["device", "quota:codex", "network"], "收起时即使 awake 激活也不能额外露出咖啡杯")
+ let folded = IslandBarGeometry.contentWidths(faces: 1, hidden: 0, quota: 1, device: true, network: true, actionButtons: false)
+ precondition(folded.right == 66, "收起宽度只为三枚图标和间隔留位置")
+ model.hovering = true
+ precondition(shown() == saved, "展开后恢复 awake 和按钮的已保存位置")
+ model.hovering = false
+ precondition(shown() == ["device", "quota:codex", "network"], "移出后不能残留展开态图标")
+ model.device = nil; model.network = nil
+ precondition(shown() == ["quota:codex"], "缺失系统或网络快照时不留空槽")
+`);
+});
+
 test('通知岛额度：并排显示的固定上限与自适应数量', {skip:process.platform!=='darwin'}, async()=>{
  await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {'),`
  let wide: CGFloat = 1512, keepOut: CGFloat = 214
@@ -633,6 +734,8 @@ test('通知岛额度：圆环显示的范围与并排来源的取舍', {skip:pr
  precondition(!off.showable, "关掉的来源不该参与并排")
  let gone = try! provider(#"{"id":"agy","available":false,"windows":[{"key":"session","remainingPercent":90}]}"#)
  precondition(!gone.showable, "不可用的来源不该参与并排")
+ let rejectedGo = try! provider(#"{"id":"opencode-go","available":false,"estimated":false,"windows":[],"historyAvailable":true,"daily":[{"costUSD":2}]}"#)
+ precondition(!rejectedGo.showable && !rejectedGo.hasQuotaIndicator, "本机花费历史不能生成有效的 OpenCode Go 额度圆环")
  // 并排显示的来源：可用 + 开启 + 有窗口，顺序照服务端；provider(id:) 只认这一组，displayed 认选中的那家。
  let quota = try! JSONDecoder().decode(IslandQuota.self, from: Data(#"{"available":true,"selected":"agy","providers":[{"id":"codex","available":true,"windows":[{"key":"session","remainingPercent":75}]},{"id":"opencode-go","available":true,"enabled":false,"windows":[{"key":"session","remainingPercent":97}]},{"id":"agy","available":true,"range":"week","windows":[{"key":"session","remainingPercent":90},{"key":"week","remainingPercent":80}]}]}"#.utf8))
  precondition(quota.subscriptions.map { $0.id } == ["codex","agy"], "并排来源的顺序或过滤不对")
@@ -651,6 +754,43 @@ test('通知岛额度：圆环显示的范围与并排来源的取舍', {skip:pr
  precondition(extended.subscriptions.map { $0.id } == ["grok", "cursor"] && extended.displayed?.id == "grok")
  extended.providers[0].enabled = false
  precondition(extended.subscriptions.map { $0.id } == ["cursor"] && extended.displayed?.id == "cursor")
+`);
+});
+
+test('通知岛顶栏实际排版：左右图标贴各自外边缘，中间增宽时右组不留外侧空白', {skip:process.platform!=='darwin'}, async()=>{
+ const data=await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {');
+ const layout=await swiftSlice('final class IslandLayoutState:','// 通知岛面板：黑色卡片贴住刘海');
+ const bar=await swiftSlice('private struct IslandBarContent<','// 管家消息流：');
+ await checkSwift(data+'\n'+layout+'\n'+bar,`
+ if #available(macOS 14, *) {
+  MainActor.assumeIsolated {
+   for (notch, minWidth) in [(179.0, 0.0), (179.0, 620.0), (0.0, 620.0)] {
+    let state=IslandLayoutState()
+    state.barLayout=IslandBarGeometry.layout(left:25,right:45,notch:notch,minWidth:minWidth)
+    let width=max(minWidth,state.barLayout.left+state.barLayout.keepOut+state.barLayout.right)
+    let view=IslandBarContent(layout:state,height:32,
+      leading:Color(red:1,green:0,blue:0).frame(width:12,height:12).padding(.leading,IslandMetrics.barEdge),
+      trailing:Color(red:0,green:1,blue:0).frame(width:20,height:12))
+      .frame(width:width,height:32).background(Color.black)
+    let renderer=ImageRenderer(content:view)
+    renderer.scale=1
+    guard let image=renderer.cgImage else { preconditionFailure("顶栏渲染失败") }
+    let bitmap=NSBitmapImageRep(cgImage:image)
+    let row=bitmap.pixelsHigh/2
+    let red=(0..<bitmap.pixelsWide).filter { x in
+     let color=bitmap.colorAt(x:x,y:row)!.usingColorSpace(.deviceRGB)!
+     return color.redComponent>0.8 && color.greenComponent<0.2
+    }
+    let green=(0..<bitmap.pixelsWide).filter { x in
+     let color=bitmap.colorAt(x:x,y:row)!.usingColorSpace(.deviceRGB)!
+     return color.greenComponent>0.8 && color.redComponent<0.2
+    }
+    precondition(abs((red.first ?? -100)-Int(IslandMetrics.barEdge))<=1,"左侧头像要保留左边距")
+    let expected=bitmap.pixelsWide-Int(IslandMetrics.barEdge)-1
+    precondition(abs((green.last ?? -100)-expected)<=1,"右侧图标必须贴右并保留同样的边距")
+   }
+  }
+ }
 `);
 });
 
@@ -833,6 +973,41 @@ precondition(IslandWindowGeometry.frontmostBounds([window(toolbar)], pid: 42, di
 precondition(IslandWindowGeometry.frontmostBounds([window(titleStrip)], pid: 42, displays: [chromeDisplay]) == nil)
 let upperToolbar = CGRect(x: upper.minX, y: upper.minY, width: upper.width, height: 115)
 precondition(IslandWindowGeometry.frontmostBounds([window(upperToolbar), window(upper)], pid: 42, displays: [display, upper]) == upper, "上下排列的屏幕也要跳过全屏工具栏")
+`);
+});
+
+// 刘海屏的 Chrome 全屏会保留摄像头区域；用现场几何验证分离工具栏与普通最大化的差别。
+test('通知岛视频全屏：刘海下方的主窗口需有前置分离工具栏，普通最大化与退出后不隐藏', {skip:process.platform!=='darwin'}, async()=>{
+ await checkSwift(await swiftSlice('enum IslandWindowGeometry {','// 顶栏命中范围'),`
+ let display = CGRect(x: 0, y: 0, width: 1470, height: 956)
+ let cameraArea = CGRect(x: 0, y: 32, width: 1470, height: 924)
+ let video = CGRect(x: 0, y: 33, width: 1470, height: 923)
+ let strip = CGRect(x: 0, y: -79, width: 1470, height: 47)
+ let toolbar = CGRect(x: 0, y: 33, width: 1470, height: 115)
+ let normal = CGRect(x: 50, y: 60, width: 1200, height: 800)
+ func window(_ rect: CGRect, pid: pid_t = 42, layer: Int = 0, alpha: Double = 1) -> [String: Any] {
+  [kCGWindowOwnerPID as String: pid, kCGWindowLayer as String: layer, kCGWindowAlpha as String: alpha,
+   kCGWindowBounds as String: rect.dictionaryRepresentation as NSDictionary]
+ }
+ func full(_ windows: [[String: Any]], display: CGRect = display, safe: [CGRect] = [cameraArea]) -> CGRect? {
+  IslandWindowGeometry.fullScreenBounds(windows, pid: 42, displays: [display], cameraSafeAreas: safe)
+ }
+ let current = [window(strip), window(toolbar), window(video)]
+ precondition(full(current) == video, "Chrome 当前现场应识别为全屏，不能被 33pt 摄像头留白或工具栏挡住")
+ precondition(IslandWindowGeometry.frontmostBounds(current, pid: 42, displays: [display], cameraSafeAreas: [cameraArea]) == video)
+ precondition(full([window(video)]) == nil, "普通最大化窗口即使铺满摄像头下方也不能让位")
+ precondition(full([window(video), window(toolbar)]) == nil, "后面的短条不能把前面的最大化窗口变成全屏")
+ precondition(full([window(toolbar, pid: 9), window(video)]) == nil, "另一应用的工具栏不能作为全屏证据")
+ precondition(full([window(toolbar, layer: 25), window(video)]) == nil)
+ precondition(full([window(toolbar, alpha: 0), window(video)]) == nil)
+ precondition(full(current, safe: []) == nil, "无刘海屏不能把菜单栏下方的最大化区域当全屏")
+ precondition(full([window(strip), window(toolbar), window(normal), window(video)]) == nil, "退出后前面的普通窗口必须解除让位")
+ precondition(full([window(display)]) == display, "原有铺满整块屏幕的全屏继续生效")
+ let upper = CGRect(x: -100, y: -1080, width: 1920, height: 1080)
+ let upperArea = CGRect(x: -100, y: -1048, width: 1920, height: 1048)
+ let upperVideo = CGRect(x: -100, y: -1047, width: 1920, height: 1047)
+ let upperToolbar = CGRect(x: -100, y: -1047, width: 1920, height: 115)
+ precondition(full([window(upperToolbar), window(upperVideo)], display: upper, safe: [upperArea]) == upperVideo, "上下排列的刘海屏按各自安全区匹配")
 `);
 });
 

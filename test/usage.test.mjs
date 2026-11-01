@@ -263,15 +263,14 @@ test('OpenCode Go：官方用量接口优先（percent 是已用百分比，重�
  }finally{await usage.stop();await cleanup(home);}
 });
 
-test('OpenCode Go：接口失败退回本机估算并标出原因，没有 key 时只用本机估算',async()=>{
+test('OpenCode Go：接口失败关闭额度窗口，保留本机花费历史，不按费用估算额度',async()=>{
  const {home}=await makeHomeWithDb({authKey:'sk-test-opencode',build:({message})=>message('m1',at(NOW,-60000),3.0)});
  const usage=createUsage({home,now:()=>NOW,env:{},fetchImpl:async url=>{throw Error('getaddrinfo ENOTFOUND opencode.ai');}});
  try{
   const local=provider(await usage.refresh(),'opencode-go');
-  assert.equal(local.source,'local');assert.equal(local.estimated,true);
-  assert.equal(local.windows.find(w=>w.key==='session').usedUSD,3);
-  assert.equal(local.windows.find(w=>w.key==='session').usedPercent,25);
-  assert.match(local.error,/OpenCode 额度接口失败，改用本机估算/);
+  assert.equal(local.source,'api');assert.equal(local.estimated,false);assert.equal(local.available,false);
+  assert.deepEqual(local.windows,[]);assert.equal(local.totals.costUSD,3);assert.equal(local.historyAvailable,true);
+  assert.match(local.reason,/连接 opencode.ai 失败/);
  }finally{await usage.stop();await cleanup(home);}
  // 环境变量里的 key（CodexBar 的读取顺序）也算数：没有 auth.json 也能走接口。
  const bare=await makeHome();
@@ -283,7 +282,7 @@ test('OpenCode Go：接口失败退回本机估算并标出原因，没有 key �
  }finally{await envKey.stop();await cleanup(bare);}
 });
 
-test('OpenCode Go：本机口径与 CodexBar 一致（5 小时 / UTC 周 / 账单月），没有 key 时不联网',async()=>{
+test('OpenCode Go：没有登录时不联网，本机记录只展示历史，不推断会员或额度',async()=>{
  const {home}=await makeHomeWithDb({build:({message})=>{
   message('m1',Date.parse('2026-03-06T11:00:00.000Z'),3.0);
   message('m2',Date.parse('2026-03-05T12:00:00.000Z'),6.0);
@@ -292,17 +291,9 @@ test('OpenCode Go：本机口径与 CodexBar 一致（5 小时 / UTC 周 / 账�
  const usage=createUsage({home,now:()=>NOW,env:{},fetchImpl:async url=>{throw Error('不该联网：'+url);}});
  try{
   const s=await usage.refresh(),local=provider(s,'opencode-go');
-  assert.equal(s.available,true);assert.equal(s.selected,'opencode-go');
-  assert.equal(provider(s,'codex').available,false);assert.match(provider(s,'codex').reason,/codex login/);
-  assert.equal(local.source,'local');assert.equal(local.estimated,true);
-  assert.deepEqual(local.limits,{session:12,week:30,month:60});
-  const win=key=>local.windows.find(w=>w.key===key);
-  // 5 小时窗口：只有 11:00 那条（3 美元 / 12 = 25%），重置时间 = 最早一条 + 5 小时。
-  assert.equal(win('session').usedUSD,3);assert.equal(win('session').usedPercent,25);assert.equal(win('session').remainingPercent,75);assert.equal(win('session').resetInSec,14400);
-  // 周窗口从周一 00:00Z 起：3 + 6 = 9 美元 / 30 = 30%。
-  assert.equal(win('week').usedUSD,9);assert.equal(win('week').usedPercent,30);assert.equal(win('week').resetInSec,216000);
-  // 账单月按最早一条记录（2 月 25 日 07:53:16）锚定：2 + 6 + 3 = 11 美元 / 60 = 18.3%。
-  assert.equal(win('month').usedUSD,11);assert.equal(win('month').usedPercent,18.3);assert.equal(win('month').resetInSec,1626796);
+  assert.equal(s.available,false);assert.equal(local.available,false);assert.equal(local.historyAvailable,true);
+  assert.match(provider(s,'codex').reason,/codex login/);
+  assert.deepEqual(local.windows,[]);assert.equal(local.estimated,false);assert.match(local.reason,/本机历史不能证明/);
   assert.deepEqual(local.daily.map(d=>[d.day,d.costUSD,d.calls]),[['2026-02-25',2,1],['2026-03-05',6,1],['2026-03-06',3,1]]);
   assert.deepEqual(local.models,[{name:'deepseek-v4-flash',costUSD:11,calls:3}]);
   assert.deepEqual(local.totals,{costUSD:11,calls:3});
@@ -322,8 +313,7 @@ test('OpenCode Go：步骤分片费用优先，没有分片的消息回退到消
  try{
   const local=provider(await usage.refresh(),'opencode-go');
   // 1 + 2（分片）+ 3（消息级）+ 4（非 step-finish 分片，按消息级）= 10。
-  assert.equal(local.windows.find(w=>w.key==='session').usedUSD,10);
-  assert.equal(local.windows.find(w=>w.key==='session').usedPercent,83.3);
+  assert.deepEqual(local.windows,[]);assert.equal(local.totals.costUSD,10);
   assert.equal(local.daily.length,1);assert.equal(local.daily[0].calls,4);
   assert.deepEqual(local.totals,{costUSD:10,calls:4});
  }finally{await usage.stop();await cleanup(home);}
@@ -334,28 +324,26 @@ test('OpenCode Go：没有数据库、没有记录时给出可读原因',async()
  const noDb=createUsage({home:bare,now:()=>NOW,env:{},fetchImpl:async url=>{throw Error('不该联网：'+url);}});
  try{
   const local=provider(await noDb.refresh(),'opencode-go');
-  assert.equal(local.available,false);assert.match(local.reason,/opencode\.db/);
+  assert.equal(local.available,false);assert.match(local.reason,/未检测到可用/);assert.equal(local.historyAvailable,false);assert.ok(local.historyError);
  }finally{await noDb.stop();await cleanup(bare);}
  // 有库没记录、auth 里也没有 opencode-go：未检测到。
  const {home}=await makeHomeWithDb();
  const none=createUsage({home,now:()=>NOW,env:{},fetchImpl:async url=>{throw Error('不该联网：'+url);}});
  try{
   const local=provider(await none.refresh(),'opencode-go');
-  assert.equal(local.available,false);assert.match(local.reason,/未检测到 OpenCode Go/);
+  assert.equal(local.available,false);assert.match(local.reason,/未检测到可用/);assert.equal(local.historyAvailable,true);
  }finally{await none.stop();await cleanup(home);}
 });
 
-test('OpenCode Go：只有授权没有记录时接口返回空也按零用量展示，而不是报不可用',async()=>{
+test('OpenCode Go：空额度响应不能生成剩余 100% 或虚假的重置时间',async()=>{
  const {home}=await makeHomeWithDb({authKey:'sk-test-opencode'});
  let calls=0;
  const usage=createUsage({home,now:()=>NOW,env:{},fetchImpl:routeFetch(/opencode\.ai/,async()=>fakeFetch({usage:{}}),()=>calls++)});
  try{
   const local=provider(await usage.refresh(),'opencode-go');
   assert.equal(calls,1);
-  assert.equal(local.available,true);
-  for(const key of ['session','week','month'])assert.equal(local.windows.find(w=>w.key===key).remainingPercent,100);
-  assert.ok(local.windows.find(w=>w.key==='session').resetsAt>=NOW,'没有记录时也要给下一次重置时间');
-  assert.match(local.error,/没有返回窗口数据/);
+  assert.equal(local.available,false);assert.deepEqual(local.windows,[]);
+  assert.match(local.reason,/没有返回窗口数据/);
   assert.deepEqual(local.daily,[]);assert.deepEqual(local.totals,{costUSD:0,calls:0});
  }finally{await usage.stop();await cleanup(home);}
 });
@@ -371,7 +359,7 @@ test('OpenCode Go：干净关闭的 WAL 库也只读打开，不创建 sidecar',
  const usage=createUsage({home,now:()=>NOW,env:{},fetchImpl:async url=>{throw Error('不该联网：'+url);}});
  try{
   const local=provider(await usage.refresh(),'opencode-go');
-  assert.equal(local.available,true);assert.equal(local.windows.find(w=>w.key==='session').usedUSD,6);
+  assert.equal(local.available,false);assert.equal(local.totals.costUSD,6);assert.deepEqual(local.windows,[]);
   await assert.rejects(fs.access(file+'-wal'));
   await assert.rejects(fs.access(file+'-shm'));
  }finally{await usage.stop();await cleanup(home);}
@@ -393,9 +381,9 @@ test('Codex：窗口按 limit_window_seconds 归类，主窗口是周窗口时�
 });
 
 test('Codex：正常读取 5 小时 + 周两个窗口，selected 点击后循环并持久化',async()=>{
- const {home}=await makeHomeWithDb({build:({message})=>message('m1',at(NOW,-60000),1.0)});
+ const {home}=await makeHomeWithDb({authKey:'sk-test-opencode',build:({message})=>message('m1',at(NOW,-60000),1.0)});
  await writeCodexAuth(home);
- const usage=createUsage({home,now:()=>NOW,env:{},fetchImpl:async url=>{if(!/chatgpt\.com/.test(String(url)))throw Error('不该联网：'+url);return fakeFetch(codexBody());}});
+ const usage=createUsage({home,now:()=>NOW,env:{},fetchImpl:async url=>/opencode\.ai/.test(String(url))?fakeFetch(opencodeBody()):/chatgpt\.com/.test(String(url))?fakeFetch(codexBody()):Promise.reject(Error('不该联网：'+url))});
  try{
   let s=await usage.refresh(),codex=provider(s,'codex');
   assert.deepEqual(codex.windows.map(w=>[w.key,w.label,w.usedPercent,w.remainingPercent]),[['session','5 小时滚动',25,75],['week','本周',30,70]]);
@@ -412,7 +400,7 @@ test('Codex：正常读取 5 小时 + 周两个窗口，selected 点击后循环
   // 新进程读同一份设置：顺序被记住，折叠胶囊显示顺序里第一个可用的那家。
   usage.selectProvider('opencode-go');
   await waitOrder('opencode-go,claude,agy,deepseek,cursor,grok,codex');
-  const again=createUsage({home,now:()=>NOW,env:{},fetchImpl:async()=>fakeFetch(codexBody())});
+  const again=createUsage({home,now:()=>NOW,env:{},fetchImpl:async url=>/opencode\.ai/.test(String(url))?fakeFetch(opencodeBody()):/chatgpt\.com/.test(String(url))?fakeFetch(codexBody()):Promise.reject(Error('不该联网：'+url))});
   try{
    const s2=await again.refresh();
    assert.equal(s2.selected,'opencode-go');
@@ -556,7 +544,7 @@ test('数据没变不重复推送，用量变化后推送一次',async()=>{
  const usage=createUsage({home,now:()=>clock,env:{},fetchImpl:async url=>{if(!/chatgpt\.com/.test(String(url)))throw Error('不该联网：'+url);return fakeFetch(body);}});
  let hits=0;usage.subscribe(()=>hits++);
  try{
-  assert.equal(provider(await usage.refresh(),'opencode-go').windows.find(w=>w.key==='session').usedUSD,1);
+  assert.equal(provider(await usage.refresh(),'opencode-go').totals.costUSD,1);
   assert.equal(hits,1,'首次读到数据应推送一次');
   await usage.refresh();
   assert.equal(hits,1,'数据没变不应重复推送');
@@ -564,7 +552,7 @@ test('数据没变不重复推送，用量变化后推送一次',async()=>{
   db.prepare('INSERT INTO message(id,time_created,data) VALUES(?,?,?)').run('m2',at(NOW,-30000),JSON.stringify({providerID:'opencode-go',role:'assistant',cost:2,modelID:'m',time:{created:at(NOW,-30000)}}));
   db.close();
   clock+=120000;
-  assert.equal(provider(await usage.refresh(),'opencode-go').windows.find(w=>w.key==='session').usedUSD,3);
+  assert.equal(provider(await usage.refresh(),'opencode-go').totals.costUSD,3);
   assert.equal(hits,2,'用量变化应推送');
   // Codex 的窗口变化同样会推送（用不同的 used_percent）。
   body=codexBody({primary:{used_percent:60,limit_window_seconds:18000,reset_after_seconds:3600,reset_at:Math.floor(NOW/1000)+3600}});
@@ -616,7 +604,7 @@ test('额度重置提醒：Codex 窗口回到 100% 时提醒一次，关掉开�
  }finally{await usage.stop();await cleanup(home);}
 });
 
-test('读取失败后退避：接口降级的自动重试变慢，手动刷新仍可重试，成功后回到正常节奏',async()=>{
+test('读取失败后退避：官方额度不可用时自动重试变慢，手动刷新仍可重试，成功后回到正常节奏',async()=>{
  const {home}=await makeHomeWithDb({authKey:'sk-auth-key',build:({message})=>message('m1',at(NOW,-60000),1.0)});
  let clock=NOW,calls=0,respond=false;
  const usage=createUsage({home,now:()=>clock,env:{},fetchImpl:async url=>{
@@ -626,9 +614,9 @@ test('读取失败后退避：接口降级的自动重试变慢，手动刷新�
   return fakeFetch(opencodeBody());
  }});
  try{
-  // 第一次：接口失败 → 降级到本机估算（本机记录还在）。
+  // 第一次：接口失败 → 额度不可用，本机历史仍然保留。
   const s=await usage.refresh();
-  assert.equal(provider(s,'opencode-go').source,'local');
+  assert.equal(provider(s,'opencode-go').source,'api');assert.equal(provider(s,'opencode-go').available,false);assert.deepEqual(provider(s,'opencode-go').windows,[]);
   assert.equal(calls,1);
   // 60 秒硬下限内：手动刷新也被拦。
   clock+=30e3;
@@ -1108,5 +1096,100 @@ test('Claude Code：直连时保留上一次的窗口并标出原因，打开「
   assert.equal(blocked.ok,false);assert.equal(blocked.needsDirectConfirm,true);
   const ok=await usage.setKey('claude','sk-ant-oat01-manual-abcd',{direct:true});
   assert.equal(ok.ok,true);assert.equal(provider(ok.snapshot,'claude').keySource,'manual');
+ }finally{await usage.stop();await cleanup(home);}
+});
+
+// V2 凭据夹具只有假 Key，所有请求经注入的 fetch，不读取真实登录。
+function v2CredentialTable(db){db.exec('CREATE TABLE credential(id TEXT PRIMARY KEY, integration_id TEXT, active INTEGER, value TEXT)');}
+function insertCredential(db,id,integration,value,active=1){db.prepare('INSERT INTO credential VALUES(?,?,?,?)').run(id,integration,active,JSON.stringify(value));}
+
+test('OpenCode Go：手动 Key 被拒不借用 CLI / 环境账号，旧额度立即失效但历史仍在',async()=>{
+ const {home,file}=await makeHomeWithDb({authKey:'sk-legacy',build:({message})=>message('history',NOW-1000,2)});
+ const db=new DatabaseSync(file);v2CredentialTable(db);insertCredential(db,'cli','opencode-go',{type:'key',key:'sk-cli'});db.close();
+ await fs.mkdir(path.join(home,'.bobo'),{recursive:true});await fs.writeFile(path.join(home,'.bobo/usage.json'),JSON.stringify({keys:{'opencode-go':'sk-manual'}}));
+ let clock=NOW,reject=false;const requests=[];
+ const usage=createUsage({home,env:{OPENCODE_API_KEY:'sk-env'},now:()=>clock,fetchImpl:routeFetch(/opencode\.ai/,async(_url,options)=>{
+  requests.push(options.headers.authorization);
+  return reject?{ok:false,status:403}:fakeFetch(opencodeBody());
+ })});
+ try{
+  assert.equal(provider(await usage.refresh(),'opencode-go').available,true);
+  clock+=200000;reject=true;
+  const p=provider(await usage.refresh(true),'opencode-go');
+  assert.equal(p.available,false);assert.deepEqual(p.windows,[]);assert.equal(p.estimated,false);
+  assert.equal(p.historyAvailable,true);assert.equal(p.totals.costUSD,2);assert.equal(p.keySource,'manual');
+  assert.match(p.reason,/HTTP 403/);assert.match(p.reason,/更新或清除手动/);assert.match(p.reason,/无法判断会员是否过期/);
+  assert.deepEqual(requests,['Bearer sk-manual','Bearer sk-manual']);
+ }finally{await usage.stop();await cleanup(home);}
+});
+
+test('OpenCode Go：V2 active Go 凭据优先，退出登录不复活旧 auth.json，登录切换每次重读',async()=>{
+ const {home,file}=await makeHomeWithDb({authKey:'sk-stale-legacy'});
+ const db=new DatabaseSync(file);v2CredentialTable(db);
+ insertCredential(db,'general','opencode',{type:'key',key:'sk-general'});insertCredential(db,'go','opencode-go',{type:'key',key:'sk-go'});
+ db.close();let clock=NOW;const requests=[];
+ const usage=createUsage({home,env:{},now:()=>clock,fetchImpl:routeFetch(/opencode\.ai/,async(_url,options)=>{requests.push(options.headers.authorization);return fakeFetch(opencodeBody());})});
+ try{
+  const p=provider(await usage.refresh(),'opencode-go');assert.equal(p.keySource,'cli');assert.equal(p.available,true);assert.deepEqual(requests,['Bearer sk-go']);
+  const db=new DatabaseSync(file);db.exec("UPDATE credential SET active=0 WHERE id='go'");db.close();clock+=200000;
+  await usage.refresh(true);assert.equal(requests.at(-1),'Bearer sk-general');
+  const logout=new DatabaseSync(file);logout.exec('UPDATE credential SET active=0');logout.close();clock+=200000;
+  const out=provider(await usage.refresh(true),'opencode-go');assert.equal(out.available,false);assert.deepEqual(out.windows,[]);assert.equal(requests.length,2,'退出后不能读取旧 auth.json');
+ }finally{await usage.stop();await cleanup(home);}
+});
+
+test('OpenCode Go：V2 OAuth 仅复用未过期 access；过期、损坏、重复 active 凭据均不联网或回退',async()=>{
+ for(const value of [{type:'oauth',access:'fake-access',refresh:'must-not-refresh',expires:NOW+10000},{type:'oauth',access:'expired-access',expires:NOW-1},{type:'key',key:'bad key'},{type:'unknown',key:'bad-type'}]){
+  const {home,file}=await makeHomeWithDb({authKey:'sk-stale-legacy'});
+  const db=new DatabaseSync(file);v2CredentialTable(db);insertCredential(db,'go','opencode-go',value);db.close();let calls=0;
+  const usage=createUsage({home,env:{},now:()=>NOW,fetchImpl:routeFetch(/opencode\.ai\/zen\/go\/v1\/usage/,async(_url,options)=>{calls++;assert.equal(options.headers.authorization,'Bearer fake-access');return fakeFetch(opencodeBody());})});
+  try{
+   const p=provider(await usage.refresh(),'opencode-go');const valid=value.expires>NOW;
+   assert.equal(p.available,valid);assert.equal(calls,valid?1:0);
+   if(!valid){assert.deepEqual(p.windows,[]);assert.match(p.reason,/CLI 登录不可用或已过期/);assert.ok(!JSON.stringify(p).includes(value.access||value.key));}
+  }finally{await usage.stop();await cleanup(home);}
+ }
+ const {home,file}=await makeHomeWithDb({authKey:'sk-stale-legacy'});
+ const db=new DatabaseSync(file);v2CredentialTable(db);insertCredential(db,'one','opencode-go',{type:'key',key:'one'});insertCredential(db,'two','opencode-go',{type:'key',key:'two'});db.close();
+ const usage=createUsage({home,env:{},now:()=>NOW,fetchImpl:async()=>{throw Error('不能任意选一个账号');}});
+ try{const p=provider(await usage.refresh(),'opencode-go');assert.equal(p.available,false);assert.match(p.reason,/CLI 登录不可用/);assert.deepEqual(p.windows,[]);}finally{await usage.stop();await cleanup(home);}
+});
+
+test('OpenCode Go：XDG_DATA_HOME / OPENCODE_DB 支持实时 WAL 和符号链接，不读旧主库或错误账号',async()=>{
+ const home=await makeHome(),data=path.join(home,'custom-data'),dir=path.join(data,'opencode');await fs.mkdir(dir,{recursive:true});
+ const file=path.join(dir,'active.db'),alias=path.join(home,'alias.db');
+ const db=new DatabaseSync(file);db.exec('PRAGMA journal_mode=WAL');v2CredentialTable(db);insertCredential(db,'go','opencode-go',{type:'key',key:'sk-first'});
+ await fs.symlink(file,alias);let clock=NOW;const requests=[];
+ const usage=createUsage({home,env:{XDG_DATA_HOME:data,OPENCODE_DB:alias},now:()=>clock,fetchImpl:routeFetch(/opencode\.ai/,async(_url,options)=>{requests.push(options.headers.authorization);return fakeFetch(opencodeBody());})});
+ try{
+  await usage.refresh();db.prepare('UPDATE credential SET value=?').run(JSON.stringify({type:'key',key:'sk-live-wal'}));clock+=200000;
+  await usage.refresh(true);assert.deepEqual(requests,['Bearer sk-first','Bearer sk-live-wal']);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM credential').get().n,1);
+  await assert.rejects(fs.access(alias+'-wal'));await assert.rejects(fs.access(alias+'-shm'));
+ }finally{await usage.stop();db.close();await cleanup(home);}
+ const {home:memory}=await makeHomeWithDb({authKey:'sk-legacy'});
+ const disabled=createUsage({home:memory,env:{OPENCODE_DB:':memory:'},now:()=>NOW,fetchImpl:async()=>{throw Error('禁用文件查找时不能读取旧凭据');}});
+ try{const p=provider(await disabled.refresh(),'opencode-go');assert.equal(p.available,false);assert.deepEqual(p.windows,[]);}finally{await disabled.stop();await cleanup(memory);}
+});
+
+test('OpenCode Go：V2 历史与旧记录去重，无额度也保留真实费用、不生成账单月或百分比',async()=>{
+ const {home,file}=await makeHomeWithDb({build:({message,part})=>{message('migrated',NOW-1000,99);part('step','migrated',{cost:2,createdMs:NOW-1000});}});
+ const db=new DatabaseSync(file);db.exec('CREATE TABLE session_message(id TEXT PRIMARY KEY,type TEXT,time_created INTEGER,data TEXT)');
+ const insert=(id,cost,providerID='opencode-go')=>db.prepare('INSERT INTO session_message VALUES(?,?,?,?)').run(id,'assistant',NOW-1000,JSON.stringify({model:{providerID,id:'new-model'},cost}));
+ insert('migrated',99);insert('v2',3);insert('other-provider',100,'other');db.close();
+ const usage=createUsage({home,env:{},now:()=>NOW,fetchImpl:async()=>{throw Error('只有本机记录时不联网');}});
+ try{
+  const p=provider(await usage.refresh(),'opencode-go');assert.equal(p.available,false);assert.deepEqual(p.windows,[]);assert.equal(p.limits,undefined);
+  assert.deepEqual(p.totals,{costUSD:5,calls:2});assert.equal(p.daily[0].costUSD,5);assert.equal(p.historyAvailable,true);
+ }finally{await usage.stop();await cleanup(home);}
+});
+
+test('OpenCode Go：无效百分比不变成 100%，缺重置时间不捏造时间，Key 验证只请求一次',async()=>{
+ const {home}=await makeHomeWithDb();let calls=0;
+ const usage=createUsage({home,env:{},now:()=>NOW,fetchImpl:routeFetch(/opencode\.ai/,async()=>{calls++;return fakeFetch({usage:{rolling:{percent:Infinity},weekly:{percent:40,status:'unknown'}}});})});
+ try{
+  const result=await usage.setKey('opencode-go','sk-manual');assert.equal(result.ok,true);assert.equal(calls,1);
+  const p=provider(result.snapshot,'opencode-go');assert.equal(p.available,true);assert.equal(p.keySource,'manual');
+  assert.equal(p.windows.length,1);assert.equal(p.windows[0].remainingPercent,60);assert.equal(p.windows[0].resetsAt,null);assert.equal(p.windows[0].status,'');
  }finally{await usage.stop();await cleanup(home);}
 });

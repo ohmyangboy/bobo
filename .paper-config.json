@@ -1,15 +1,16 @@
 {
-  "editor": "/Applications/MarkText.app",
+  "editor": "obsidian",
   "deploy": "auto",
   "color": "#2563EB",
   "icon": "assets/app-icon.png",
   "compress": true,
   "language": "zh_CN",
-  "postsDir": "./posts",
-  "siteDir": ".",
+  "postsDir": "/Users/yangbukun/Desktop/code/bobo/posts",
+  "siteDir": "/Users/yangbukun/Desktop/code/bobo",
   "gitRemote": "https://github.com/ohmyangboy/bobo.git",
   "siteName": "bobo",
   "siteUrl": "https://ohmyangboy.github.io/bobo/",
+  "ogImage": "",
   "imageRadius": 8,
   "schemaVersion": 2
 }
