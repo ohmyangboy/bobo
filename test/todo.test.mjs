@@ -92,6 +92,75 @@ test('Todo 拒绝权限、关闭或撤权时隐藏数据并关闭详情与创建
  p.$('#todoEnabled').onchange({target:{checked:false}});assert.deepEqual(p.sent.at(-1),{action:'enabled',enabled:false});
 });
 
+test('tobo 番茄专注：独立启动、设置回读与范围校验，浏览器模式禁用原生控制',()=>{
+ const p=page();p.host.__boboTodoReceive({...data(),focusSettings:{minutes:45,notify:false}});
+ p.host.__boboTodoFocusSettings();assert.equal(p.$('#todoSettings').open,true);assert.equal(p.$('#todoFocusMinutes').focused,true);
+ assert.equal(p.$('#todoFocusMinutes').value,'45');assert.equal(p.$('#todoFocusNotify').checked,false);
+ p.$('#todoFocusToggle').onclick();assert.deepEqual(p.sent.at(-1),{action:'focusToggle'});
+ p.$('#todoFocusMinutes').value='30';p.$('#todoFocusMinutes').onchange();
+ assert.deepEqual(p.sent.at(-1),{action:'focusSettings',minutes:30,breakMinutes:5,notify:false,systemNotify:false,sound:false});
+ const count=p.sent.length;p.$('#todoFocusMinutes').value='0';p.$('#todoFocusMinutes').onchange();
+ assert.equal(p.sent.length,count);assert.equal(p.$('#todoFocusMinutes').value,'45');
+ p.host.__boboTodoReceive({...data(),focusSettings:{minutes:30,notify:true},focus:{startedAt:1000,endsAt:2800}});
+ assert.equal(p.$('#todoFocusToggle').attributes['aria-pressed'],'true');assert.match(p.$('#todoFocusStatus').textContent,/30 分钟/);
+ const browser=page(false);assert.equal(browser.$('#todoFocusToggle').disabled,true);
+});
+
+test('tobo 休息默认五分钟，设置回读及校验保存保留其他番茄设置',()=>{
+ const p=page();p.host.__boboTodoReceive({...data(),focusSettings:{minutes:25,notify:true}});
+ assert.equal(p.$('#todoBreakMinutes').value,'5');assert.equal(p.$('#todoBreakMinutes').disabled,false);
+ p.$('#todoBreakMinutes').value='10';p.$('#todoBreakMinutes').onchange();assert.deepEqual(p.sent.at(-1),{action:'focusSettings',minutes:25,breakMinutes:10,notify:true,systemNotify:true,sound:true});
+ p.host.__boboTodoReceive({...data(),focusSettings:{minutes:40,breakMinutes:10,notify:false,systemNotify:false,sound:false}});
+ assert.equal(p.$('#todoBreakMinutes').value,'10');
+ p.$('#todoFocusMinutes').value='30';p.$('#todoFocusMinutes').onchange();assert.deepEqual(p.sent.at(-1),{action:'focusSettings',minutes:30,breakMinutes:10,notify:false,systemNotify:false,sound:false});
+ const count=p.sent.length;for(const value of ['0','61','1.5','']){
+  p.$('#todoBreakMinutes').value=value;p.$('#todoBreakMinutes').onchange();assert.equal(p.sent.length,count);assert.equal(p.$('#todoBreakMinutes').value,'10');assert.equal(p.$('#todoFocusStatus').textContent,'休息时长应为 1–60 分钟');
+ }
+ for(const value of ['1','60']){p.$('#todoBreakMinutes').value=value;p.$('#todoBreakMinutes').onchange();assert.equal(p.sent.at(-1).breakMinutes,Number(value));}
+ assert.equal(page(false).$('#todoBreakMinutes').disabled,true);
+});
+
+test('tobo 番茄区分专注休息暂停，显示今日及累计完成数',()=>{
+ const p=page(),settings={minutes:25,breakMinutes:5,notify:true};
+ p.host.__boboTodoReceive({...data(),focusSettings:settings});
+ assert.equal(p.$('#todoFocusCompleted').textContent,'今日完成 0 个 · 累计完成 0 个');assert.equal(p.$('#todoFocusStop').hidden,true);
+ p.host.__boboTodoReceive({...data(),focusSettings:settings,focus:{startedAt:1000,endsAt:2500,phase:'focus',pausedRemaining:null},focusCompletedToday:2,focusCompleted:12});
+ assert.match(p.$('#todoFocusStatus').textContent,/正在专注，本轮 25 分钟；结束后休息 5 分钟/);assert.equal(p.$('#todoFocusToggle').attributes['aria-label'],'暂停番茄专注');assert.equal(p.$('#todoFocusCompleted').textContent,'今日完成 2 个 · 累计完成 12 个');assert.equal(p.$('#todoFocusStop').hidden,false);
+ p.host.__boboTodoReceive({...data(),focusSettings:settings,focus:{startedAt:2500,endsAt:2800,phase:'rest',pausedRemaining:null}});
+ assert.match(p.$('#todoFocusStatus').textContent,/正在休息，本轮 5 分钟；结束后等待手动开始下一轮专注/);assert.equal(p.$('#todoFocusToggle').attributes['aria-label'],'暂停番茄休息');
+ p.host.__boboTodoReceive({...data(),focusSettings:settings,focus:{startedAt:2500,endsAt:2800,phase:'rest',pausedRemaining:125}});
+ assert.equal(p.$('#todoFocusStatus').textContent,'休息已暂停，剩余 3 分钟');assert.equal(p.$('#todoFocusToggle').attributes['aria-label'],'继续番茄休息');
+ p.host.__boboTodoReceive({...data(),focusSettings:settings,focus:{startedAt:1000,endsAt:2500,phase:'focus',pausedRemaining:0}});
+ assert.equal(p.$('#todoFocusStatus').textContent,'专注已暂停，剩余 0 分钟');assert.equal(p.$('#todoFocusToggle').attributes['aria-label'],'继续番茄专注');
+ p.host.__boboTodoReceive({...data(),focusSettings:settings,focus:{startedAt:2800,endsAt:2800,phase:'ready'}});
+ assert.equal(p.$('#todoFocusToggle').attributes['aria-label'],'开始下一轮番茄专注');assert.match(p.$('#todoFocusStatus').textContent,/点击番茄按钮开始下一轮/);
+ const count=p.sent.length;p.host.__boboTodoReceive({...data(),focusSettings:settings,focus:{startedAt:2800,endsAt:2800,phase:'ready'}});
+ assert.equal(p.sent.length,count,'刷新待开始状态不能自动发送启动请求');
+ p.$('#todoFocusToggle').onclick();assert.deepEqual(p.sent.at(-1),{action:'focusToggle'});
+});
+
+test('tobo 到点提醒的通知岛、系统通知与声音可独立保存，旧关闭配置保持静默',()=>{
+ const p=page();p.host.__boboTodoReceive({...data(),focusSettings:{minutes:25,breakMinutes:5,notify:false}});
+ assert.equal(p.$('#todoFocusSystemNotify').checked,false);assert.equal(p.$('#todoFocusSound').checked,false);
+ p.$('#todoFocusSystemNotify').checked=true;p.$('#todoFocusSystemNotify').onchange();
+ assert.deepEqual(p.sent.at(-1),{action:'focusSettings',minutes:25,breakMinutes:5,notify:false,systemNotify:true,sound:false});
+ p.$('#todoFocusSound').checked=true;p.$('#todoFocusSound').onchange();
+ assert.deepEqual(p.sent.at(-1),{action:'focusSettings',minutes:25,breakMinutes:5,notify:false,systemNotify:true,sound:true});
+ p.host.__boboTodoReceive({...data(),focusSettings:{minutes:25,breakMinutes:5,notify:true,systemNotify:false,sound:true}});
+ assert.equal(p.$('#todoFocusNotify').checked,true);assert.equal(p.$('#todoFocusSystemNotify').checked,false);assert.equal(p.$('#todoFocusSound').checked,true);
+ const browser=page(false);assert.equal(browser.$('#todoFocusSystemNotify').disabled,true);assert.equal(browser.$('#todoFocusSound').disabled,true);
+});
+
+test('tobo 番茄单击暂停继续，右键或明确按钮结束，仅活动时可结束',()=>{
+ const p=page();let prevented=0;const context=()=>p.$('#todoFocusToggle').oncontextmenu({preventDefault(){prevented++;}});
+ p.host.__boboTodoReceive(data());const count=p.sent.length;context();p.$('#todoFocusStop').onclick();assert.equal(p.sent.length,count);assert.equal(prevented,1);assert.equal(p.$('#todoFocusStop').disabled,true);
+ p.host.__boboTodoReceive({...data(),focus:{startedAt:1000,endsAt:2500,phase:'focus',pausedRemaining:null}});
+ p.$('#todoFocusToggle').onclick();assert.deepEqual(p.sent.at(-1),{action:'focusToggle'});context();assert.deepEqual(p.sent.at(-1),{action:'focusStop'});assert.equal(prevented,2);
+ p.host.__boboTodoReceive({...data(),focus:{startedAt:1000,endsAt:2500,phase:'focus',pausedRemaining:60}});
+ p.$('#todoFocusToggle').onclick();assert.deepEqual(p.sent.at(-1),{action:'focusToggle'});assert.equal(p.$('#todoFocusStop').disabled,false);p.$('#todoFocusStop').onclick();assert.deepEqual(p.sent.at(-1),{action:'focusStop'});
+ p.host.__boboTodoReceive(data());assert.equal(p.$('#todoFocusStop').hidden,true);
+});
+
 test('Todo 编辑带回系统字段，保存失败保留草稿，完成与已完成切换独立写回',()=>{
  const p=page();p.host.__boboTodoReceive(data());p.host.__boboTodoOpen('real-id');
  assert.equal(p.$('#todoComposer').hidden,false);assert.equal(p.$('#todoDetail').open,false);

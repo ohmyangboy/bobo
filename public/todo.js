@@ -143,9 +143,22 @@ export function installTodoPage(doc=document,host=window){
   $('#todoPermissionSettings').hidden=!bridge||!['denied','restricted'].includes(data?.authorization);
   $('#todoEnabled').checked=enabled;$('#todoEnabled').disabled=!bridge||!allowed;
   $('#todoShowCompleted').checked=!!data?.showCompleted;$('#todoShowCompleted').disabled=!connected;
+  const focus=data?.focus,focusSettings=data?.focusSettings||{minutes:25,notify:true},focusReady=!!bridge&&!!data,breakMinutes=focusSettings.breakMinutes??5,phase=focus?.phase==='rest'?'休息':'专注',paused=focus?.pausedRemaining!=null,waiting=focus?.phase==='ready';
+  $('#todoFocusToggle').disabled=!focusReady;
+  $('#todoFocusToggle').setAttribute('aria-pressed',String(!!focus));
+  $('#todoFocusToggle').setAttribute('aria-label',waiting?'开始下一轮番茄专注':focus?`${paused?'继续':'暂停'}番茄${phase}`:'开始番茄专注');
+  $('#todoFocusToggle').title=waiting?'休息结束，点击开始下一轮番茄专注':focus?`单击${paused?'继续':'暂停'}${phase}，右键结束番茄时钟`:`开始 ${focusSettings.minutes} 分钟番茄专注`;
+  $('#todoFocusMinutes').value=String(focusSettings.minutes);$('#todoFocusMinutes').disabled=!focusReady;
+  $('#todoBreakMinutes').value=String(breakMinutes);$('#todoBreakMinutes').disabled=!focusReady;
+  $('#todoFocusNotify').checked=focusSettings.notify!==false;$('#todoFocusNotify').disabled=!focusReady;
+  $('#todoFocusSystemNotify').checked=focusSettings.systemNotify??(focusSettings.notify!==false);$('#todoFocusSystemNotify').disabled=!focusReady;
+  $('#todoFocusSound').checked=focusSettings.sound??(focusSettings.notify!==false);$('#todoFocusSound').disabled=!focusReady;
+  $('#todoFocusStatus').textContent=data?.focusError||(waiting?'休息结束，点击番茄按钮开始下一轮专注':focus?(paused?`${phase}已暂停，剩余 ${Math.ceil(focus.pausedRemaining/60)} 分钟`:`正在${phase}，本轮 ${Math.round((focus.endsAt-focus.startedAt)/60)} 分钟；${phase==='休息'?'结束后等待手动开始下一轮专注':`结束后休息 ${breakMinutes} 分钟`}`):'设置用于下一轮专注；休息结束后，点击开始下一轮。系统通知与声音遵循通知岛全局开关和系统设置。');
+  $('#todoFocusCompleted').textContent=`今日完成 ${data?.focusCompletedToday??0} 个 · 累计完成 ${data?.focusCompleted??0} 个`;
+  $('#todoFocusStop').hidden=!focus;$('#todoFocusStop').disabled=!focusReady||!focus;
   $('#todoOpen').disabled=!bridge;$('#todoOpenTobo').disabled=!bridge;$('#todoRefresh').disabled=!bridge||loading;$('#todoNew').disabled=!connected;
   $('#todoForm').hidden=!connected;$('#todoQuickForm').hidden=!bridge||(!inlineContext&&!$('#todoComposer').hidden);$('#todoInputShell').hidden=!bridge;$('#todoQuickTitle').disabled=!connected;$('#todoBoard').hidden=!connected;
-  if(!connected){close('#todoComposer',false);close('#todoDetail');selectedID=editingID=null;}
+  if(!connected){if(!$('#todoComposer').hidden)close('#todoComposer',false);close('#todoDetail');selectedID=editingID=null;}
   const lists=data?.lists||[],key=JSON.stringify(lists);
   if(key!==listKey){
    listKey=key;const select=$('#todoList'),old=select.value;
@@ -162,6 +175,7 @@ export function installTodoPage(doc=document,host=window){
   if(status){status.querySelector('.notch-dot').dataset.state=allowed&&enabled?'idle':'';status.querySelector('b').textContent=!bridge?'需 macOS App':enabled?(allowed?'已连接':'待授权'):'未连接';}
  }
  host.__boboTodoReceive=render;host.__boboTodoOpen=openItem;
+ host.__boboTodoFocusSettings=()=>{$('#todoSettings').open=true;$('#todoFocusMinutes').focus();};
  host.__boboTodoCreated=saved=>{
   pending=false;const next=afterSave;afterSave=null;
   if(saved){for(const id of ['Title','Date','Time','Notes','URL','Alarm'])$('#todo'+id).value='';$('#todoPriority').value='0';$('#todoQuickTitle').value='';editingID=null;selectedID=null;close('#todoComposer');}
@@ -171,6 +185,16 @@ export function installTodoPage(doc=document,host=window){
  $('#todoConnect').onclick=()=>send({action:'connect'});$('#todoPermissionSettings').onclick=()=>send({action:'settings'});
  $('#todoEnabled').onchange=event=>send({action:'enabled',enabled:event.target.checked});
  $('#todoShowCompleted').onchange=event=>send({action:'showCompleted',show:event.target.checked});
+ $('#todoFocusToggle').onclick=()=>send({action:'focusToggle'});
+ const stopFocus=()=>{if(snapshot?.focus)send({action:'focusStop'});};
+ $('#todoFocusToggle').oncontextmenu=event=>{event.preventDefault();stopFocus();};$('#todoFocusStop').onclick=stopFocus;
+ const saveFocusSettings=()=>{
+  const minutes=Number($('#todoFocusMinutes').value),breakMinutes=Number($('#todoBreakMinutes').value);
+  if(!Number.isInteger(minutes)||minutes<1||minutes>180){$('#todoFocusMinutes').value=String(snapshot?.focusSettings?.minutes??25);$('#todoFocusStatus').textContent='专注时长应为 1–180 分钟';return;}
+  if(!Number.isInteger(breakMinutes)||breakMinutes<1||breakMinutes>60){$('#todoBreakMinutes').value=String(snapshot?.focusSettings?.breakMinutes??5);$('#todoFocusStatus').textContent='休息时长应为 1–60 分钟';return;}
+  send({action:'focusSettings',minutes,breakMinutes,notify:$('#todoFocusNotify').checked,systemNotify:$('#todoFocusSystemNotify').checked,sound:$('#todoFocusSound').checked});
+ };
+ $('#todoFocusMinutes').onchange=saveFocusSettings;$('#todoBreakMinutes').onchange=saveFocusSettings;$('#todoFocusNotify').onchange=saveFocusSettings;$('#todoFocusSystemNotify').onchange=saveFocusSettings;$('#todoFocusSound').onchange=saveFocusSettings;
  $('#todoOpen').onclick=()=>{const id=inlineContext&&!emptyContent()?inlineContext.id:null;const open=()=>send(id?{action:'openSystem',id}:{action:'openSystem'});if(inlineContext)leaveInline(open);else open();};$('#todoRefresh').onclick=()=>send({action:'get'});
  $('#todoOpenTobo').onclick=()=>{$('#todoSettings').open=false;send({action:'openTobo'});};
  $('#todoNew').onclick=()=>openCreate();$('#todoCancel').onclick=()=>{if(inlineContext)leaveInline(()=>{});else if(!pending)close('#todoComposer');};

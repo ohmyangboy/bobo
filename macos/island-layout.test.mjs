@@ -23,6 +23,48 @@ async function swiftSlice(start, end) {
  return source.slice(from,to);
 }
 
+test('番茄到点：独立展开后自动收回，保留主动悬停，旧回调不能收掉新提示', {skip:process.platform!=='darwin'}, async()=>{
+ const declarations=await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {');
+ const model=await swiftSlice('enum IslandDetailKind:','// 通知岛面板：黑色卡片贴住刘海');
+ const reveal=await swiftSlice('    private func revealFocusTemporarily(', '    // 「等你回答」或会话结束/终止时自动亮起');
+ await checkSwift(declarations+'\n'+model+`
+enum NSEvent { static var mouseLocation = NSPoint(x: 300, y: 700) }
+final class Probe {
+ let islandModel = IslandModel()
+ var focusRevealWork: DispatchWorkItem?, focusRevealID: UUID?, focusRevealSessionID: String?
+ var passiveRevealMouse: NSPoint?
+ var pointerInside = false, layouts = 0
+ func islandContainsPointer() -> Bool { pointerInside }
+ func scheduleIslandLayout() { layouts += 1 }
+ func reveal(_ id: String) { revealFocusTemporarily(sessionID: id) }
+ func finish() { focusRevealWork?.perform() }
+ func clear() { clearFocusReveal() }
+`+reveal+'\n}',`
+let probe = Probe(), model = probe.islandModel
+model.settings.autoExpand = false; model.settings.hideWhenIdle = true
+model.focusActive = true; model.todoContentHeight = 216
+precondition(!model.expanded && model.visible)
+probe.reveal("rest")
+precondition(model.expanded && model.focusRevealed && model.expandedContentHeight == 216, "沿用原看板高度和缩放，不额外插入提示行")
+let old = probe.focusRevealWork!
+probe.reveal("ready");old.perform()
+precondition(model.focusRevealed && probe.focusRevealSessionID == "ready", "旧结束事件不能收掉下一次到点提示")
+probe.finish()
+precondition(!model.focusRevealed && !model.expanded && model.visible, "到点亮起后回缩，等待手动开始入口继续可见")
+model.hovering = true; probe.pointerInside = true
+probe.reveal("ready");probe.finish()
+precondition(model.hovering && model.expanded, "用户正查看时不强行收起")
+probe.pointerInside = false
+probe.reveal("another")
+precondition(!model.hovering && model.focusRevealed, "修正漏掉移出事件的旧悬停")
+probe.clear()
+precondition(!model.expanded && probe.focusRevealWork == nil, "点击开始或结束后清理自动展开")
+model.settings.notch = false
+probe.reveal("disabled")
+precondition(!model.focusRevealed && !model.visible, "关闭通知岛时只交给系统提醒通道")
+`);
+});
+
 test('单行顶栏：按钮与红黄绿区域透传，只有同尺寸的顶栏空白可以拖动', {skip:process.platform!=='darwin'}, async()=>{
  await checkSwift(await swiftSlice('struct TitlebarHitMap {','// 原生拖动与双击缩放'),`
 let size = NSSize(width: 760, height: 52)
@@ -642,6 +684,24 @@ test('通知岛收起状态：默认只显示当前额度、系统状态和网�
 `);
 });
 
+test('通知岛番茄专注：倒计时替代所有头像，宽度不受会话和溢出数量影响，空闲时仍可见', {skip:process.platform!=='darwin'}, async()=>{
+ const data=await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {');
+ const model=await swiftSlice('enum IslandDetailKind:','// 通知岛面板：黑色卡片贴住刘海');
+ await checkSwift(data+'\n'+model,`
+ let a = IslandBarGeometry.contentWidths(faces:1,hidden:0,quota:1,device:true,network:true,actionButtons:false,focus:true)
+ let b = IslandBarGeometry.contentWidths(faces:12,hidden:20,quota:1,device:true,network:true,actionButtons:false,focus:true)
+ precondition(a.left == b.left && a.left == IslandMetrics.focusChipWidth + IslandMetrics.itemSpacing + IslandMetrics.dividerWidth)
+ precondition(a.right == b.right && a.right == 66,"番茄只替代左侧头像，不增加右侧功能")
+ let model = IslandModel()
+ model.settings.hideWhenIdle = true
+ precondition(!model.visible)
+ model.focusActive = true
+ precondition(model.visible,"无活跃会话时也不能隐藏正在计时的番茄")
+ model.focusActive = false
+ precondition(!model.visible,"结束后恢复原有空闲隐藏规则")
+`);
+});
+
 test('通知岛额度：并排显示的固定上限与自适应数量', {skip:process.platform!=='darwin'}, async()=>{
  await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {'),`
  let wide: CGFloat = 1512, keepOut: CGFloat = 214
@@ -990,7 +1050,7 @@ test('通知岛视频全屏：刘海下方的主窗口需有前置分离工具�
    kCGWindowBounds as String: rect.dictionaryRepresentation as NSDictionary]
  }
  func full(_ windows: [[String: Any]], display: CGRect = display, safe: [CGRect] = [cameraArea]) -> CGRect? {
-  IslandWindowGeometry.fullScreenBounds(windows, pid: 42, displays: [display], cameraSafeAreas: safe)
+  IslandWindowGeometry.videoFullScreenBounds(windows, pid: 42, bundleIdentifier: "com.google.Chrome", displays: [display], cameraSafeAreas: safe)
  }
  let current = [window(strip), window(toolbar), window(video)]
  precondition(full(current) == video, "Chrome 当前现场应识别为全屏，不能被 33pt 摄像头留白或工具栏挡住")
@@ -1002,7 +1062,11 @@ test('通知岛视频全屏：刘海下方的主窗口需有前置分离工具�
  precondition(full([window(toolbar, alpha: 0), window(video)]) == nil)
  precondition(full(current, safe: []) == nil, "无刘海屏不能把菜单栏下方的最大化区域当全屏")
  precondition(full([window(strip), window(toolbar), window(normal), window(video)]) == nil, "退出后前面的普通窗口必须解除让位")
- precondition(full([window(display)]) == display, "原有铺满整块屏幕的全屏继续生效")
+ precondition(full([window(display)]) == nil, "普通应用或浏览器窗口全屏不能隐藏 bobo")
+ let edgeToolbar = CGRect(x: 0, y: 0, width: display.width, height: 115)
+ precondition(full([window(edgeToolbar), window(display)]) == display, "无摄像头留白的视频内容全屏仍然让位")
+ precondition(full([window(display), window(edgeToolbar)]) == nil, "浏览器应用全屏时工具栏在后面，不得冒充视频全屏")
+ precondition(IslandWindowGeometry.videoFullScreenBounds(current, pid: 42, bundleIdentifier: "md.obsidian", displays: [display], cameraSafeAreas: [cameraArea]) == nil, "其它应用即使存在类似几何也不能触发视频让位")
  let upper = CGRect(x: -100, y: -1080, width: 1920, height: 1080)
  let upperArea = CGRect(x: -100, y: -1048, width: 1920, height: 1048)
  let upperVideo = CGRect(x: -100, y: -1047, width: 1920, height: 1047)
@@ -1039,6 +1103,7 @@ final class Probe {
  let islandModel = IslandModel()
  var notchWindow: ProbePanel? = ProbePanel(), detailWindow: ProbePanel?
  var islandDragging = false, islandQuotaDragging = false, isHopping = false
+ var focusMenuTracking = false
  var islandLayoutTimer: Timer?, islandDisplayDriver: AnyObject?
  var islandCollapse: DispatchWorkItem?, islandAutoCollapse: DispatchWorkItem?
  var menuBarYielding = false, menuBarLeftAt: Date?
@@ -1092,6 +1157,13 @@ full.tick()
 precondition(full.scans == 4, "关闭通知岛时不查窗口")
 
 let replying = Probe()
+replying.focusMenuTracking = true
+replying.islandModel.hovering = true
+replying.hover(false); replying.finishLeave(); replying.tick()
+precondition(replying.islandModel.hovering && replying.scans == 0, "右键设置菜单展开时不能因鼠标离开而收起通知岛")
+replying.focusMenuTracking = false
+replying.hover(false); replying.finishLeave()
+precondition(!replying.islandModel.hovering, "关闭设置菜单后恢复正常收起")
 replying.islandModel.butlerReply.isOpen = true
 replying.islandModel.butlerReply.edit("保留文字")
 let input = IslandReplyTextView()

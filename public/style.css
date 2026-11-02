@@ -598,6 +598,13 @@ body[data-view=island][data-island-kind=quota] #quotaActions{display:flex}
 .todo-settings{position:relative}.todo-settings>summary{list-style:none;cursor:default;color:var(--text-2);font-size:22px;padding:0 5px}.todo-settings>summary::-webkit-details-marker{display:none}
 .todo-settings-popover{position:absolute;right:0;top:38px;width:270px;padding:18px;z-index:4;border:1px solid var(--control-border);border-radius:16px;background:var(--panel);box-shadow:0 12px 38px #0002;font-size:12px;color:var(--text-2)}
 .todo-settings-popover p{font-size:11px;line-height:1.8;color:var(--text-2)}.todo-enabled-label{display:flex;align-items:center;gap:8px;margin:8px 0}.todo-enabled-label input{width:auto}
+.todo-focus-button{position:absolute;left:-48px;bottom:3px;display:grid;place-items:center;width:34px;height:34px;padding:0;border-radius:50%;font-size:19px;line-height:1;background:var(--panel);border:1px solid var(--control-border);box-shadow:0 4px 18px #0002}
+.todo-focus-button[aria-pressed="true"]{border-color:#ef6457;background:color-mix(in srgb,#ef6457 16%,var(--panel))}
+.todo-input-shell:has(#todoComposer:not([hidden])) .todo-focus-button{display:none}
+.todo-focus-settings{border-top:1px solid var(--control-border);margin-top:12px;padding-top:10px}.todo-focus-settings h4{margin:0 0 10px;font-size:12px;color:var(--text)}
+.todo-focus-duration{display:flex;align-items:center;justify-content:space-between;gap:12px}.todo-focus-duration input{width:72px}.todo-focus-settings p{margin:8px 0 0}
+.todo-focus-break{margin-top:8px}.todo-focus-stop{margin-top:10px;width:100%}
+.todo-input-shell .todo-settings-popover{max-height:calc(100vh - 160px);overflow-y:auto}
 .todo-connect:has(>button:not([hidden])){padding:0 22px 14px}.todo-connect{display:flex;gap:8px}
 .todo-board{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0;flex:1;min-height:0;overflow:hidden;margin:0 12px 20px}
 .todo-column{display:flex;flex-direction:column;min-width:0;min-height:0;background:transparent;border:0;overflow:hidden}.todo-column+.todo-column{border-left:1px solid var(--line-soft)}

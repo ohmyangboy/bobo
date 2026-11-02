@@ -8,6 +8,16 @@ published: true
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-11-02
+
+### 新增
+
+- **番茄专注**：tobo 胶囊左侧增加番茄按钮，启动后用一个倒计时替代顶部头像组。默认专注 25 分钟、休息 5 分钟，休息结束后手动点击开始下一轮，记录今日及累计完成数；单击暂停或继续，长按外圈进度填满或右键结束。到点时通知岛展开，底部胶囊缩放为「喝口水 / 继续专注」提示；tobo 设置及番茄右键菜单支持专注时长、休息时长、通知岛提示、系统通知与声音。
+
+### 修复
+
+- 收窄通知岛全屏让位：仅在识别到浏览器视频内容全屏时隐藏，普通应用全屏和浏览器窗口全屏保留 bobo。
+
 ## [1.5.0] - 2026-11-01
 
 ### 新增
@@ -283,3 +293,4 @@ awake 的合盖保护依赖 macOS 私有接口，面向已验证的 Apple Silico
 [1.3.5]: https://github.com/ohmyangboy/bobo/releases/tag/v1.3.5
 [1.4.0]: https://github.com/ohmyangboy/bobo/releases/tag/v1.4.0
 [1.5.0]: https://github.com/ohmyangboy/bobo/releases/tag/v1.5.0
+[1.6.0]: https://github.com/ohmyangboy/bobo/releases/tag/v1.6.0

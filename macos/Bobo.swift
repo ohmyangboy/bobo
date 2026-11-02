@@ -39,7 +39,12 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     private var islandLayoutTimer: Timer?
     private var islandDisplayDriver: AnyObject?
     private var islandCollapse: DispatchWorkItem?
+    private var focusMenuTracking = false
+    private let focusMenuTracker = TodoFocusMenuTracker()
     private var islandAutoCollapse: DispatchWorkItem?
+    private var focusRevealWork: DispatchWorkItem?
+    private var focusRevealID: UUID?
+    private var focusRevealSessionID: String?
     // 悬停明细卡：额度 / 设备 / 网络指示悬停半秒后弹出的只读小窗（独立窗口，贴在面板下方、层级高于面板）。
     private var detailWindow: NotchPanel!
     private var detailHosting: NSHostingView<IslandDetailView>?
@@ -60,7 +65,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     // 激活 / 空间切换时强制刷新，平时缓存一秒，覆盖网页播放器无通知的进入 / 退出全屏。
     private var fullScreenCached = false
     private var fullScreenCheckedAt: Date?
-    // 让位（防遮挡菜单栏 / 全屏应用）状态：true 时面板缩成一只 bobo 躲进刘海区域（见 setIslandYielding）。
+    // 让位（防遮挡菜单栏 / 全屏视频）状态：true 时面板缩成一只 bobo 躲进刘海区域（见 setIslandYielding）。
     private var islandYielding = false
     private var terminalWatchTimer: Timer?
     private var islandTask: Task<Void, Never>?
@@ -127,7 +132,17 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             guard let self else { return }
             self.islandModel.todoContentHeight = snapshot.height
             self.islandModel.todoHasItems = snapshot.enabled && snapshot.count > 0
+            self.islandModel.focusActive = snapshot.focus != nil
+            if self.focusRevealSessionID != nil, self.focusRevealSessionID != snapshot.focus?.id { self.clearFocusReveal() }
             self.scheduleIslandLayout()
+        }
+        todoStore.onFocusFinished = { [weak self] completed in
+            guard let self else { return }
+            let snapshot = self.todoStore.snapshot, settings = snapshot.focusSettings
+            if settings.notify, let focus = snapshot.focus { self.revealFocusTemporarily(sessionID: focus.id) }
+            let title = completed.isRest ? "休息结束" : "番茄专注完成"
+            let message = completed.isRest ? "准备好了？点击通知岛的「继续专注」开始下一轮。" : "今日已完成 \(snapshot.focusCompletedToday) 个番茄，喝口水，休息 \(settings.breakMinutes) 分钟。"
+            self.postNotice(IslandNotice(seq: Int(Date().timeIntervalSince1970 * 1000), kind: "focus", title: title, message: message, at: Date().timeIntervalSince1970, notify: settings.systemNotify, sound: settings.sound ? "Hero.aiff" : nil))
         }
         todoStore.refresh()
         requestNotificationAuth()
@@ -306,6 +321,12 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     // 形态与交互参考 CodeIsland：比菜单栏高两级、约束重排时不被压下去、所有空间与全屏下可见；
     // 折叠时只占一条与刘海同高的胶囊，鼠标移入向下展开会话列表。
     private func setupNotch() {
+        focusMenuTracker.onChange = { [weak self] shown in
+            guard let self else { return }
+            self.focusMenuTracking = shown
+            if shown { self.islandCollapse?.cancel() }
+            else if !self.islandContainsPointer() { self.islandHovering(false) }
+        }
         let width: CGFloat = 220, height: CGFloat = 30
         notchWindow = NotchPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: height), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         notchWindow.title = "bobo 通知岛"
@@ -344,6 +365,11 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
                     self.notchWindow?.makeKey()
                 }
                 self.scheduleIslandLayout()
+            },
+            onFocusSettings: { [weak self] in
+                guard let self else { return }
+                self.openInApp(tab: "islandTab", pane: ("island", "todo"))
+                self.webView.evaluateJavaScript("window.__boboTodoFocusSettings?.()")
             },
             onSelect: { [weak self] session in self?.focusIsland(session) },
             onActivate: { [weak self] in self?.showIslandStatus() },
@@ -473,9 +499,8 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         return intersection.isNull || intersection.isEmpty ? 0 : intersection.width * intersection.height
     }
 
-    // 前台应用（排除 bobo 自己）是否正处于全屏：进入全屏会切到一个专属空间，窗口铺满整块屏幕
-    // （连菜单栏/刘海那一条也占掉）。这时通知岛要让位——它带着 .fullScreenAuxiliary，会一直顶在全屏内容上。
-    // 判定复用取窗口的同一段逻辑，同时识别 Chrome 在刘海下方铺满的全屏主窗口与分离工具栏。
+    // 只为浏览器视频内容全屏让位。普通应用全屏、浏览器窗口全屏不能仅因铺满屏幕就隐藏通知岛。
+    // 使用 Chromium 内容全屏的前置分离工具栏特征；不读取网页内容或申请额外权限。
     private func frontmostFullScreenCached(force: Bool = false) -> Bool {
         let now = Date()
         if force || fullScreenCheckedAt == nil || now.timeIntervalSince(fullScreenCheckedAt!) >= 1 {
@@ -504,7 +529,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             return CGRect(x: bounds.minX, y: bounds.minY + inset, width: bounds.width, height: bounds.height - inset)
         }
         if fullScreenOnly {
-            return IslandWindowGeometry.fullScreenBounds(windows, pid: front.processIdentifier, displays: displays, cameraSafeAreas: cameraSafeAreas)
+            return IslandWindowGeometry.videoFullScreenBounds(windows, pid: front.processIdentifier, bundleIdentifier: front.bundleIdentifier ?? "", displays: displays, cameraSafeAreas: cameraSafeAreas)
         }
         return IslandWindowGeometry.frontmostBounds(windows, pid: front.processIdentifier, displays: displays, cameraSafeAreas: cameraSafeAreas)
     }
@@ -576,7 +601,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             device: islandModel.device != nil,
             network: islandModel.network != nil,
             actionButtons: islandModel.expanded,
-            awake: islandModel.expanded, quotaWidths: islandModel.barQuotaProviders.map { IslandMetrics.quotaChipWidth($0, barHeight: islandBarHeight(screen)) })
+            awake: islandModel.expanded, quotaWidths: islandModel.barQuotaProviders.map { IslandMetrics.quotaChipWidth($0, barHeight: islandBarHeight(screen)) }, focus: islandModel.focusActive)
         // 刘海屏上下同宽，列表沿用顶部内容宽度；外接屏保留原有展开宽度。
         let minWidth: CGFloat = islandModel.expanded ? min(todoStore.snapshot.enabled ? 620 : 480, screen.frame.width - IslandMetrics.screenEdgeMargin * 2) : 0
         let layout = IslandBarGeometry.layout(left: widths.left, right: widths.right, notch: notch, minWidth: minWidth)
@@ -603,7 +628,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         let capacity = IslandBarGeometry.avatarCapacity(screenWidth: screen.frame.width, keepOut: keepOut)
         let plan = IslandBarGeometry.avatars(islandModel.busy.count, cap: capacity)
         let left = IslandBarGeometry.contentWidths(faces: islandModel.busy.isEmpty ? 1 : plan.shown, hidden: plan.hidden,
-            quota: 0, device: false, network: false, actionButtons: false).left
+            quota: 0, device: false, network: false, actionButtons: false, focus: islandModel.focusActive).left
         return IslandBarGeometry.balancedQuotaChips(left: left, quotaWidths: widths,
             limit: islandModel.settings.quotaCount, device: islandModel.device != nil, network: islandModel.network != nil, awake: false)
     }
@@ -829,7 +854,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             // 正在拖动额度圆环排序：鼠标可能滑到面板外，这时别把面板收走（拖完由 onQuotaDrag 再判一次）。
-            if self.islandQuotaDragging { return }
+            if self.islandQuotaDragging || self.focusMenuTracking { return }
             let mouse = NSEvent.mouseLocation
             // mouseExited 有时是误报（滚动、窗口尺寸动画时系统会重算跟踪区）：鼠标还在面板上就别收起。
             if self.islandContainsPointer(mouse) { return }
@@ -1015,6 +1040,30 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         }
     }
 
+    // 番茄到点独立于 Agent 的自动展开开关；只亮起六秒，不改变正在编辑或主动悬停的状态。
+    private func revealFocusTemporarily(sessionID: String) {
+        guard islandModel.settings.notch else { return }
+        if islandModel.hovering, !islandContainsPointer() { islandModel.hovering = false }
+        focusRevealWork?.cancel()
+        let id = UUID()
+        focusRevealID = id; focusRevealSessionID = sessionID
+        passiveRevealMouse = NSEvent.mouseLocation
+        islandModel.focusRevealed = true
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.focusRevealID == id else { return }
+            self.clearFocusReveal()
+        }
+        focusRevealWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: work)
+        scheduleIslandLayout()
+    }
+    private func clearFocusReveal() {
+        focusRevealWork?.cancel(); focusRevealWork = nil
+        focusRevealID = nil; focusRevealSessionID = nil
+        islandModel.focusRevealed = false
+        scheduleIslandLayout()
+    }
+
     // 「等你回答」或会话结束/终止时自动亮起：没有操作就收回胶囊；鼠标移入即解除限制（见 islandHovering）。
     private func revealIslandTemporarily(seconds: Double) {
         guard islandModel.settings.autoExpand else { return }
@@ -1167,6 +1216,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     }
 
     private func updateMenuBarYield() {
+        if focusMenuTracking { return }
         if islandModel.butlerReply.isOpen || islandModel.todoComposing { menuBarYielding = false; menuBarLeftAt = nil; return }
         // 在动画 / 鼠标 / 窗口可见性 guard 之前复查：全屏让位的透明窗口也必须能自己恢复。
         recheckFullScreenYield()
@@ -1208,7 +1258,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         let quotaWidths = (islandModel.usage?.barProviders(count: quota, expanded: false) ?? []).map { IslandMetrics.quotaChipWidth($0, barHeight: islandBarHeight(screen)) }
         let widths = IslandBarGeometry.contentWidths(faces: islandModel.busy.isEmpty ? 1 : plan.shown, hidden: plan.hidden, quota: quota,
                                                      device: islandModel.device != nil, network: islandModel.network != nil, actionButtons: false,
-                                                     awake: false, quotaWidths: quotaWidths)
+                                                     awake: false, quotaWidths: quotaWidths, focus: islandModel.focusActive)
         let layout = IslandBarGeometry.layout(left: widths.left, right: widths.right, notch: notch)
         let barWidth = IslandBarGeometry.envelope(layout)
         return IslandBarGeometry.width(layout, minWidth: barWidth, maxWidth: screen.frame.width - IslandMetrics.screenEdgeMargin * 2)
@@ -1692,6 +1742,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         return true
     }
     func applicationWillTerminate(_ notification: Notification) {
+        focusRevealWork?.cancel()
         awakeController.stopMonitoring()
         menuBarWatchTimer?.invalidate()
         if let islandOutsideMonitor { NSEvent.removeMonitor(islandOutsideMonitor) }
@@ -1846,13 +1897,16 @@ enum IslandWindowGeometry {
         selection(windows, pid: pid, displays: displays, cameraSafeAreas: cameraSafeAreas).frontmost
     }
 
-    static func fullScreenBounds(_ windows: [[String: Any]], pid: pid_t, displays: [CGRect], cameraSafeAreas: [CGRect] = []) -> CGRect? {
+    static func videoFullScreenBounds(_ windows: [[String: Any]], pid: pid_t, bundleIdentifier: String, displays: [CGRect], cameraSafeAreas: [CGRect] = []) -> CGRect? {
+        // 与网页跳转已有的 Chromium 来源一致；未知应用没有视频全屏证据时保留通知岛。
+        let browsers = ["com.google.Chrome", "com.microsoft.edgemac", "com.brave.Browser", "com.vivaldi.Vivaldi", "org.chromium.Chromium"]
+        guard browsers.contains(where: { bundleIdentifier == $0 || bundleIdentifier.hasPrefix($0 + ".") }) else { return nil }
         let result = selection(windows, pid: pid, displays: displays, cameraSafeAreas: cameraSafeAreas)
-        guard let frontmost = result.frontmost, result.fullScreen.contains(frontmost) else { return nil }
+        guard let frontmost = result.frontmost, result.videoFullScreen.contains(frontmost) else { return nil }
         return frontmost
     }
 
-    private static func selection(_ windows: [[String: Any]], pid: pid_t, displays: [CGRect], cameraSafeAreas: [CGRect]) -> (frontmost: CGRect?, fullScreen: [CGRect]) {
+    private static func selection(_ windows: [[String: Any]], pid: pid_t, displays: [CGRect], cameraSafeAreas: [CGRect]) -> (frontmost: CGRect?, videoFullScreen: [CGRect]) {
         let bounds = windows.compactMap { window -> CGRect? in
             guard let owner = window[kCGWindowOwnerPID as String] as? pid_t, owner == pid,
                   let layer = window[kCGWindowLayer as String] as? Int, layer == 0,
@@ -1883,7 +1937,13 @@ enum IslandWindowGeometry {
             // 才略过贴住顶边、横跨整屏的短条；前面的普通窗口仍优先，不能被后面的旧全屏窗口压住。
             return !fullScreen.contains { toolbar(rect, above: $0) }
         }
-        return (frontmost, fullScreen)
+        // Chrome 应用全屏时主窗口在工具栏前，视频内容全屏时分离工具栏在主窗口前。
+        // 普通全屏窗口即使与显示器完全重合，也不能单独作为视频全屏的证据。
+        let videoFullScreen = fullScreen.filter { main in
+            guard let index = bounds.firstIndex(of: main) else { return false }
+            return bounds.prefix(index).contains { toolbar($0, above: main) }
+        }
+        return (frontmost, videoFullScreen)
     }
 
     static func isFullScreen(_ rect: CGRect, displays: [CGRect]) -> Bool {
@@ -2311,6 +2371,7 @@ enum IslandMetrics {
     // 折叠胶囊里每个图标共用一套规格：22 的外框（热区与悬停圆底）、5 的间距、同一套悬停底色；
     // bobo 头像的脸是 19，设置 / 退出这类 SF Symbol 图形对齐额度圆环里那枚来源图标（13），比例才一致。
     static let itemSize: CGFloat = 22
+    static let focusChipWidth: CGFloat = 68
     // 网络只有一列竖条，使用更窄的热区，收紧两侧留白。
     static let networkItemWidth: CGFloat = 12
     static let itemSpacing: CGFloat = 5
@@ -2552,10 +2613,11 @@ enum IslandBarGeometry {
     // 两侧内容的宽度（不含端帽）：左侧是会话头像 + 分隔线（放不下时最后一格换成「+N」徽标，
     // 尺寸与头像脸一致），右侧是额度圆环（展开并排时可能有几枚）+ 设备 + 网络（+ 展开时的设置与退出）。
     // 间距与图标规格共用 IslandMetrics。
-    static func contentWidths(faces: Int, hidden: Int, quota: Int, device: Bool, network: Bool, actionButtons: Bool, wideQuota: CGFloat = 0, awake: Bool = false, quotaWidths: [CGFloat] = []) -> (left: CGFloat, right: CGFloat) {
+    static func contentWidths(faces: Int, hidden: Int, quota: Int, device: Bool, network: Bool, actionButtons: Bool, wideQuota: CGFloat = 0, awake: Bool = false, quotaWidths: [CGFloat] = [], focus: Bool = false) -> (left: CGFloat, right: CGFloat) {
         // 头像之间、头像与徽标 / 分隔线之间都是同一个间距；分隔线自己也占一格的宽度。
         var left = CGFloat(faces) * IslandMetrics.glyphSize + IslandMetrics.itemSpacing * CGFloat(faces) + IslandMetrics.dividerWidth
-        if hidden > 0 { left += IslandMetrics.itemSpacing + IslandMetrics.glyphSize }
+        if focus { left = IslandMetrics.focusChipWidth + IslandMetrics.itemSpacing + IslandMetrics.dividerWidth }
+        else if hidden > 0 { left += IslandMetrics.itemSpacing + IslandMetrics.glyphSize }
         let chips = max(0, quota) + (device ? 1 : 0) + (network ? 1 : 0) + (awake ? 1 : 0) + (actionButtons ? 2 : 0)
         let networkInset = network ? IslandMetrics.itemSize - IslandMetrics.networkItemWidth : 0
         // 余额圆环可能比普通 22pt 更宽（见 balanceChipSize）：只在真正画着余额 chip 时补差额。
@@ -2861,6 +2923,8 @@ final class IslandModel: ObservableObject {
     @Published var todoHasItems = false
     @Published var todoComposing = false
     @Published var awakeActive = false
+    @Published var focusActive = false
+    @Published var focusRevealed = false
     @Published var barOrder: [String] = []
     // 悬停明细卡：nil 为不显示；detailMetrics 由 SwiftUI 上报，原生用它定窗口尺寸（见 Bobo.applyDetail）。
     @Published var detail: IslandDetailKind?
@@ -2905,7 +2969,7 @@ final class IslandModel: ObservableObject {
         return items
     }
     // 展开：鼠标悬停，或（设置允许时）状态变化自动亮起（等你回答 3 秒、结束/终止 2 秒，见 revealIslandTemporarily）。
-    var expanded: Bool { todoComposing || butlerReply.isOpen || hovering || (settings.autoExpand && autoRevealed) }
+    var expanded: Bool { todoComposing || butlerReply.isOpen || hovering || focusRevealed || (settings.autoExpand && autoRevealed) }
     @discardableResult func dismissTodoInput() -> Bool {
         guard todoComposing else { return false }
         todoComposing = false; hovering = false; autoRevealed = false
@@ -2921,7 +2985,7 @@ final class IslandModel: ObservableObject {
     }
     var todoHeight: CGFloat { expanded ? todoContentHeight : 0 }
     var expandedContentHeight: CGFloat { expanded ? sessionListHeight + butlerHeight + todoHeight : 0 }
-    var visible: Bool { settings.notch && (!settings.hideWhenIdle || !busy.isEmpty || butlerReply.isOpen || todoHasItems || awakeActive) }
+    var visible: Bool { settings.notch && (!settings.hideWhenIdle || !busy.isEmpty || butlerReply.isOpen || todoHasItems || awakeActive || focusActive) }
     // 折叠常驻保留静态状态色；只有可见展开态才运行呼吸动画。
     var onScreen: Bool { visible && !yielding }
     var motionActive: Bool { onScreen && screenAwake && expanded }
@@ -3021,6 +3085,7 @@ struct IslandView: View {
     var todoInputMonitor: TodoInputMonitor?
     var onTodo: (String?) -> Void
     var onTodoCompose: (Bool) -> Void
+    var onFocusSettings: () -> Void
     var onSelect: (IslandSession) -> Void
     // 点顶部栏空白：打开主窗口，落在默认的第一个 tab（通知岛）。
     var onActivate: () -> Void
@@ -3074,7 +3139,7 @@ struct IslandView: View {
                     todo.create(title: draft.title, date: draft.date, listID: draft.listID, bucket: draft.bucket, details: draft.details)
                 }, onUpdate: { id, draft in
                     todo.create(title: draft.title, date: draft.date, listID: draft.listID, details: draft.details, editingID: id)
-                }, onDelete: { todo.remove(id: $0) }, onCompose: onTodoCompose, onShowCompleted: { todo.setShowCompleted($0) }, onComplete: { todo.complete(id: $0, completed: $1) }, active: model.expanded, inputMonitor: todoInputMonitor)
+                }, onDelete: { todo.remove(id: $0) }, onCompose: onTodoCompose, onShowCompleted: { todo.setShowCompleted($0) }, onComplete: { todo.complete(id: $0, completed: $1) }, onFocus: { todo.toggleFocus() }, onFocusStop: { todo.stopFocus() }, onFocusSettings: onFocusSettings, onFocusSettingsChange: { todo.saveFocusSettings($0) }, active: model.expanded, inputMonitor: todoInputMonitor)
                 .frame(height: model.expanded ? todo.snapshot.height : 0, alignment: .bottom)
                 .clipped().allowsHitTesting(model.expanded).accessibilityHidden(!model.expanded)
             }
@@ -3187,7 +3252,14 @@ struct IslandView: View {
         IslandBarContent(layout: model.layout, height: model.barHeight, leading:
             HStack(spacing: IslandMetrics.itemSpacing) {
                 // 默认图标（没有活跃会话时的置灰 bobo）固定靠左，占住会话头像的位置。
-                if model.busy.isEmpty {
+                if let focus = todo.snapshot.focus {
+                    TodoFocusCountdown(session: focus, active: model.onScreen && model.screenAwake, onToggle: { todo.toggleFocus() }, onStop: { todo.stopFocus() })
+                        .frame(width: IslandMetrics.focusChipWidth)
+                        .contextMenu {
+                            TodoFocusMenu(settings: todo.snapshot.focusSettings, onChange: { todo.saveFocusSettings($0) }, onSettings: onFocusSettings,
+                                focus: focus, onToggle: { todo.toggleFocus() }, onStop: { todo.stopFocus() })
+                        }
+                } else if model.busy.isEmpty {
                     IslandAvatar(image: model.idleAvatarImage(), color: Color(white: 0.30), state: "idle", stateColor: Color(white: 0.42), animating: model.motionActive)
                         .contentShape(Rectangle())
                         .onTapGesture { onAvatar(nil) }

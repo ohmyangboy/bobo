@@ -62,6 +62,86 @@ struct TodoColumn: Equatable, Encodable, Identifiable {
     var title: String { bucket.title }
 }
 
+struct TodoFocusSettings: Codable, Equatable {
+    var minutes = 25
+    var notify = true
+    var breakMinutes = 5
+    var systemNotify = true
+    var sound = true
+    var hasReminder: Bool { notify || systemNotify || sound }
+    var valid: Bool { (1...180).contains(minutes) && (1...60).contains(breakMinutes) }
+    private enum CodingKeys: String, CodingKey { case minutes, notify, breakMinutes, systemNotify, sound }
+    init(minutes: Int = 25, notify: Bool = true, breakMinutes: Int = 5, systemNotify: Bool? = nil, sound: Bool? = nil) {
+        self.minutes = minutes; self.notify = notify; self.breakMinutes = breakMinutes
+        self.systemNotify = systemNotify ?? notify; self.sound = sound ?? notify
+    }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        minutes = try values.decodeIfPresent(Int.self, forKey: .minutes) ?? 25
+        notify = try values.decodeIfPresent(Bool.self, forKey: .notify) ?? true
+        breakMinutes = try values.decodeIfPresent(Int.self, forKey: .breakMinutes) ?? 5
+        // 旧版关闭结束提醒时，迁移后仍保持全部静默。
+        systemNotify = try values.decodeIfPresent(Bool.self, forKey: .systemNotify) ?? notify
+        sound = try values.decodeIfPresent(Bool.self, forKey: .sound) ?? notify
+    }
+    static func parse(_ value: [String: Any]) -> TodoFocusSettings? {
+        func integer(_ key: String, range: ClosedRange<Double>) -> Int? {
+            guard let number = value[key] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.doubleValue.isFinite, range.contains(number.doubleValue), number.doubleValue.rounded() == number.doubleValue else { return nil }
+            return number.intValue
+        }
+        func boolean(_ key: String) -> Bool? {
+            guard let number = value[key] as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+            return number.boolValue
+        }
+        guard Set(value.keys) == ["minutes", "notify", "breakMinutes", "systemNotify", "sound"],
+              let minutes = integer("minutes", range: 1...180), let rest = integer("breakMinutes", range: 1...60),
+              let notify = boolean("notify"), let systemNotify = boolean("systemNotify"), let sound = boolean("sound") else { return nil }
+        return TodoFocusSettings(minutes: minutes, notify: notify, breakMinutes: rest, systemNotify: systemNotify, sound: sound)
+    }
+}
+
+// 使用绝对截止时间；暂停保存剩余秒数，只有这块局部视图逐秒刷新。
+struct TodoFocusSession: Codable, Equatable, Identifiable {
+    var startedAt: TimeInterval
+    var endsAt: TimeInterval
+    var id = UUID().uuidString
+    var phase = "focus"
+    var pausedRemaining: TimeInterval?
+    var isPaused: Bool { pausedRemaining != nil }
+    var isRest: Bool { phase == "rest" }
+    var isReady: Bool { phase == "ready" }
+    var title: String { isReady ? "待开始" : (isRest ? "休息" : "专注") }
+    var symbol: String { isRest ? "☕️" : "🍅" }
+    var valid: Bool {
+        startedAt.isFinite && endsAt.isFinite && (isReady ? endsAt == startedAt && pausedRemaining == nil : endsAt > startedAt) && endsAt - startedAt <= 180 * 60 &&
+        !id.isEmpty && id.utf8.count <= 128 && ["focus", "rest", "ready"].contains(phase) &&
+        (pausedRemaining.map { $0.isFinite && $0 > 0 && $0 <= 180 * 60 } ?? true)
+    }
+    private enum CodingKeys: String, CodingKey { case startedAt, endsAt, id, phase, pausedRemaining }
+    init(startedAt: TimeInterval, endsAt: TimeInterval, id: String = UUID().uuidString, phase: String = "focus", pausedRemaining: TimeInterval? = nil) {
+        self.startedAt = startedAt; self.endsAt = endsAt; self.id = id; self.phase = phase; self.pausedRemaining = pausedRemaining
+    }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        startedAt = try values.decode(TimeInterval.self, forKey: .startedAt)
+        endsAt = try values.decode(TimeInterval.self, forKey: .endsAt)
+        id = try values.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        phase = try values.decodeIfPresent(String.self, forKey: .phase) ?? "focus"
+        pausedRemaining = try values.decodeIfPresent(TimeInterval.self, forKey: .pausedRemaining)
+    }
+    func remaining(at date: Date) -> Int { Int(ceil(min(180 * 60, max(0, pausedRemaining ?? (endsAt - date.timeIntervalSince1970))))) }
+    func label(at date: Date) -> String { let seconds = remaining(at: date); return String(format: "%02d:%02d", seconds / 60, seconds % 60) }
+}
+
+// 会话和完成数放在同一份偏好记录，崩溃后不会重复结算一轮。
+private struct TodoFocusState: Codable {
+    var focus: TodoFocusSession?
+    var completed = 0
+    var days: [String: Int] = [:]
+    var valid: Bool { (focus?.valid ?? true) && completed >= 0 && days.values.allSatisfy { $0 >= 0 && $0 <= completed } }
+}
+
 struct TodoSnapshot: Equatable, Encodable {
     var enabled = false
     var authorization = TodoAuthorization.notDetermined
@@ -70,6 +150,11 @@ struct TodoSnapshot: Equatable, Encodable {
     var lists: [TodoList] = []
     var defaultList = ""
     var showCompleted = false
+    var focusSettings = TodoFocusSettings()
+    var focus: TodoFocusSession?
+    var focusError = ""
+    var focusCompleted = 0
+    var focusCompletedToday = 0
     var columns = TodoBucket.allCases.map { TodoColumn(bucket: $0, items: []) }
     var count: Int { columns.reduce(0) { $0 + $1.items.count } }
     var height: CGFloat {
@@ -261,6 +346,8 @@ enum TodoError: LocalizedError {
 
 @MainActor final class TodoStore: ObservableObject {
     @Published private(set) var snapshot = TodoSnapshot()
+    // 专注与休息自然到点各派发一次；手动结束、暂停、等待开始不派发。
+    var onFocusFinished: ((TodoFocusSession) -> Void)?
     private let repository: any TodoRepository
     private let defaults: UserDefaults
     private let now: () -> Date
@@ -269,11 +356,22 @@ enum TodoError: LocalizedError {
     private var pendingRefresh = false
     private var requesting = false
     private var observers: [NSObjectProtocol] = []
+    private var focusTimer: Timer?
+    private var focusState = TodoFocusState()
 
     init(repository: any TodoRepository, defaults: UserDefaults, now: @escaping () -> Date = Date.init, calendar: @escaping () -> Calendar = { .current }, observeSystem: Bool = true) {
         self.repository = repository; self.defaults = defaults; self.now = now; self.calendar = calendar
         snapshot.enabled = defaults.bool(forKey: "todoEnabled")
         snapshot.showCompleted = defaults.bool(forKey: "todoShowCompleted")
+        if let data = defaults.data(forKey: "todoFocusSettings"), let settings = try? JSONDecoder().decode(TodoFocusSettings.self, from: data), settings.valid { snapshot.focusSettings = settings }
+        if let data = defaults.data(forKey: "todoFocusState"), let state = try? JSONDecoder().decode(TodoFocusState.self, from: data), state.valid {
+            focusState = state
+        } else if let data = defaults.data(forKey: "todoFocusSession"), let focus = try? JSONDecoder().decode(TodoFocusSession.self, from: data), focus.valid {
+            focusState.focus = focus
+        }
+        snapshot.focus = focusState.focus
+        updateFocusCounts()
+        persistFocus()
         snapshot.authorization = repository.authorization
         repository.onChange = { [weak self] in self?.refresh() }
         if observeSystem {
@@ -282,9 +380,86 @@ enum TodoError: LocalizedError {
             }
             observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in Task { @MainActor in self?.refresh() } })
         }
+        finishFocusIfNeeded()
+        scheduleFocusDeadline()
     }
     deinit {
+        focusTimer?.invalidate()
         for observer in observers { NotificationCenter.default.removeObserver(observer); NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+    }
+    @discardableResult func saveFocusSettings(_ value: [String: Any]) -> Bool {
+        guard let settings = TodoFocusSettings.parse(value) else { snapshot.focusError = "专注时长应为 1–180 分钟，休息时长应为 1–60 分钟，提醒开关应为布尔值"; return false }
+        snapshot.focusError = ""
+        snapshot.focusSettings = settings
+        defaults.set(try? JSONEncoder().encode(settings), forKey: "todoFocusSettings")
+        return true
+    }
+    @discardableResult func saveFocusSettings(_ settings: TodoFocusSettings) -> Bool {
+        saveFocusSettings(["minutes": settings.minutes, "notify": settings.notify, "breakMinutes": settings.breakMinutes, "systemNotify": settings.systemNotify, "sound": settings.sound])
+    }
+    func toggleFocus() {
+        finishFocusIfNeeded()
+        guard var focus = snapshot.focus else { beginFocusPhase("focus"); return }
+        if focus.isReady { beginFocusPhase("focus"); return }
+        let instant = now().timeIntervalSince1970
+        if let remaining = focus.pausedRemaining {
+            focus.pausedRemaining = nil
+            // 保留本轮时长，暂停期间的墙钟时间不算入倒计时。
+            let duration = focus.endsAt - focus.startedAt
+            focus.endsAt = instant + remaining; focus.startedAt = focus.endsAt - duration
+        } else { focus.pausedRemaining = max(0.001, focus.endsAt - instant) }
+        setFocus(focus)
+    }
+    func stopFocus() { if snapshot.focus != nil { setFocus(nil) } }
+    func finishFocusIfNeeded() {
+        updateFocusCounts()
+        guard let focus = snapshot.focus, !focus.isReady, !focus.isPaused, focus.remaining(at: now()) == 0 else { return }
+        if !focus.isRest {
+            if focusState.completed < Int.max { focusState.completed += 1 }
+            let day = focusDay(Date(timeIntervalSince1970: focus.endsAt))
+            let previous = focusState.days[day, default: 0]
+            if previous < Int.max { focusState.days[day] = previous + 1 }
+        }
+        // 晚唤醒只结算眼前这一轮，下一阶段从现在开始，不凭空补出完成数。
+        beginFocusPhase(focus.isRest ? "ready" : "rest")
+        if snapshot.focusSettings.hasReminder { onFocusFinished?(focus) }
+    }
+    private func beginFocusPhase(_ phase: String) {
+        let start = now().timeIntervalSince1970
+        let settings = snapshot.focusSettings
+        let seconds = phase == "ready" ? 0 : (phase == "rest" ? settings.breakMinutes : settings.minutes) * 60
+        setFocus(TodoFocusSession(startedAt: start, endsAt: start + Double(seconds), phase: phase))
+    }
+    private func setFocus(_ focus: TodoFocusSession?) {
+        focusState.focus = focus
+        persistFocus()
+        var next = snapshot
+        next.focus = focus; next.focusError = ""
+        next.focusCompleted = focusState.completed; next.focusCompletedToday = focusState.days[focusDay(now()), default: 0]
+        snapshot = next
+        scheduleFocusDeadline()
+    }
+    private func focusDay(_ date: Date) -> String {
+        let components = calendar().dateComponents([.era, .year, .month, .day], from: date)
+        return "\(components.era ?? 0)-\(components.year ?? 0)-\(components.month ?? 0)-\(components.day ?? 0)"
+    }
+    private func updateFocusCounts() {
+        let today = focusState.days[focusDay(now()), default: 0]
+        if snapshot.focusCompleted != focusState.completed { snapshot.focusCompleted = focusState.completed }
+        if snapshot.focusCompletedToday != today { snapshot.focusCompletedToday = today }
+    }
+    private func persistFocus() {
+        defaults.set(try? JSONEncoder().encode(focusState), forKey: "todoFocusState")
+        defaults.removeObject(forKey: "todoFocusSession")
+    }
+    private func scheduleFocusDeadline() {
+        focusTimer?.invalidate(); focusTimer = nil
+        guard let focus = snapshot.focus, !focus.isReady, !focus.isPaused else { return }
+        let timer = Timer(timeInterval: max(0.05, focus.endsAt - now().timeIntervalSince1970), repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.finishFocusIfNeeded(); self?.scheduleFocusDeadline() }
+        }
+        focusTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
     func setEnabled(_ enabled: Bool) {
         generation += 1
@@ -316,6 +491,7 @@ enum TodoError: LocalizedError {
         refresh()
     }
     func refresh() {
+        finishFocusIfNeeded()
         snapshot.authorization = repository.authorization
         guard snapshot.enabled, snapshot.authorization == .allowed else {
             generation += 1; pendingRefresh = false; snapshot.loading = false; snapshot.columns = TodoSnapshot().columns; snapshot.lists = []; snapshot.defaultList = ""
@@ -425,6 +601,11 @@ enum TodoNavigation {
         guard message.frameInfo.isMainFrame, Self.trusted(message.frameInfo.request.url), let body = message.body as? [String: Any], let action = body["action"] as? String else { return }
         switch action {
         case "get": publish(store.snapshot); store.refresh()
+        case "focusToggle": store.toggleFocus(); publish(store.snapshot)
+        case "focusStop": store.stopFocus(); publish(store.snapshot)
+        case "focusSettings":
+            _ = store.saveFocusSettings(body.filter { $0.key != "action" })
+            publish(store.snapshot)
         case "connect": Task { await store.connect(); publish(store.snapshot) }
         case "enabled": if let enabled = body["enabled"] as? Bool { store.setEnabled(enabled) }
         case "showCompleted": if let show = body["show"] as? Bool { store.setShowCompleted(show) }
@@ -571,6 +752,30 @@ private struct IslandTodoSwipeRow<Content: View>: View {
     }
 }
 
+// 到点提示在原输入胶囊内切换，不额外插入状态行或改变看板高度。
+struct TodoFocusPrompt: View {
+    var ready: Bool
+    var onToggle: () -> Void = {}
+    var onStop: () -> Void = {}
+    var onAction: () -> Void
+    var body: some View {
+        HStack(spacing: 9) {
+            TodoFocusControl(running: true, onToggle: onToggle, onStop: onStop) { progress in
+                Text("🍅").font(.system(size: 18)).frame(width: 25, height: 26)
+                    .overlay { TodoFocusHoldRing(progress: progress) }
+            }.accessibilityLabel(ready ? "开始下一轮番茄专注，长按结束" : "暂停或继续休息，长按结束")
+            Text(ready ? "继续专注" : "喝口水").font(.system(size: 12, weight: .medium))
+            Button(action: onAction) {
+                Image(systemName: ready ? "play.circle.fill" : "checkmark.circle.fill")
+                    .font(.system(size: 21)).foregroundStyle(ready ? Color.orange : Color.green)
+                    .frame(width: 26, height: 26)
+            }.buttonStyle(.plain)
+                .accessibilityLabel(ready ? "开始下一轮番茄专注" : "知道了，继续休息")
+                .help(ready ? "点击后开始下一轮" : "收起提示，休息计时继续")
+        }.padding(.horizontal, 14).padding(.vertical, 5).foregroundStyle(.white)
+    }
+}
+
 struct IslandTodoView: View {
     var snapshot: TodoSnapshot
     var onManage: () -> Void
@@ -581,6 +786,10 @@ struct IslandTodoView: View {
     var onCompose: (Bool) -> Void = { _ in }
     var onShowCompleted: (Bool) -> Void = { _ in }
     var onComplete: (String, Bool) -> Void = { _, _ in }
+    var onFocus: () -> Void = {}
+    var onFocusStop: () -> Void = {}
+    var onFocusSettings: () -> Void = {}
+    var onFocusSettingsChange: (TodoFocusSettings) -> Void = { _ in }
     var active = true
     var inputMonitor: TodoInputMonitor?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -588,6 +797,10 @@ struct IslandTodoView: View {
     @State private var composerOpen = false
     @State private var editing: IslandTodoEdit?
     @State private var swipedItem: String?
+    @State private var restPromptID: String?
+    private var showsFocusPrompt: Bool {
+        !composerOpen && editing == nil && (snapshot.focus?.isReady == true || (restPromptID != nil && restPromptID == snapshot.focus?.id))
+    }
 
     private func begin(_ bucket: TodoBucket) {
         guard finishEdit(save: true) else { return }
@@ -653,25 +866,38 @@ struct IslandTodoView: View {
         }
         .overlay(alignment: .bottom) {
             if snapshot.authorization == .allowed {
-                VStack(spacing: 0) {
-                    if composerOpen, let draft {
-                        IslandTodoCreateCard(initial: draft, lists: snapshot.lists, error: snapshot.error, inputMonitor: inputMonitor, onManage: onManage, showCompleted: snapshot.showCompleted, onShowCompleted: { onShowCompleted(!snapshot.showCompleted) }, onDraftChange: { if draft.id == $0.id { self.draft = $0 } }, onCancel: hideComposer, onSave: { value in
-                            if onCreate(value) { finish() }
-                        }).id(draft.id).fixedSize(horizontal: false, vertical: true)
-                            .transaction { $0.animation = nil }
-                            .transition(.opacity)
-                    } else {
-                        quickInput.transition(.opacity)
+                HStack(alignment: .bottom, spacing: 8) {
+                    if !composerOpen && !showsFocusPrompt { focusButton }
+                    VStack(spacing: 0) {
+                        if composerOpen, let draft {
+                            IslandTodoCreateCard(initial: draft, lists: snapshot.lists, error: snapshot.error, inputMonitor: inputMonitor, onManage: onManage, showCompleted: snapshot.showCompleted, onShowCompleted: { onShowCompleted(!snapshot.showCompleted) }, onDraftChange: { if draft.id == $0.id { self.draft = $0 } }, onCancel: hideComposer, onSave: { value in
+                                if onCreate(value) { finish() }
+                            }).id(draft.id).fixedSize(horizontal: false, vertical: true)
+                                .transaction { $0.animation = nil }
+                                .transition(.opacity)
+                        } else if showsFocusPrompt {
+                            TodoFocusPrompt(ready: snapshot.focus?.isReady == true, onToggle: onFocus, onStop: onFocusStop) {
+                                if snapshot.focus?.isReady == true { onFocus() } else { restPromptID = nil }
+                            }.contextMenu {
+                                TodoFocusMenu(settings: snapshot.focusSettings, onChange: onFocusSettingsChange, onSettings: onFocusSettings, focus: snapshot.focus, onToggle: onFocus, onStop: onFocusStop)
+                            }.transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.94)))
+                        } else {
+                            quickInput.transition(.opacity)
+                        }
                     }
+                    .frame(maxWidth: composerOpen ? 360 : (showsFocusPrompt ? nil : 128))
+                    .fixedSize(horizontal: showsFocusPrompt, vertical: false)
+                    .background(Color(white: 0.12).opacity(composerOpen ? 0.85 : 0), in: RoundedRectangle(cornerRadius: 26))
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26))
+                    .overlay(RoundedRectangle(cornerRadius: 26).stroke(.white.opacity(0.14), lineWidth: 0.5))
+                    .clipShape(RoundedRectangle(cornerRadius: 26))
+                    .shadow(color: .black.opacity(0.2), radius: 10, y: 3)
+                    if !composerOpen && !showsFocusPrompt { Color.clear.frame(width: 34, height: 34).allowsHitTesting(false) }
                 }
-                .frame(maxWidth: composerOpen ? 360 : 128)
-                .background(Color(white: 0.12).opacity(composerOpen ? 0.85 : 0), in: RoundedRectangle(cornerRadius: 26))
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26))
-                .overlay(RoundedRectangle(cornerRadius: 26).stroke(.white.opacity(0.14), lineWidth: 0.5))
-                .clipShape(RoundedRectangle(cornerRadius: 26))
-                .shadow(color: .black.opacity(0.2), radius: 10, y: 3)
+                .frame(maxWidth: composerOpen ? 360 : (showsFocusPrompt ? nil : 212))
                 .padding(.horizontal, 32).padding(.vertical, 18)
                 .animation(reduceMotion ? nil : .timingCurve(0.2, 0.8, 0.2, 1, duration: 0.18), value: composerOpen)
+                .animation(reduceMotion ? nil : .timingCurve(0.2, 0.8, 0.2, 1, duration: 0.22), value: showsFocusPrompt)
             }
         }
         .onChange(of: active) { value in
@@ -683,6 +909,16 @@ struct IslandTodoView: View {
             if let swipedItem, !columns.contains(where: { $0.items.contains(where: { $0.id == swipedItem }) }) { self.swipedItem = nil }
         }
         .onAppear { inputMonitor?.dismiss = dismissInput }
+        .task(id: snapshot.focus?.id) {
+            restPromptID = nil
+            guard let focus = snapshot.focus, focus.isRest, snapshot.focusSettings.notify else { return }
+            let remaining = focus.startedAt + 6 - Date().timeIntervalSince1970
+            guard remaining > 0 else { return }
+            restPromptID = focus.id
+            try? await Task.sleep(nanoseconds: UInt64(min(6, remaining) * 1_000_000_000))
+            guard !Task.isCancelled, restPromptID == focus.id else { return }
+            restPromptID = nil
+        }
         .onDisappear { inputMonitor?.dismiss = nil; onCompose(false) }
         .buttonStyle(.plain).foregroundStyle(Color.white).environment(\.colorScheme, .dark)
         .padding(.top, 8)
@@ -690,6 +926,24 @@ struct IslandTodoView: View {
         .padding(.horizontal, 10).padding(.vertical, 8)
         .frame(height: snapshot.height)
         .accessibilityElement(children: .contain).accessibilityLabel("tobo 看板，今日、近七、事务")
+    }
+    private var focusButton: some View {
+        let focus = snapshot.focus
+        return TodoFocusControl(running: focus != nil, onToggle: onFocus, onStop: onFocusStop) { progress in
+            Text(focus?.symbol ?? "🍅").font(.system(size: 18)).frame(width: 34, height: 34)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(focus == nil ? .white.opacity(0.14) : (focus!.isRest ? Color.green : Color.red).opacity(0.7), lineWidth: focus == nil ? 0.5 : 1))
+                .overlay { TodoFocusHoldRing(progress: progress).padding(1) }
+                .overlay(alignment: .bottomTrailing) {
+                    if focus?.isPaused == true { Image(systemName: "pause.fill").font(.system(size: 7, weight: .bold)).padding(3).background(.black, in: Circle()) }
+                }
+        }
+        .help(focus == nil ? "开始 \(snapshot.focusSettings.minutes) 分钟番茄专注" : (focus!.isReady ? "开始下一轮番茄专注，长按结束" : "单击\(focus!.isPaused ? "继续" : "暂停")\(focus!.title)，长按结束"))
+        .accessibilityLabel(focus == nil ? "开始番茄专注" : (focus!.isReady ? "开始下一轮番茄专注" : "\(focus!.isPaused ? "继续" : "暂停")番茄\(focus!.title)"))
+        .accessibilityIdentifier("island-todo-focus")
+        .contextMenu {
+            TodoFocusMenu(settings: snapshot.focusSettings, onChange: onFocusSettingsChange, onSettings: onFocusSettings, focus: focus, onToggle: onFocus, onStop: onFocusStop)
+        }
     }
     private var quickInput: some View {
         HStack(spacing: 8) {
@@ -702,6 +956,168 @@ struct IslandTodoView: View {
         }.padding(.horizontal, 14).padding(.vertical, 10)
     }
 
+}
+
+// SwiftUI 菜单项转换为 NSMenu 后不会触发 onAppear，跟随原生跟踪通知保持通知岛展开。
+@MainActor final class TodoFocusMenuTracker {
+    static let settingsTitle = "番茄时钟设置…"
+    var onChange: ((Bool) -> Void)?
+    private let center: NotificationCenter
+    private var observers: [NSObjectProtocol] = []
+    private weak var tracked: NSMenu?
+    init(center: NotificationCenter = .default) {
+        self.center = center
+        for (name, began) in [(NSMenu.didBeginTrackingNotification, true), (NSMenu.didEndTrackingNotification, false)] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notice in
+                guard let menu = notice.object as? NSMenu else { return }
+                // 同一主队列保持 begin/end 的顺序，不在菜单跟踪的嵌套循环里依赖 SwiftUI 生命周期。
+                DispatchQueue.main.async { self?.track(menu, began: began) }
+            })
+        }
+    }
+    deinit { for observer in observers { center.removeObserver(observer) } }
+    private func track(_ menu: NSMenu, began: Bool) {
+        if began {
+            guard menu.items.contains(where: { $0.title == Self.settingsTitle }) else { return }
+            tracked = menu; onChange?(true)
+        } else if tracked === menu { tracked = nil; onChange?(false) }
+    }
+}
+
+// 胶囊按钮与顶部倒计时共用同一份配置，右键调整只影响下一轮。
+struct TodoFocusMenu: View {
+    var settings: TodoFocusSettings
+    var onChange: (TodoFocusSettings) -> Void
+    var onSettings: () -> Void
+    var focus: TodoFocusSession?
+    var onToggle: () -> Void = {}
+    var onStop: () -> Void = {}
+    private var durations: [Int] { Array(Set([5, 15, 25, 30, 45, 60, 90, 120, 180, settings.minutes])).sorted() }
+    private var breaks: [Int] { Array(Set([1, 3, 5, 10, 15, 20, 30, 60, settings.breakMinutes])).sorted() }
+    var body: some View {
+        if let focus {
+            Button(focus.isReady ? "开始下一轮番茄专注" : "\(focus.isPaused ? "继续" : "暂停")番茄\(focus.title)", action: onToggle)
+            Button("结束番茄钟", action: onStop)
+            Divider()
+        }
+        Picker("专注时长", selection: Binding(get: { settings.minutes }, set: { minutes in
+            var next = settings; next.minutes = minutes; onChange(next)
+        })) {
+            ForEach(durations, id: \.self) { minutes in Text("\(minutes) 分钟").tag(minutes) }
+        }
+        Picker("休息时长", selection: Binding(get: { settings.breakMinutes }, set: { minutes in
+            var next = settings; next.breakMinutes = minutes; onChange(next)
+        })) {
+            ForEach(breaks, id: \.self) { minutes in Text("\(minutes) 分钟").tag(minutes) }
+        }
+        Toggle("通知岛提示", isOn: Binding(get: { settings.notify }, set: { notify in
+            var next = settings; next.notify = notify; onChange(next)
+        }))
+        Toggle("系统通知", isOn: Binding(get: { settings.systemNotify }, set: { notify in
+            var next = settings; next.systemNotify = notify; onChange(next)
+        }))
+        Toggle("提示音", isOn: Binding(get: { settings.sound }, set: { sound in
+            var next = settings; next.sound = sound; onChange(next)
+        }))
+        Divider()
+        Button(TodoFocusMenuTracker.settingsTitle, action: onSettings)
+    }
+}
+
+// 点击与长按共用一次按下序列，进度填满之后抬起不会再触发暂停或重启。
+struct TodoFocusPress {
+    static let duration = 0.8
+    static let maximumDistance = 8.0
+    private(set) var began = false
+    private(set) var cancelled = false
+    private(set) var completed = false
+    mutating func begin() -> Bool { guard !began else { return false }; began = true; return true }
+    mutating func move(distance: Double) -> Bool {
+        guard began, !cancelled, !completed, distance > Self.maximumDistance else { return false }
+        cancelled = true; return true
+    }
+    mutating func complete() -> Bool {
+        guard began, !cancelled, !completed else { return false }
+        completed = true; return true
+    }
+    mutating func release() -> Bool {
+        let tap = began && !cancelled && !completed
+        self = Self(); return tap
+    }
+}
+
+private struct TodoFocusHoldRing: View {
+    var progress: Double
+    var body: some View {
+        Circle().trim(from: 0, to: progress).stroke(.orange, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+            .rotationEffect(.degrees(-90)).opacity(progress > 0 ? 1 : 0).allowsHitTesting(false).accessibilityHidden(true)
+    }
+}
+
+private struct TodoFocusControl<Content: View>: View {
+    var running: Bool
+    var onToggle: () -> Void
+    var onStop: () -> Void
+    @ViewBuilder var content: (Double) -> Content
+    @State private var press = TodoFocusPress()
+    @State private var progress = 0.0
+    @State private var holdTask: Task<Void, Never>?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body: some View {
+        content(progress).contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                if press.begin(), running {
+                    // 进度是长按时限的必要反馈；减少动态效果时取消回落动画，不额外缩放或呼吸。
+                    withAnimation(.linear(duration: TodoFocusPress.duration)) { progress = 1 }
+                    holdTask = Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: UInt64(TodoFocusPress.duration * 1_000_000_000))
+                        guard !Task.isCancelled, press.complete() else { return }
+                        onStop()
+                    }
+                }
+                if press.move(distance: hypot(value.translation.width, value.translation.height)) { cancelProgress() }
+            }.onEnded { _ in
+                let tap = press.release()
+                cancelProgress()
+                if tap { onToggle() }
+            })
+            .onDisappear { press = TodoFocusPress(); holdTask?.cancel(); holdTask = nil; progress = 0 }
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { onToggle() }
+            .accessibilityAction(named: Text("结束番茄钟")) { if running { onStop() } }
+    }
+    private func cancelProgress() {
+        holdTask?.cancel(); holdTask = nil
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.12)) { progress = 0 }
+    }
+}
+
+// 倒计时只更新这一小块；通知岛其它会话和看板不随每秒重绘。
+struct TodoFocusCountdown: View {
+    var session: TodoFocusSession
+    var active = true
+    var onToggle: () -> Void = {}
+    var onStop: () -> Void = {}
+    var body: some View {
+        TodoFocusControl(running: true, onToggle: onToggle, onStop: onStop) { progress in
+            if active && !session.isPaused && !session.isReady {
+                TimelineView(.periodic(from: .now, by: 1)) { context in content(at: context.date, progress: progress) }
+            } else { content(at: .now, progress: progress) }
+        }
+        .help(session.isReady ? "休息结束；单击开始下一轮，长按结束，右键设置" : "\(session.title)\(session.isPaused ? "已暂停" : "中")；单击\(session.isPaused ? "继续" : "暂停")，长按结束，右键设置")
+    }
+    private func content(at date: Date, progress: Double) -> some View {
+        HStack(spacing: 4) {
+            Text(session.symbol).font(.system(size: 16)).frame(width: 21, height: 25)
+                .overlay { TodoFocusHoldRing(progress: progress) }
+                .overlay(alignment: .bottomTrailing) {
+                    if session.isPaused { Image(systemName: "pause.fill").font(.system(size: 6, weight: .bold)).padding(2).background(.black, in: Circle()) }
+                }
+            Text(session.isReady ? "开始" : session.label(at: date)).font(.system(size: 12, weight: .semibold)).monospacedDigit()
+        }
+        .foregroundStyle(session.isRest ? .green : .white).fixedSize()
+        .accessibilityElement(children: .ignore).accessibilityLabel(session.isReady ? "开始下一轮番茄专注" : "番茄\(session.title)\(session.isPaused ? "已暂停" : "")，剩余 \(session.label(at: date))")
+    }
 }
 
 private struct TodoRemindersMark: View {
