@@ -41,7 +41,7 @@ test('全局配置：白名单、读取、创建、版本冲突、备份、符�
   // 来源清单：只收录「通知岛」已接入的 harness（OpenCode / Codex / Claude Code / omp / dsh / agy），每个都有真实品牌图标；
   // installed 要求「配置目录 + 至少一份配置文件」同时存在。
   const providers=(await req('configs/providers')).data.providers,provById=Object.fromEntries(providers.map(p=>[p.id,p]));
-  assert.deepEqual(providers.map(p=>p.id).sort(),['agy','claude','codex','dsh','omp','opencode']);
+  assert.deepEqual(providers.map(p=>p.id).sort(),['agy','claude','codex','dsh','grok','omp','opencode']);
   assert.equal(provById.opencode.agents,'opencode');assert.equal(provById.codex.agents,'codex');assert.equal(provById.claude.agents,null);
   assert.equal(provById.opencode.installed,true);assert.equal(provById.opencode.dir,ocDir);
   assert.equal(provById.claude.installed,false,'只有目录、没有配置文件的来源不该亮绿灯');

@@ -3,12 +3,15 @@
 // 的全局目录（CLI 安装技能时就是这么做的），并据此判断一个技能被哪些 Agent 看到。
 // 每项：[id, 显示名, 全局技能目录模板, [安装检测路径模板…], 是否通用 Agent]。
 // 通用 Agent（universal）直接读 ~/.agents/skills，不需要额外建链接；其余 Agent 需要在自己目录里建。
+// Antigravity 与 Antigravity CLI 在项目里读 .agents/skills，全局只读 ~/.gemini/config/skills
+// （两边共用；IDE 的 ~/.gemini/antigravity/skills 也是指到这里），家目录下的 ~/.agents/skills 它们看不到，
+// 所以不能标成通用 Agent，否则界面会显示「自动可用」但 agy 里没有这个技能。
 // 上游新增 Agent 时补这里即可（数据快照，不做自动同步）。
 export const AGENT_TABLE = [
  ["aider-desk","AiderDesk","{home}/.aider-desk/skills",["{home}/.aider-desk"]],
  ["amp","Amp","{config}/agents/skills",["{config}/amp"],1],
- ["antigravity","Antigravity","{home}/.gemini/antigravity/skills",["{home}/.gemini/antigravity"],1],
- ["antigravity-cli","Antigravity CLI","{home}/.gemini/antigravity-cli/skills",["{home}/.gemini/antigravity-cli"],1],
+ ["antigravity","Antigravity","{home}/.gemini/config/skills",["{home}/.gemini/antigravity"]],
+ ["antigravity-cli","Antigravity CLI","{home}/.gemini/config/skills",["{home}/.gemini/antigravity-cli"]],
  ["astrbot","AstrBot","{home}/.astrbot/data/skills",["{cwd}/data/skills","{home}/.astrbot"]],
  ["autohand-code","Autohand Code CLI","{autohand}/skills",["{autohand}"]],
  ["augment","Augment","{home}/.augment/skills",["{home}/.augment"]],
@@ -36,6 +39,7 @@ export const AGENT_TABLE = [
  ["gemini-cli","Gemini CLI","{home}/.gemini/skills",["{home}/.gemini"],1],
  ["github-copilot","GitHub Copilot","{home}/.copilot/skills",["{home}/.copilot"],1],
  ["goose","Goose","{config}/goose/skills",["{config}/goose"]],
+ ["grok","Grok Build","{grok}/skills",["{grok}"]],
  ["hermes-agent","Hermes Agent","{hermes}/skills",["{hermes}"]],
  ["inference-sh","inference.sh","{home}/.inferencesh/skills",["{home}/.inferencesh"]],
  ["jazz","Jazz","{home}/.jazz/skills",["{home}/.jazz","{cwd}/.jazz"]],
@@ -90,6 +94,7 @@ function variables({home,env={}}){
   config:value(env.XDG_CONFIG_HOME)||home+'/.config',
   codex:value(env.CODEX_HOME)||home+'/.codex',
   claude:value(env.CLAUDE_CONFIG_DIR)||home+'/.claude',
+  grok:value(env.GROK_HOME)||home+'/.grok',
   vibe:value(env.VIBE_HOME)||home+'/.vibe',
   hermes:value(env.HERMES_HOME)||home+'/.hermes',
   autohand:value(env.AUTOHAND_HOME)||home+'/.autohand',

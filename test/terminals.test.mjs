@@ -1,5 +1,5 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';
-import {matchTab,viewedIds,activeOttyTabs,locateSessions,locateAppSessions,codexThreadUrl,parseGhosttyTabs,parseTerminalTabs,parseTerminalActive,folderName,samePath,sameTabTitle,escapeAppleScript,ghosttyFocusScript,terminalFocusScript} from '../src/terminals.mjs';
+import {matchTab,viewedIds,activeOttyTabs,locateSessions,locateAppSessions,matchAppViewed,codexThreadUrl,t3ThreadUrl,parseGhosttyTabs,parseTerminalTabs,parseTerminalActive,folderName,samePath,sameTabTitle,escapeAppleScript,ghosttyFocusScript,terminalFocusScript} from '../src/terminals.mjs';
 const SEP='\u001f';
 // 目录比较：结尾斜杠与 /private 前缀（/tmp、/var 在 macOS 上指向私有目录）都算同一处。
 test('目录比较：忽略结尾斜杠与 /private 前缀',()=>{
@@ -164,6 +164,8 @@ test('Codex app 会话归属与线程深链',()=>{
  assert.equal(codexThreadUrl('a b'),'codex://threads/a%20b');
  assert.equal(codexThreadUrl(''),'');
  assert.equal(codexThreadUrl(undefined),'');
+ assert.equal(t3ThreadUrl('env-1','thread-1'),'t3code://threads/env-1/thread-1');
+ assert.equal(t3ThreadUrl('','thread-1'),'');
 });
 // CLI 在终端里 resume 了一个 app 里起的线程：rollout 头部仍旧写着 Codex Desktop，但标签标题带着线程名——
 // 归属该是终端（点一下回终端），不能因为 app 标记就归给 Codex app，更不该把已经退出的 app 拉起来。
@@ -185,4 +187,20 @@ test('聚焦脚本拼接',()=>{
  const t=terminalFocusScript({window:33708,index:2});
  assert.ok(t.includes('first window whose id is 33708'));
  assert.ok(t.includes('selected tab of w to tab 2 of w'));
+});
+test('GUI 桌面应用前台激活：单会话自动判定看过，多会话避免误消',()=>{
+ const t3_1 = { id: 't3:1', source: 't3', title: 'T3 唯一会话' };
+ const t3_2 = { id: 't3:2', source: 't3', title: 'T3 另一个会话' };
+ const codex_app = { id: 'codex:app1', source: 'codex', app: true, title: 'Codex 桌面会话' };
+ const codex_cli = { id: 'codex:cli1', source: 'codex', app: false, title: 'Codex CLI 会话' };
+
+ // T3 Code 激活：只有 1 个会话时判定看过
+ assert.deepEqual(matchAppViewed([t3_1], 'com.t3tools.t3code'), ['t3:1']);
+ // T3 Code 激活：有多个会话时不盲目判定已看
+ assert.deepEqual(matchAppViewed([t3_1, t3_2], 'com.t3tools.t3code'), []);
+ // Codex App 激活：只有 1 个 app 会话时判定看过，CLI 会话不在此列
+ assert.deepEqual(matchAppViewed([codex_app, codex_cli], 'com.openai.codex'), ['codex:app1']);
+ // 其他应用激活时不匹配
+ assert.deepEqual(matchAppViewed([t3_1], 'com.apple.Safari'), []);
+ assert.deepEqual(matchAppViewed([], 'com.t3tools.t3code'), []);
 });

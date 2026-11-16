@@ -1,4 +1,5 @@
 import {test} from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs/promises';import os from 'node:os';import path from 'node:path';import {spawn} from 'node:child_process';
+import {findViewedTarget} from '../src/browser.mjs';
 test('主窗入口及其模块依赖都能通过 HTTP 加载，避免整页点击事件未绑定',async()=>{
  const home=await fs.mkdtemp(path.join(os.tmpdir(),'bobo-page-modules-'));
  const base='http://127.0.0.1:14330';
@@ -50,6 +51,13 @@ test('隔离环境：列表、文件增删改、冲突保护、路径保护、�
   assert.equal((await req('app/login-item')).data.supported,false);
   assert.equal((await req('app/login-item',{enabled:true})).status,400,'隔离服务不能修改真实登录项');
   assert.equal((await req('app/login-item',{enabled:'true'})).status,400);
+  assert.equal((await fetch(base+'/api/color-filter')).status,403);
+  assert.equal((await req('color-filter',{enabled:true},{Origin:'https://evil.example'})).status,403);
+  assert.equal((await req('color-filter')).data.supported,false);
+  assert.equal((await req('color-filter',{enabled:true})).status,400,'隔离服务不能修改真实色彩滤镜');
+  assert.equal((await req('color-filter',{enabled:'true'})).status,400);
+  assert.equal((await req('color-filter',{type:3})).status,400);
+  assert.equal((await req('color-filter',{intensity:2})).status,400);
   assert.equal((await req('awake/settings',{allowDisplaySleep:true})).data.allowDisplaySleep,true);
   assert.equal((await req('awake/settings',{defaultDuration:'0s'})).status,400);
   assert.equal((await req('awake/settings')).data.defaultDuration,'1h');
@@ -67,7 +75,7 @@ test('隔离环境：列表、文件增删改、冲突保护、路径保护、�
   assert.equal(shown.mode,'percent');assert.equal(shown.currency,'USD');assert.equal(shown.denominator,'50.00');
   for(const payload of [{mode:'circle'},{currency:'EUR'},{denominator:'0'},{denominator:'1e2'}])assert.equal((await req('usage/balance',payload)).status,400);
   const island=(await req('opencode')).data;
-  assert.ok(island.agy);
+  assert.ok(island.agy);assert.ok(island.t3);assert.ok(island.grok);
   assert.equal(island.butler.enabled,false);
   assert.deepEqual((await req('butler')).data.projects,[]);
   assert.equal((await req('butler/refresh',{})).status,400);
@@ -75,6 +83,10 @@ test('隔离环境：列表、文件增删改、冲突保护、路径保护、�
   assert.equal((await req('butler/settings',{enabled:true})).data.enabled,true);
   assert.equal((await req('opencode')).data.butler.enabled,true);
   assert.equal((await req('butler/settings',{enabled:false})).data.enabled,false);
+  const viewedResp=await req('opencode/viewed',{id:'missing'});
+  assert.equal(viewedResp.status,200);assert.deepEqual(viewedResp.data,{ok:true,acknowledged:[]});
+  const harnessResp=await req('harness/viewed',{threadId:'missing'});
+  assert.equal(harnessResp.status,200);assert.deepEqual(harnessResp.data,{ok:true,acknowledged:[]});
   const aiUsage=(await req('ai/usage')).data;
   assert.equal(aiUsage.total.requests,0);
   assert.ok(aiUsage.features.some(f=>f.id==='butler'));
@@ -258,4 +270,18 @@ test('列表快照：TTL 内不重扫，refresh 与读取路径按预期工作',
   // 快照里没有的 id 仍然会刷新一次，找不到才 404。
   assert.equal((await req('tree?id=missing')).status,404);
  }finally{child.kill();await new Promise(r=>child.once('exit',r));await fs.rm(home,{recursive:true,force:true});}
+});
+test('findViewedTarget：多 Harness 目标会话精准匹配',()=>{
+ const sessions=[
+  {id:'t3:thread-42',sessionId:'thread-42',title:'T3 需求推进'},
+  {id:'codex:c-888',sessionId:'c-888',title:'ChatGPT 翻译任务'},
+  {id:'claude:cl-999',sessionId:'cl-999',title:'Claude 架构设计'},
+ ];
+ assert.equal(findViewedTarget(sessions,{id:'t3:thread-42'}),'t3:thread-42');
+ assert.equal(findViewedTarget(sessions,{threadId:'thread-42'}),'t3:thread-42');
+ assert.equal(findViewedTarget(sessions,{url:'https://chatgpt.com/c/c-888'}),'codex:c-888');
+ assert.equal(findViewedTarget(sessions,{url:'https://claude.ai/chat/cl-999'}),'claude:cl-999');
+ assert.equal(findViewedTarget(sessions,{title:'T3 需求推进'}),'t3:thread-42');
+ assert.equal(findViewedTarget(sessions,{threadId:'missing'}),'');
+ assert.equal(findViewedTarget(sessions,null),'');
 });

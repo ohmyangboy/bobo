@@ -89,6 +89,30 @@ test('技能库：收紧的已安装判定与逐 Agent 安装 / 移除',async()=
  }finally{await clean(home);}
 });
 
+test('Antigravity 全局不读 ~/.agents/skills，链接到 ~/.gemini/config/skills',async()=>{
+ const {home,skills}=await fixture();
+ try{
+  await write(path.join(home,'.gemini/antigravity'),'keep','');
+  await write(path.join(home,'.gemini/antigravity-cli'),'keep','');
+  const byId=new Map((await skills.agents()).agents.map(a=>[a.id,a]));
+  const cli=byId.get('antigravity-cli'),ide=byId.get('antigravity');
+  assert.equal(cli.universal,false);assert.equal(ide.universal,false);
+  assert.equal(cli.installed,true);assert.equal(ide.installed,true);
+  assert.equal(cli.dir,path.join(home,'.gemini/config/skills'));
+  assert.equal(ide.dir,cli.dir,'IDE 与 CLI 共用同一个全局技能目录');
+  const linked=await skills.setAgentLink('alpha','antigravity-cli',true);
+  assert.equal(linked.state,'linked');assert.equal(linked.linked,true);
+  assert.equal(await fs.readlink(path.join(home,'.gemini/config/skills/alpha')),path.join('..','..','..','.agents','skills','alpha'));
+  const row=(await skills.scan()).find(r=>r.name==='alpha');
+  assert.equal(row.agentLinks.find(x=>x.id==='antigravity-cli').state,'linked');
+  assert.equal(row.agentLinks.find(x=>x.id==='antigravity').state,'linked','同一条链接两边都算已安装');
+  assert.equal(row.agentLinks.find(x=>x.id==='gemini-cli').state,'universal','Gemini CLI 仍直接读 canonical');
+  assert.equal(await fs.lstat(path.join(home,'.gemini/skills/alpha')).catch(()=>null),null);
+  assert.equal((await skills.setAgentLink('alpha','antigravity',false)).removed,true);
+  assert.equal(await fs.lstat(path.join(home,'.gemini/config/skills/alpha')).catch(()=>null),null);
+ }finally{await clean(home);}
+});
+
 test('技能库：安装、更新、删除与新建',async()=>{
  const {home,env,skills}=await fixture();
  // 来源仓库：skills/ 下的技能 + 根目录技能 + 缺 description 的目录 + 同名重复。

@@ -9,6 +9,7 @@ export function createSkillReader({home,ai,resolveSkill}){return createReader({h
 export function createAgentReader({home,ai,resolveAgent}){return createReader({home,ai,resolve:resolveAgent,kind:'agent'});}
 // Codex 的自定义智能体同样是单个文件（TOML），复用同一套快照/缓存/翻译，只用 prefix 把缓存目录分开。
 export function createCodexAgentReader({home,ai,resolveAgent}){return createReader({home,ai,resolve:resolveAgent,kind:'agent',prefix:'codex-agent:'});}
+export function createGrokAgentReader({home,ai,resolveAgent}){return createReader({home,ai,resolve:resolveAgent,kind:'agent',prefix:'grok-agent:'});}
 // 全局配置（~/.config/opencode/AGENTS.md、~/.codex/config.toml 等）也是单个文件，行为与智能体一致，
 // 只是提示词里称「配置」，并用自己的缓存前缀，避免与同名智能体互相覆盖。
 export function createConfigReader({home,ai,resolveConfig}){return createReader({home,ai,resolve:resolveConfig,kind:'agent',prefix:'config:',noun:'配置',subject:'config'});}

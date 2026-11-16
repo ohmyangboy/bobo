@@ -5,8 +5,9 @@ import { pruneBackups } from './backups.mjs';
 
 // Agent 的全局配置白名单。dir 是配置根目录（函数，便于读环境变量），files 是只读写的固定文件，
 // file 是相对根目录的路径（可含子目录）；agents 表示这个 Agent 的「子智能体定义」由哪种后端管理
-// （opencode / codex / null，没有就是纯配置文件）。新增 Agent 只需在这里加一项。
-// 只收录「通知岛」已接入的 harness（OpenCode / Codex / Claude Code / omp / dsh / agy），保持两边一致；
+// （opencode / codex / grok / null，没有就是纯配置文件）。新增 Agent 只需在这里加一项。
+// 只收录「通知岛」已接入的 harness（OpenCode / Codex / Claude Code / omp / dsh / agy / Grok Build），保持两边一致；
+// Grok Build 的会话、配置与用户智能体都已接入。
 // 其它 Agent 等接入通知岛后再取消注释，不要提前开放。
 // skillAgent 是这个 Agent 在技能目录表（skill-agents.mjs）里的 id，用来在「Agents」视图里按 Agent 筛出它能看到的技能；
 // 没有对应项（omp、dsh 不读 ~/.agents/skills）就不写。
@@ -35,6 +36,9 @@ export const GLOBAL_CONFIGS={
  ]},
  dsh:{label:'DeepSeek',icon:'provider-dsh',dir:({home,env})=>env.DSH_HOME||path.join(home,'.dsh'),files:[
   {file:'settings.yaml',label:'主配置',format:'yaml',description:'模型、预设、界面与语言等全局设置（YAML）'},
+ ]},
+ grok:{label:'Grok Build',icon:'/provider-grok.png',agents:'grok',skillAgent:'grok',dir:({home,env})=>env.GROK_HOME||path.join(home,'.grok'),files:[
+  {file:'config.toml',label:'主配置',format:'toml',description:'模型、子智能体、权限与 MCP 等全局配置（TOML）'},
  ]},
  agy:{label:'Antigravity',icon:'provider-agy',skillAgent:'antigravity-cli',dir:({home,env})=>env.ANTIGRAVITY_CONFIG_DIR||path.join(home,'.gemini'),files:[
   {file:'GEMINI.md',label:'全局指令',format:'markdown',description:'每次会话都会加载的全局个性化提示词（Markdown）'},

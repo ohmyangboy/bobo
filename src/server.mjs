@@ -1,5 +1,5 @@
 import http from 'node:http';
-import {createSkillReader,createAgentReader,createCodexAgentReader,createConfigReader} from './reader-ai.mjs';
+import {createSkillReader,createAgentReader,createCodexAgentReader,createGrokAgentReader,createConfigReader} from './reader-ai.mjs';
 import { createAI } from './ai.mjs';
 import { createButler } from './butler.mjs';
 import { createButlerSources } from './butler-sources.mjs';
@@ -8,6 +8,7 @@ import { createSources } from './sources.mjs';
 import { createSkills, parseSkill } from './skills.mjs';
 import { createAgents } from './agents.mjs';
 import { createCodexAgents } from './codex-agents.mjs';
+import { createGrokAgents } from './grok-agents.mjs';
 import { createConfigs } from './configs.mjs';
 import { createOpenCode } from './opencode.mjs';
 import { createCodex } from './codex.mjs';
@@ -15,15 +16,18 @@ import { createOmp } from './omp.mjs';
 import { createClaude } from './claude.mjs';
 import { createDsh } from './dsh.mjs';
 import { createAgy } from './agy.mjs';
+import { createT3 } from './t3.mjs';
+import { createGrok } from './grok.mjs';
 import { createUsage,keyProviders } from './usage.mjs';
 import { createDevices } from './devices.mjs';
 import { createNetwork } from './network.mjs';
 import { createLinks } from './links.mjs';
 import { createTerminals } from './terminals.mjs';
-import { createBrowser } from './browser.mjs';
+import { createBrowser, matchUrlSession, findViewedTarget } from './browser.mjs';
 import { createUpdate } from './update.mjs';
 import { createAwake } from './awake.mjs';
 import { createLoginItem } from './login-item.mjs';
+import { createColorFilter } from './color-filter.mjs';
 import { pruneBackups } from './backups.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -35,6 +39,7 @@ const here=path.dirname(fileURLToPath(import.meta.url)),root=path.join(here,'..'
 const home=process.env.BOBO_HOME||os.homedir();
 const awake=createAwake({home,executable:path.join(root,'bin/awake')});
 const loginItem=createLoginItem();
+const colorFilter=createColorFilter();
 const ai=createAI(home);
 const reader=createSkillReader({home,ai,resolveSkill:skill});
 const port=Number(process.env.PORT||4318), token=randomBytes(24).toString('hex');
@@ -48,14 +53,16 @@ const agentReader=createAgentReader({home,ai,resolveAgent:id=>agents.file(id)});
 // Codex CLI 的自定义智能体同样是单个定义文件，只是格式为 TOML；读写与 AI 缓存都和 OpenCode 智能体分开。
 const codexAgents=createCodexAgents({home,fail});
 const codexReader=createCodexAgentReader({home,ai,resolveAgent:id=>codexAgents.file(id)});
+const grokAgents=createGrokAgents({home,env,fail});
+const grokReader=createGrokAgentReader({home,ai,resolveAgent:id=>grokAgents.file(id)});
 // 全局配置（OpenCode 的 AGENTS.md / opencode.json(c) / cli.json，Codex 的 AGENTS.md / config.toml）：
 // 与智能体同样的单文件读写与 AI 缓存，只是条目由白名单决定，不走目录扫描。
 const configs=createConfigs({home,env,fail});
 const configReader=createConfigReader({home,ai,resolveConfig:id=>configs.entity(id)});
-// 点击会话时跳到对应终端（Otty / Ghostty / Terminal.app，见 terminals.mjs）；也用来判断会话结束后用户看过终端没有。
-const terminals=createTerminals();
 // 把用户带到已经打开的网页（dsh 的 web 界面）：先切到浏览器里已有的那个标签，找不到才新开。
 const browser=createBrowser();
+// 点击会话时跳到对应终端（Otty / Ghostty / Terminal.app，见 terminals.mjs）；也用来判断会话结束后用户看过终端或浏览器没有。
+const terminals=createTerminals({browser});
 // 应用内更新（见 update.mjs）：启动后静默检查、自动下载暂存，设置页一键重启安装。
 // 版本号读 package.json，安装位置从启动路径推导；源码运行时 canUpdate 为 false。
 const update=createUpdate({home});
@@ -80,11 +87,17 @@ dsh.start();
 // Google Antigravity（agy）读 ~/.gemini/antigravity-cli/conversation_summaries.db；提醒同样走通知岛通道。
 const agy=createAgy({home,remind:(kind,title,message)=>opencode.remind(kind,title,message)});
 agy.start();
+// T3 Code 没有事件流给外部读，改为轮询 ~/.t3/userdata/statev2.sqlite 的线程投影；提醒同样走通知岛通道。
+const t3=createT3({home,env:process.env,remind:(kind,title,message)=>opencode.remind(kind,title,message)});
+t3.start();
+// Grok Build 没有对外事件流，轮询 ~/.grok/sessions 的 summary 与 events.jsonl；提醒同样走通知岛通道。
+const grok=createGrok({home,env:process.env,remind:(kind,title,message)=>opencode.remind(kind,title,message)});
+grok.start();
 const butlerSources=createButlerSources({home,env:process.env.BOBO_HOME?{}:process.env});
 const butler=createButler({home,ai,sources:butlerSources});
 const butlerDelivery=createButlerDelivery({enabled:!process.env.BOBO_HOME,sessionState:target=>sessionsMerged().find(s=>s.id===(target.source==='opencode'?target.sessionId:target.source+':'+target.sessionId))?.state});
-// 六个 Agent 的会话合成一份列表：各自模块给出 order（按最近一次状态变更），这里统一倒序后截断。
-function sessionsMerged(parts={opencode:opencode.snapshot(),codex:codex.snapshot(),omp:omp.snapshot(),claude:claude.snapshot(),dsh:dsh.snapshot(),agy:agy.snapshot()}){return [...parts.opencode.sessions,...parts.codex.sessions,...parts.omp.sessions,...parts.claude.sessions,...parts.dsh.sessions,...parts.agy.sessions].sort((a,b)=>(b.order??0)-(a.order??0)).slice(0,40);}
+// 八个 Agent 的会话合成一份列表：各自模块给出 order（按最近一次状态变更），这里统一倒序后截断。
+function sessionsMerged(parts={opencode:opencode.snapshot(),codex:codex.snapshot(),omp:omp.snapshot(),claude:claude.snapshot(),dsh:dsh.snapshot(),agy:agy.snapshot(),t3:t3.snapshot(),grok:grok.snapshot()}){return [...parts.opencode.sessions,...parts.codex.sessions,...parts.omp.sessions,...parts.claude.sessions,...parts.dsh.sessions,...parts.agy.sessions,...parts.t3.sessions,...parts.grok.sessions].sort((a,b)=>(b.order??0)-(a.order??0)).slice(0,40);}
 // dsh 通常是 web profile：界面是本地页面 127.0.0.1:3080（dsh 默认端口）。点 dsh 会话时能连上就直接把页面打开
 // ——前端没有会话级深链，只能打开首页让用户在页面里自己选；连不上（例如跑的是 tui profile）再照常找终端标签页。
 const dshWebUrl='http://127.0.0.1:'+(Number(process.env.DSH_WEB_PORT)||3080)+'/';
@@ -97,14 +110,16 @@ async function dshWebAlive(){
 let terminalWatchUntil=0, linksWatchUntil=0, sessionTerminals={}, terminalScanBusy=false, ackViewedBusy=false;
 async function scanTerminals(){if(terminalScanBusy)return;terminalScanBusy=true;try{const rows=sessionsMerged();sessionTerminals=rows.length?await terminals.locate(rows):{};}finally{terminalScanBusy=false;}}
 setInterval(()=>{if(Date.now()<terminalWatchUntil)scanTerminals().catch(()=>{});},3000);
-// 状态流与 /api/opencode 共用的快照：各来源只取一次，避免同一轮重复计算六个 snapshot。
+// 状态流与 /api/opencode 共用的快照：各来源只取一次，避免同一轮重复计算七个 snapshot。
 function islandSnapshot(){
- const parts={opencode:opencode.snapshot(),codex:codex.snapshot(),omp:omp.snapshot(),claude:claude.snapshot(),dsh:dsh.snapshot(),agy:agy.snapshot()};
- return {...parts.opencode,sessions:sessionsMerged(parts).map(s=>({...s,terminal:sessionTerminals[s.id],link:links.linkFor(s.source)})),codex:parts.codex,omp:parts.omp,claude:parts.claude,dsh:parts.dsh,agy:parts.agy,butler:butler.snapshot()};
+ const parts={opencode:opencode.snapshot(),codex:codex.snapshot(),omp:omp.snapshot(),claude:claude.snapshot(),dsh:dsh.snapshot(),agy:agy.snapshot(),t3:t3.snapshot(),grok:grok.snapshot()};
+ return {...parts.opencode,sessions:sessionsMerged(parts).map(s=>({...s,terminal:sessionTerminals[s.id],link:links.linkFor(s.linkSource||s.source)})),codex:parts.codex,omp:parts.omp,claude:parts.claude,dsh:parts.dsh,agy:parts.agy,t3:parts.t3,grok:parts.grok,butler:butler.snapshot()};
 }
 // 结束 / 终止的头像要留到用户看过终端才收起：对应终端在前台且正停在那个标签页时算已查看；
 // 手动切标签页与点会话行跳过去（/api/opencode/focus）命中同一套匹配。
-async function ackViewed(){if(ackViewedBusy)return;ackViewedBusy=true;try{const rows=[...opencode.unviewed(),...codex.unviewed(),...omp.unviewed(),...claude.unviewed(),...dsh.unviewed(),...agy.unviewed()];if(!rows.length)return;for(const id of await terminals.viewed(rows)){if(!opencode.acknowledge(id)&&!codex.acknowledge(id)&&!omp.acknowledge(id)&&!claude.acknowledge(id)&&!dsh.acknowledge(id))agy.acknowledge(id);}}finally{ackViewedBusy=false;}}
+function sessionSource(id){return id.startsWith('codex:')?'codex':id.startsWith('omp:')?'omp':id.startsWith('claude:')?'claude':id.startsWith('dsh:')?'dsh':id.startsWith('agy:')?'agy':id.startsWith('t3:')?'t3':id.startsWith('grok:')?'grok':'opencode';}
+function acknowledgeSession(id){const source=sessionSource(id);if(source==='codex')return codex.acknowledge(id);if(source==='omp')return omp.acknowledge(id);if(source==='claude')return claude.acknowledge(id);if(source==='dsh')return dsh.acknowledge(id);if(source==='agy')return agy.acknowledge(id);if(source==='t3')return t3.acknowledge(id);if(source==='grok')return grok.acknowledge(id);return opencode.acknowledge(id);}
+async function ackViewed(){if(ackViewedBusy)return;ackViewedBusy=true;try{const rows=[...opencode.unviewed(),...codex.unviewed(),...omp.unviewed(),...claude.unviewed(),...dsh.unviewed(),...agy.unviewed(),...t3.unviewed(),...grok.unviewed()];if(!rows.length)return;for(const id of await terminals.viewed(rows))acknowledgeSession(id);}finally{ackViewedBusy=false;}}
 setInterval(()=>{ackViewed().catch(()=>{});},3000);
 // 用量：Codex（chatgpt.com）与 OpenCode Go（官方接口 / 本机估算）的额度，随事件流一起推给刘海面板。
 // 额度重置提醒走通知岛的统一通道（remind 受通知岛的系统通知 / 提示音开关控制）。
@@ -241,6 +256,7 @@ const server=http.createServer(async(req,res)=>{
    if(req.method==='GET'&&url.pathname==='/api/startup')return json(await startup());
    if(req.method==='GET'&&url.pathname==='/api/awake/settings')return json(await awake.settings());
    if(req.method==='GET'&&url.pathname==='/api/app/login-item')return json(await loginItem.snapshot());
+   if(req.method==='GET'&&url.pathname==='/api/color-filter')return json(await colorFilter.snapshot());
    if(req.method==='GET'&&url.pathname==='/api/skills')return json(await list(url.searchParams.has('refresh')));
     // 技能 → Agent：本机已安装且支持的 Agent 清单（含逐技能安装状态用的 agentLinks）。
     if(req.method==='GET'&&url.pathname==='/api/skill/agents')return json(await skills.agents());
@@ -249,6 +265,7 @@ const server=http.createServer(async(req,res)=>{
    if(req.method==='GET'&&url.pathname==='/api/ai/document')return json(await reader.document(url.searchParams.get('id'),relPath(url.searchParams.get('path'))));
    if(req.method==='GET'&&url.pathname==='/api/ai/agent/document')return json(await agentReader.document(url.searchParams.get('id')));
    if(req.method==='GET'&&url.pathname==='/api/ai/codex/document')return json(await codexReader.document(url.searchParams.get('id')));
+   if(req.method==='GET'&&url.pathname==='/api/ai/grok/document')return json(await grokReader.document(url.searchParams.get('id')));
    if(req.method==='GET'&&url.pathname==='/api/ai/settings')return json(await ai.status());
    if(req.method==='GET'&&url.pathname==='/api/ai/usage')return json(await ai.usage());
    if(req.method==='GET'&&url.pathname==='/api/butler')return json(butler.detail());
@@ -256,6 +273,8 @@ const server=http.createServer(async(req,res)=>{
    if(req.method==='GET'&&url.pathname==='/api/agents/file')return json(await agents.file(url.searchParams.get('id')));
    if(req.method==='GET'&&url.pathname==='/api/codex/agents')return json(await codexAgents.list());
    if(req.method==='GET'&&url.pathname==='/api/codex/agents/file')return json(await codexAgents.file(url.searchParams.get('id')));
+   if(req.method==='GET'&&url.pathname==='/api/grok/agents')return json(await grokAgents.list());
+   if(req.method==='GET'&&url.pathname==='/api/grok/agents/file')return json(await grokAgents.file(url.searchParams.get('id')));
    if(req.method==='GET'&&url.pathname==='/api/configs/providers')return json(await configs.providers());
    if(req.method==='GET'&&url.pathname==='/api/configs')return json(await configs.list(url.searchParams.get('provider')));
    if(req.method==='GET'&&url.pathname==='/api/configs/file')return json(await configs.read(url.searchParams.get('provider'),url.searchParams.get('key')));
@@ -292,8 +311,8 @@ const server=http.createServer(async(req,res)=>{
      });
     };
     send();
-    const stop=opencode.subscribe(send),stopUsage=usage.subscribe(send),stopCodex=codex.subscribe(send),stopOmp=omp.subscribe(send),stopClaude=claude.subscribe(send),stopDsh=dsh.subscribe(send),stopAgy=agy.subscribe(send),stopDevices=devices.subscribe(send),stopNetwork=network.subscribe(send),stopLinks=links.subscribe(send),stopButler=butler.subscribe(send);
-    const close=()=>{stop();stopUsage();stopCodex();stopOmp();stopClaude();stopDsh();stopAgy();stopDevices();stopNetwork();stopLinks();stopButler();};
+    const stop=opencode.subscribe(send),stopUsage=usage.subscribe(send),stopCodex=codex.subscribe(send),stopOmp=omp.subscribe(send),stopClaude=claude.subscribe(send),stopDsh=dsh.subscribe(send),stopAgy=agy.subscribe(send),stopT3=t3.subscribe(send),stopGrok=grok.subscribe(send),stopDevices=devices.subscribe(send),stopNetwork=network.subscribe(send),stopLinks=links.subscribe(send),stopButler=butler.subscribe(send);
+    const close=()=>{stop();stopUsage();stopCodex();stopOmp();stopClaude();stopDsh();stopAgy();stopT3();stopGrok();stopDevices();stopNetwork();stopLinks();stopButler();};
     req.on('close',close);res.on('close',close);
     return;
    }
@@ -307,6 +326,7 @@ const server=http.createServer(async(req,res)=>{
    const b=await body(req,url.pathname==='/api/butler/reply'?23*1024*1024:1100000);
    if(url.pathname==='/api/awake/settings')return json(await awake.save(b));
    if(url.pathname==='/api/app/login-item')return json(await loginItem.save(b));
+   if(url.pathname==='/api/color-filter')return json(await colorFilter.save(b));
    if(url.pathname==='/api/ai/settings')return json(await ai.save(b));
    if(url.pathname==='/api/butler/settings')return json(await butler.saveSettings(b));
    if(url.pathname==='/api/butler/refresh')return json(await butler.refresh());
@@ -369,18 +389,29 @@ const server=http.createServer(async(req,res)=>{
    // 点会话跳到对应终端（Otty / Ghostty / Terminal.app）或 Codex 桌面版：真的切到了那个标签页 / 线程才算「已查看」，
    // 结束/终止的头像才会消失。Codex app 里跑的会话（rollout 里 originator 是 Desktop）直接跳 `codex://threads/<id>` 深链。
    if(url.pathname==='/api/opencode/focus'){
-    const id=String(b.id||''),source=id.startsWith('codex:')?'codex':id.startsWith('omp:')?'omp':id.startsWith('claude:')?'claude':id.startsWith('dsh:')?'dsh':id.startsWith('agy:')?'agy':'opencode';
+    const id=String(b.id||''),source=sessionSource(id);
     // dsh 的 web 界面在跑就把用户带过去：先切到浏览器里已经打开的那个标签（不新开），没有才打开。
     if(source==='dsh'&&await dshWebAlive()){
      const r=await browser.focus(dshWebUrl);
      if(b.id)dsh.acknowledge(b.id);
      return json({ok:true,url:dshWebUrl,...r});
     }
-    const r=await terminals.focus({...b,source,app:source==='codex'&&codex.appSession(id)});
+    const stored=source==='t3'?t3.get(id):null;
+    const r=await terminals.focus({...b,source,sessionId:stored?.sessionId,environmentId:stored?.environmentId,app:source==='codex'&&codex.appSession(id)});
     // 点会话行就当作「处理过了」：终端页可能已经关掉、跳不过去，也照样标记已查看，
     // 已结束 / 已终止的会话因此从列表与头像里收起，不会一直残留。
-    if(b.id){if(source==='codex')codex.acknowledge(b.id);else if(source==='omp')omp.acknowledge(b.id);else if(source==='claude')claude.acknowledge(b.id);else if(source==='dsh')dsh.acknowledge(b.id);else if(source==='agy')agy.acknowledge(b.id);else opencode.acknowledge(b.id);}
+    if(b.id)acknowledgeSession(b.id);
     return json(r);
+   }
+   // 标记会话已查看：各客户端切入对话、外部钩子、或脚本上报时调用。
+   // 命中后清除绿色完成态（acked 置 true 并触发事件流通知）。
+   if(url.pathname==='/api/opencode/viewed'||url.pathname==='/api/harness/viewed'){
+    const unviewed=[...opencode.unviewed(),...codex.unviewed(),...omp.unviewed(),...claude.unviewed(),...dsh.unviewed(),...agy.unviewed(),...t3.unviewed(),...grok.unviewed()];
+    const targetId=findViewedTarget(unviewed,b);
+    if(targetId&&acknowledgeSession(targetId)){
+     return json({ok:true,acknowledged:[targetId]});
+    }
+    return json({ok:true,acknowledged:[]});
    }
    // 终端归属按需扫描的续期：网页打开通知岛 / 刘海面板展开时每几秒调一次，服务端据此决定要不要扫。
    if(url.pathname==='/api/terminals/watch'){
@@ -409,10 +440,14 @@ const server=http.createServer(async(req,res)=>{
    if(url.pathname==='/api/codex/agents/create')return json(await mutate(()=>codexAgents.create(b)));
    if(url.pathname==='/api/codex/agents/rename')return json(await mutate(async()=>{const r=await codexAgents.rename(b);await codexReader.invalidate([b.id]);return r;}));
    if(url.pathname==='/api/codex/agents/delete')return json(await mutate(async()=>{const r=await codexAgents.remove(b);await codexReader.invalidate([b.id]);return r;}));
+   if(url.pathname==='/api/grok/agents/save')return json(await mutate(async()=>{const r=await grokAgents.save(b);await grokReader.invalidate([b.id]);return r;}));
+   if(url.pathname==='/api/grok/agents/create')return json(await mutate(()=>grokAgents.create(b)));
+   if(url.pathname==='/api/grok/agents/rename')return json(await mutate(async()=>{const r=await grokAgents.rename(b);await grokReader.invalidate([b.id]);return r;}));
+   if(url.pathname==='/api/grok/agents/delete')return json(await mutate(async()=>{const r=await grokAgents.remove(b);await grokReader.invalidate([b.id]);return r;}));
    // 全局配置的保存：与智能体一样先备份、校验版本；改完失效对应的 AI 缓存。
    if(url.pathname==='/api/configs/save')return json(await mutate(async()=>{const r=await configs.save(b);await configReader.invalidate([b.provider+':'+b.key]);return r;}));
-   if(url.pathname==='/api/ai/generate'||url.pathname==='/api/ai/agent/generate'||url.pathname==='/api/ai/codex/generate'||url.pathname==='/api/ai/config/generate'){
-    const configMode=url.pathname==='/api/ai/config/generate',codexMode=url.pathname==='/api/ai/codex/generate',agentMode=url.pathname==='/api/ai/agent/generate',engine=configMode?configReader:codexMode?codexReader:agentMode?agentReader:reader,rel=(configMode||codexMode||agentMode)?undefined:relPath(b.path);
+   if(url.pathname==='/api/ai/generate'||url.pathname==='/api/ai/agent/generate'||url.pathname==='/api/ai/codex/generate'||url.pathname==='/api/ai/grok/generate'||url.pathname==='/api/ai/config/generate'){
+    const configMode=url.pathname==='/api/ai/config/generate',codexMode=url.pathname==='/api/ai/codex/generate',grokMode=url.pathname==='/api/ai/grok/generate',agentMode=url.pathname==='/api/ai/agent/generate',engine=configMode?configReader:grokMode?grokReader:codexMode?codexReader:agentMode?agentReader:reader,rel=(configMode||codexMode||grokMode||agentMode)?undefined:relPath(b.path);
     if(busy)fail('技能正在修改，请完成后再生成',409);
     if(!b.stream)return json(await engine.generate(b.id,b.mode,rel));
     res.writeHead(200,{'Content-Type':'application/x-ndjson; charset=utf-8','Cache-Control':'no-store','X-Accel-Buffering':'no'});res.flushHeaders();
@@ -422,6 +457,7 @@ const server=http.createServer(async(req,res)=>{
    if(url.pathname==='/api/open'){
     if(b.agent){await fs.mkdir(agents.root,{recursive:true});openTarget(agents.root);return json({ok:true,path:agents.root});}
     if(b.codexAgent){await fs.mkdir(codexAgents.root,{recursive:true});openTarget(codexAgents.root);return json({ok:true,path:codexAgents.root});}
+    if(b.grokAgent){await fs.mkdir(grokAgents.root,{recursive:true});openTarget(grokAgents.root);return json({ok:true,path:grokAgents.root});}
     if(b.config){const dir=configs.dir(b.config);if(!(await fs.lstat(dir).catch(()=>null)))fail('配置目录不存在：'+dir,404);openTarget(dir);return json({ok:true,path:dir});}
     if(b.url){let target;try{target=new URL(b.url);}catch{fail('无效链接');}if(!['http:','https:'].includes(target.protocol))fail('无效链接');openUrl(target.href);return json({ok:true});}
     if(b.dir){const list=await sources.roots();const real=await fs.realpath(b.dir).catch(()=>null);if(!real||!list.some(r=>r.path===real))fail('该目录尚未添加',404);openTarget(real);return json({ok:true,path:real});}
@@ -498,7 +534,7 @@ const server=http.createServer(async(req,res)=>{
     return json({ok:true});
    }fail('不存在的接口：'+req.method+' '+url.pathname,404);
   }
-  const assets={'/stream.js':['stream.js','text/javascript'],'/markdown.js':['markdown.js','text/javascript'],'/todo.js':['todo.js','text/javascript'],'/agent-format.js':['agent-format.js','text/javascript'],'/codex-format.js':['codex-format.js','text/javascript'],'/icon.png':['icon.png','image/png'],'/reminders.png':['reminders.png','image/png'],'/bobo-avatar.png':['bobo-avatar.png','image/png'],'/provider-grok.png':['provider-grok.png','image/png'],'/':['index.html','text/html'],'/app.js':['app.js','text/javascript'],'/style.css':['style.css','text/css'],
+  const assets={'/stream.js':['stream.js','text/javascript'],'/markdown.js':['markdown.js','text/javascript'],'/todo.js':['todo.js','text/javascript'],'/agent-format.js':['agent-format.js','text/javascript'],'/codex-format.js':['codex-format.js','text/javascript'],'/grok-format.js':['grok-format.js','text/javascript'],'/icon.png':['icon.png','image/png'],'/reminders.png':['reminders.png','image/png'],'/bobo-avatar.png':['bobo-avatar.png','image/png'],'/provider-grok.png':['provider-grok.png','image/png'],'/':['index.html','text/html'],'/app.js':['app.js','text/javascript'],'/style.css':['style.css','text/css'],
    // 通知岛面板：独立的小页面，给桌面壳的透明悬浮窗用（浏览器访问也正常）。
    '/panel.html':['panel.html','text/html'],'/panel.css':['panel.css','text/css'],'/panel.js':['panel.js','text/javascript']};
   const asset=assets[url.pathname];if(!asset)fail('Not found',404);

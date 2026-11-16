@@ -31,7 +31,7 @@ icon_work="$(mktemp -d)"
 trap 'rm -rf "$icon_work"' EXIT
 
 # 1. 编译 Swift 壳（AppKit + WebKit）。
-xcrun swiftc -parse-as-library -O "$project_dir/macos/Bobo.swift" "$project_dir/macos/Todo.swift" "$project_dir/macos/IslandNotifications.swift" "$project_dir/macos/Awake.swift" "$project_dir/macos/AwakeIsland.swift" "$project_dir/macos/LoginItem.swift" -o "$app_dir/Contents/MacOS/Bobo" -framework AppKit -framework WebKit -framework EventKit -framework IOKit -framework ServiceManagement
+xcrun swiftc -parse-as-library -O "$project_dir/macos/Bobo.swift" "$project_dir/macos/Todo.swift" "$project_dir/macos/IslandNotifications.swift" "$project_dir/macos/Awake.swift" "$project_dir/macos/AwakeIsland.swift" "$project_dir/macos/ColorFilter.swift" "$project_dir/macos/LoginItem.swift" -o "$app_dir/Contents/MacOS/Bobo" -framework AppKit -framework WebKit -framework EventKit -framework IOKit -framework ServiceManagement
 
 # awake 的 @main 独立编译，不能混入 Bobo 的库模式编译。
 bash "$project_dir/scripts/build-awake.sh" "$out_dir/awake"

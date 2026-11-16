@@ -29,6 +29,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     private let islandModel = IslandModel()
     private let todoInputMonitor = TodoInputMonitor()
     private let awakeController = AwakeIslandController()
+    private let colorFilter = ColorFilterController.system()
     private static let barOrderKey = "bobo.island.barOrder"
     private let todoStore = TodoStore(repository: EventKitTodoRepository(), defaults: .standard)
     private var todoBridge: TodoWebBridge?
@@ -65,6 +66,8 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
     // 激活 / 空间切换时强制刷新，平时缓存一秒，覆盖网页播放器无通知的进入 / 退出全屏。
     private var fullScreenCached = false
     private var fullScreenCheckedAt: Date?
+    // 浏览器按应用声明的网页协议能力识别，按 bundle 路径缓存，避免每秒重复读取 Info.plist。
+    private var webBrowserBundles: [URL: Bool] = [:]
     // 让位（防遮挡菜单栏 / 全屏视频）状态：true 时面板缩成一只 bobo 躲进刘海区域（见 setIslandYielding）。
     private var islandYielding = false
     private var terminalWatchTimer: Timer?
@@ -105,6 +108,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
 
     static func main() {
         if let code = BoboLoginItem.runIfRequested(Array(CommandLine.arguments.dropFirst())) { exit(code) }
+        if let code = ColorFilterCommand.runIfRequested(Array(CommandLine.arguments.dropFirst())) { exit(code) }
         let app = NSApplication.shared
         let delegate = Bobo()
         app.delegate = delegate
@@ -120,6 +124,13 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         setupStatusMenu()
         setupWindow()
         islandModel.barOrder = UserDefaults.standard.stringArray(forKey: Self.barOrderKey) ?? []
+        colorFilter.onAvailability = { [weak self] available in
+            guard let self else { return }
+            self.islandModel.colorFilterAvailable = available
+            self.scheduleIslandLayout()
+        }
+        islandModel.colorFilterAvailable = colorFilter.available
+        colorFilter.start()
         setupNotch()
         awakeController.onActiveChanged = { [weak self] active in
             guard let self else { return }
@@ -346,6 +357,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         let hosting = IslandHostingView(rootView: IslandView(
             model: islandModel,
             awake: awakeController,
+            colorFilter: colorFilter,
             todo: todoStore,
             todoInputMonitor: todoInputMonitor,
             onTodo: { [weak self] id in
@@ -529,7 +541,14 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             return CGRect(x: bounds.minX, y: bounds.minY + inset, width: bounds.width, height: bounds.height - inset)
         }
         if fullScreenOnly {
-            return IslandWindowGeometry.videoFullScreenBounds(windows, pid: front.processIdentifier, bundleIdentifier: front.bundleIdentifier ?? "", displays: displays, cameraSafeAreas: cameraSafeAreas)
+            guard let bundleURL = front.bundleURL else { return nil }
+            let isBrowser: Bool
+            if let cached = webBrowserBundles[bundleURL] { isBrowser = cached }
+            else {
+                isBrowser = IslandWindowGeometry.isWebBrowser(Bundle(url: bundleURL)?.infoDictionary ?? [:])
+                webBrowserBundles[bundleURL] = isBrowser
+            }
+            return IslandWindowGeometry.videoFullScreenBounds(windows, pid: front.processIdentifier, isBrowser: isBrowser, displays: displays, cameraSafeAreas: cameraSafeAreas)
         }
         return IslandWindowGeometry.frontmostBounds(windows, pid: front.processIdentifier, displays: displays, cameraSafeAreas: cameraSafeAreas)
     }
@@ -601,7 +620,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
             device: islandModel.device != nil,
             network: islandModel.network != nil,
             actionButtons: islandModel.expanded,
-            awake: islandModel.expanded, quotaWidths: islandModel.barQuotaProviders.map { IslandMetrics.quotaChipWidth($0, barHeight: islandBarHeight(screen)) }, focus: islandModel.focusActive)
+            awake: islandModel.expanded, quotaWidths: islandModel.barQuotaProviders.map { IslandMetrics.quotaChipWidth($0, barHeight: islandBarHeight(screen)) }, focus: islandModel.focusActive, colorFilter: islandModel.expanded && islandModel.colorFilterAvailable)
         // 刘海屏上下同宽，列表沿用顶部内容宽度；外接屏保留原有展开宽度。
         let minWidth: CGFloat = islandModel.expanded ? min(todoStore.snapshot.enabled ? 620 : 480, screen.frame.width - IslandMetrics.screenEdgeMargin * 2) : 0
         let layout = IslandBarGeometry.layout(left: widths.left, right: widths.right, notch: notch, minWidth: minWidth)
@@ -622,7 +641,7 @@ final class Bobo: NSObject, NSApplicationDelegate, NSWindowDelegate, WKUIDelegat
         if expanded {
             return IslandBarGeometry.quotaChips(count: widths.count, limit: islandModel.settings.quotaCount,
                 screenWidth: screen.frame.width, keepOut: keepOut, device: islandModel.device != nil,
-                network: islandModel.network != nil, actionButtons: true, awake: true, quotaWidths: widths)
+                network: islandModel.network != nil, actionButtons: true, awake: true, quotaWidths: widths, colorFilter: islandModel.colorFilterAvailable)
         }
         guard baseline > 0, Self.hasNotch(screen), abs(islandOffset) < 1 else { return baseline }
         let capacity = IslandBarGeometry.avatarCapacity(screenWidth: screen.frame.width, keepOut: keepOut)
@@ -1897,10 +1916,15 @@ enum IslandWindowGeometry {
         selection(windows, pid: pid, displays: displays, cameraSafeAreas: cameraSafeAreas).frontmost
     }
 
-    static func videoFullScreenBounds(_ windows: [[String: Any]], pid: pid_t, bundleIdentifier: String, displays: [CGRect], cameraSafeAreas: [CGRect] = []) -> CGRect? {
-        // 与网页跳转已有的 Chromium 来源一致；未知应用没有视频全屏证据时保留通知岛。
-        let browsers = ["com.google.Chrome", "com.microsoft.edgemac", "com.brave.Browser", "com.vivaldi.Vivaldi", "org.chromium.Chromium"]
-        guard browsers.contains(where: { bundleIdentifier == $0 || bundleIdentifier.hasPrefix($0 + ".") }) else { return nil }
+    static func isWebBrowser(_ bundleInfo: [String: Any]) -> Bool {
+        // Egolight 等新浏览器同样声明 http / https；不把浏览器识别绑定到品牌或 AppleScript 支持名单。
+        let types = bundleInfo["CFBundleURLTypes"] as? [[String: Any]] ?? []
+        let schemes = Set(types.flatMap { ($0["CFBundleURLSchemes"] as? [String] ?? []).map { $0.lowercased() } })
+        return schemes.contains("http") && schemes.contains("https")
+    }
+
+    static func videoFullScreenBounds(_ windows: [[String: Any]], pid: pid_t, isBrowser: Bool, displays: [CGRect], cameraSafeAreas: [CGRect] = []) -> CGRect? {
+        guard isBrowser else { return nil }
         let result = selection(windows, pid: pid, displays: displays, cameraSafeAreas: cameraSafeAreas)
         guard let frontmost = result.frontmost, result.videoFullScreen.contains(frontmost) else { return nil }
         return frontmost
@@ -1912,7 +1936,7 @@ enum IslandWindowGeometry {
                   let layer = window[kCGWindowLayer as String] as? Int, layer == 0,
                   (window[kCGWindowAlpha as String] as? Double ?? 1) > 0,
                   let bounds = window[kCGWindowBounds as String] as? [String: Any],
-                  let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary), rect.width > 0, rect.height > 0 else { return nil }
+                  let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary), rect.width >= 2, rect.height >= 2 else { return nil }
             return rect
         }
         func toolbar(_ rect: CGRect, above main: CGRect) -> Bool {
@@ -1939,6 +1963,10 @@ enum IslandWindowGeometry {
         }
         // Chrome 应用全屏时主窗口在工具栏前，视频内容全屏时分离工具栏在主窗口前。
         // 普通全屏窗口即使与显示器完全重合，也不能单独作为视频全屏的证据。
+        // ego lite 外接屏：视频窗与 2048×1152 显示器重合，前面是 68pt 同宽工具栏；
+        // 「按 esc 退出」气泡在 layer 999，不进这张表。原点还有一扇 1×1 的 layer 0 窗口，
+        // 夹在工具栏和视频窗之间，不计入前台窗口，否则让位会被这一个像素挡住。
+        // 过渡期两扇重合全屏窗还没有工具栏，这时不让位。
         let videoFullScreen = fullScreen.filter { main in
             guard let index = bounds.firstIndex(of: main) else { return false }
             return bounds.prefix(index).contains { toolbar($0, above: main) }
@@ -2492,15 +2520,15 @@ enum IslandMetrics {
     static func icon(for provider: IslandQuotaProvider) -> NSImage? {
         icon(id: provider.id == "deepseek" ? "dsh" : provider.id)
     }
-    // 各来源（opencode / codex / omp / claude / dsh / agy）对应的来源图标 id，展开列表与折叠胶囊都用它显示 Agent 图标；
+    // 各来源（opencode / codex / omp / claude / dsh / agy / t3 / grok）对应的来源图标 id，展开列表与折叠胶囊都用它显示 Agent 图标；
     // 都有打包好的 bobo-provider-<id>.svg（opencode 与额度来源 opencode-go 共用同一枚标记）。
     static func providerId(forSource source: String?) -> String {
-        source == "codex" ? "codex" : source == "omp" ? "omp" : source == "claude" ? "claude" : source == "dsh" ? "dsh" : source == "agy" ? "agy" : "opencode-go"
+        source == "codex" ? "codex" : source == "omp" ? "omp" : source == "claude" ? "claude" : source == "dsh" ? "dsh" : source == "agy" ? "agy" : source == "t3" ? "t3" : source == "grok" ? "grok" : "opencode-go"
     }
     // 点刘海上的会话头像要定位到的通知岛分栏（与 index.html 的 data-island-pane 一致）：
     // 认不出的来源、以及没有活跃会话时的置灰 bobo（source 为 nil）都落回左栏底部的「通知岛设置」。
     static func islandPane(forSource source: String?) -> String {
-        let panes = ["opencode", "codex", "omp", "claude", "dsh", "agy"]
+        let panes = ["opencode", "codex", "omp", "claude", "dsh", "agy", "t3", "grok"]
         guard let source, panes.contains(source) else { return "settings" }
         return source
     }
@@ -2520,6 +2548,8 @@ enum IslandMetrics {
         case "claude": return Color(red: 0.84, green: 0.39, blue: 0.25)    // Claude 橙
         case "dsh": return Color(red: 0.34, green: 0.53, blue: 0.996)      // DeepSeek 蓝
         case "agy": return Color(red: 0.15, green: 0.58, blue: 0.95)      // Antigravity 蓝
+        case "t3": return Color(red: 0.93, green: 0.93, blue: 0.91)       // T3 字标浅色（纯黑会和刘海糊在一起）
+        case "grok": return Color(red: 0.93, green: 0.93, blue: 0.91)     // Grok 头像浅底，避免纯黑牌面贴在刘海上
         default: return Color(red: 0.30, green: 0.29, blue: 0.29)            // OpenCode 深灰（品牌黑会和刘海背景重合）
         }
     }
@@ -2574,7 +2604,7 @@ enum IslandLayoutTween {
 // 顶部栏的排布计算（纯函数，方便单独验证）：内容宽度、面板宽度、栏内分区、折叠头像的取舍。
 // 顶栏的混排顺序：系统图标保留用户的位置，额度槽位跟随 usage.json 的来源顺序。
 enum IslandBarOrder {
-    static let controls = ["device", "network", "awake", "settings", "quit"]
+    static let controls = ["device", "network", "awake", "colorFilter", "settings", "quit"]
     static func providers(in order: [String]) -> [String] {
         order.filter { $0.hasPrefix("quota:") }.map { String($0.dropFirst(6)) }
     }
@@ -2613,12 +2643,12 @@ enum IslandBarGeometry {
     // 两侧内容的宽度（不含端帽）：左侧是会话头像 + 分隔线（放不下时最后一格换成「+N」徽标，
     // 尺寸与头像脸一致），右侧是额度圆环（展开并排时可能有几枚）+ 设备 + 网络（+ 展开时的设置与退出）。
     // 间距与图标规格共用 IslandMetrics。
-    static func contentWidths(faces: Int, hidden: Int, quota: Int, device: Bool, network: Bool, actionButtons: Bool, wideQuota: CGFloat = 0, awake: Bool = false, quotaWidths: [CGFloat] = [], focus: Bool = false) -> (left: CGFloat, right: CGFloat) {
+    static func contentWidths(faces: Int, hidden: Int, quota: Int, device: Bool, network: Bool, actionButtons: Bool, wideQuota: CGFloat = 0, awake: Bool = false, quotaWidths: [CGFloat] = [], focus: Bool = false, colorFilter: Bool = false) -> (left: CGFloat, right: CGFloat) {
         // 头像之间、头像与徽标 / 分隔线之间都是同一个间距；分隔线自己也占一格的宽度。
         var left = CGFloat(faces) * IslandMetrics.glyphSize + IslandMetrics.itemSpacing * CGFloat(faces) + IslandMetrics.dividerWidth
         if focus { left = IslandMetrics.focusChipWidth + IslandMetrics.itemSpacing + IslandMetrics.dividerWidth }
         else if hidden > 0 { left += IslandMetrics.itemSpacing + IslandMetrics.glyphSize }
-        let chips = max(0, quota) + (device ? 1 : 0) + (network ? 1 : 0) + (awake ? 1 : 0) + (actionButtons ? 2 : 0)
+        let chips = max(0, quota) + (device ? 1 : 0) + (network ? 1 : 0) + (awake ? 1 : 0) + (colorFilter ? 1 : 0) + (actionButtons ? 2 : 0)
         let networkInset = network ? IslandMetrics.itemSize - IslandMetrics.networkItemWidth : 0
         // 余额圆环可能比普通 22pt 更宽（见 balanceChipSize）：只在真正画着余额 chip 时补差额。
         let wideExtra = quotaWidths.isEmpty
@@ -2630,12 +2660,12 @@ enum IslandBarGeometry {
     // 并排显示几枚额度圆环（纯函数）：count 是可用的来源数，limit 是用户设的上限（3 / 5 / 7），0 = 自适应。
     // 自适应按屏幕剩余空间算：面板以屏幕正中（展开后的中轴线）为轴，圆环从刘海右侧往右排，中轴线到屏幕
     // 右缘的那半屏里还要给设备、网络指示、设置 / 退出按钮与端帽留位置——装不下的不显示，至少留一枚。
-    static func quotaChips(count: Int, limit: Int, screenWidth: CGFloat, keepOut: CGFloat, device: Bool, network: Bool, actionButtons: Bool, wideQuota: CGFloat = 0, awake: Bool = false, quotaWidths: [CGFloat] = []) -> Int {
+    static func quotaChips(count: Int, limit: Int, screenWidth: CGFloat, keepOut: CGFloat, device: Bool, network: Bool, actionButtons: Bool, wideQuota: CGFloat = 0, awake: Bool = false, quotaWidths: [CGFloat] = [], colorFilter: Bool = false) -> Int {
         guard count > 0 else { return 0 }
         guard count > 1 else { return 1 }
         let space = (screenWidth - IslandMetrics.screenEdgeMargin * 2) / 2 - keepOut / 2 - IslandMetrics.barEdge
         func fits(_ shown: Int) -> Bool {
-            contentWidths(faces: 0, hidden: 0, quota: shown, device: device, network: network, actionButtons: actionButtons, wideQuota: wideQuota, awake: awake, quotaWidths: quotaWidths).right <= space
+            contentWidths(faces: 0, hidden: 0, quota: shown, device: device, network: network, actionButtons: actionButtons, wideQuota: wideQuota, awake: awake, quotaWidths: quotaWidths, colorFilter: colorFilter).right <= space
         }
         var shown = limit > 0 ? min(limit, count) : count
         while shown > 1, !fits(shown) { shown -= 1 }
@@ -2643,11 +2673,11 @@ enum IslandBarGeometry {
     }
 
     // 两翼等宽时，头像可能撑出右侧空位。只补能放入原有翼宽的额度，少量头像时仍保持默认单图标。
-    static func balancedQuotaChips(left: CGFloat, quotaWidths: [CGFloat], limit: Int, device: Bool, network: Bool, awake: Bool) -> Int {
+    static func balancedQuotaChips(left: CGFloat, quotaWidths: [CGFloat], limit: Int, device: Bool, network: Bool, awake: Bool, colorFilter: Bool = false) -> Int {
         guard !quotaWidths.isEmpty else { return 0 }
         func right(_ count: Int) -> CGFloat {
             contentWidths(faces: 0, hidden: 0, quota: count, device: device, network: network,
-                actionButtons: false, awake: awake, quotaWidths: quotaWidths).right
+                actionButtons: false, awake: awake, quotaWidths: quotaWidths, colorFilter: colorFilter).right
         }
         let space = max(left, right(1))
         let count = limit > 0 ? min(limit, quotaWidths.count) : quotaWidths.count
@@ -2923,6 +2953,7 @@ final class IslandModel: ObservableObject {
     @Published var todoHasItems = false
     @Published var todoComposing = false
     @Published var awakeActive = false
+    @Published var colorFilterAvailable = false
     @Published var focusActive = false
     @Published var focusRevealed = false
     @Published var barOrder: [String] = []
@@ -2965,7 +2996,10 @@ final class IslandModel: ObservableObject {
         var items = Set(barQuotaProviders.map { "quota:" + $0.id })
         if device != nil { items.insert("device") }
         if network != nil { items.insert("network") }
-        if expanded { items.formUnion(["awake", "settings", "quit"]) }
+        if expanded {
+            items.formUnion(["awake", "settings", "quit"])
+            if colorFilterAvailable { items.insert("colorFilter") }
+        }
         return items
     }
     // 展开：鼠标悬停，或（设置允许时）状态变化自动亮起（等你回答 3 秒、结束/终止 2 秒，见 revealIslandTemporarily）。
@@ -3078,9 +3112,98 @@ final class IslandLayoutState: ObservableObject {
 
 // 通知岛面板：黑色卡片贴住刘海，折叠时只有一条胶囊，展开时向下列出会话。
 // 形状与层级参考 CodeIsland（NotchPanelShape）：顶部贴屏幕边，底部连续曲率圆角。
+struct IslandColorFilterChip: View {
+    @ObservedObject var filter: ColorFilterController
+    var allowsAction: () -> Bool = { true }
+    @State private var menuShown = false
+    private var summary: String {
+        if let error = filter.error { return error }
+        let name = ColorFilterKind(rawValue: filter.type)?.title ?? "色彩滤镜"
+        return filter.enabled ? "色彩滤镜 · \(name)。点按关闭；类型和强度在「设备」" : "色彩滤镜已关闭。点按开启；类型和强度在「设备」"
+    }
+    var body: some View {
+        Button { if allowsAction() { filter.toggle() } } label: {
+            Image(systemName: "circle.lefthalf.filled").font(.system(size: IslandMetrics.quotaIconSize))
+                .foregroundStyle(filter.enabled ? Color(red: 0.04, green: 0.52, blue: 1.00) : .white.opacity(0.4))
+                .frame(width: IslandMetrics.itemSize, height: IslandMetrics.itemSize)
+        }
+        .buttonStyle(.plain).disabled(!filter.available)
+        .accessibilityLabel(filter.enabled ? "关闭色彩滤镜" : "开启色彩滤镜")
+        .help(summary)
+        .contextMenu {
+            ForEach(ColorFilterKind.allCases, id: \.rawValue) { kind in
+                Button { filter.select(kind.rawValue) } label: {
+                    if filter.type == kind.rawValue { Label(kind.title, systemImage: "checkmark") } else { Text(kind.title) }
+                }
+            }
+            Divider()
+            Button("关闭") { if filter.enabled { filter.toggle() } }
+        }
+        .highPriorityGesture(LongPressGesture(minimumDuration: 0.5).exclusively(before: TapGesture()).onEnded { value in
+            guard allowsAction() else { return }
+            switch value { case .first: menuShown = true; case .second: filter.toggle() }
+        })
+        .popover(isPresented: $menuShown) {
+            IslandColorFilterOptions(filter: filter).padding(12).frame(width: 220)
+        }
+    }
+}
+
+private struct IslandColorFilterOptions: View {
+    @ObservedObject var filter: ColorFilterController
+    @State private var intensity = 1.0
+    @State private var hue = 0.0
+    @State private var editingIntensity = false
+    @State private var editingHue = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("色彩滤镜").font(.system(size: 12, weight: .semibold))
+            ForEach(ColorFilterKind.allCases, id: \.rawValue) { kind in
+                Button { filter.select(kind.rawValue) } label: {
+                    HStack {
+                        Text(kind.title).frame(maxWidth: .infinity, alignment: .leading)
+                        if filter.type == kind.rawValue { Image(systemName: "checkmark") }
+                    }.contentShape(Rectangle())
+                }.buttonStyle(.plain)
+            }
+            if filter.adjustable {
+                HStack {
+                    Text("强度").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(Int((min(max(intensity, 0), 1) * 100).rounded()))%")
+                        .font(.system(size: 10, weight: .medium))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                Slider(value: $intensity, in: filter.intensityMin...filter.intensityMax) { editing in
+                    editingIntensity = editing
+                    if !editing { filter.setIntensity(intensity) }
+                }
+                if filter.type == ColorFilterKind.tint.rawValue {
+                    HStack(spacing: 8) {
+                        Text("色调").font(.system(size: 10)).foregroundStyle(.secondary)
+                        Circle().fill(Color(hue: hue, saturation: 1, brightness: 1)).frame(width: 12, height: 12)
+                    }
+                    Slider(value: $hue, in: 0...1) { editing in
+                        editingHue = editing
+                        if !editing { filter.setHue(hue) }
+                    }
+                }
+            }
+        }
+        .font(.system(size: 12))
+        .onAppear { pull() }
+        .onChange(of: filter.type) { _, _ in if !editingIntensity && !editingHue { pull() } }
+        .onChange(of: filter.intensity) { _, _ in if !editingIntensity { intensity = filter.intensity } }
+        .onChange(of: filter.hue) { _, _ in if !editingHue { hue = filter.hue } }
+    }
+    private func pull() { intensity = filter.intensity; hue = filter.hue }
+}
+
 struct IslandView: View {
     @ObservedObject var model: IslandModel
     let awake: AwakeIslandController
+    let colorFilter: ColorFilterController
     @ObservedObject var todo: TodoStore
     var todoInputMonitor: TodoInputMonitor?
     var onTodo: (String?) -> Void
@@ -3230,6 +3353,8 @@ struct IslandView: View {
             case "awake":
                 IslandAwakeChip(awake: awake, animating: model.onScreen && model.screenAwake,
                     allowsAction: { barActionAllowed }, onHover: { onDetail(.awake, $0, $1) })
+            case "colorFilter":
+                IslandColorFilterChip(filter: colorFilter, allowsAction: { barActionAllowed })
             case "device":
                 if let device = model.device {
                     IslandDeviceChip(device: device, action: { if barActionAllowed { onDevice() } }, onHover: { onDetail(.device, $0, $1) })
@@ -3918,7 +4043,7 @@ struct IslandRow: View {
     }
 
     private var subtitle: String? {
-        let source = session.source == "codex" ? "Codex" : session.source == "omp" ? "omp" : session.source == "claude" ? "Claude Code" : session.source == "dsh" ? "DeepSeek" : session.source == "agy" ? "Antigravity" : "OpenCode"
+        let source = session.source == "codex" ? "Codex" : session.source == "omp" ? "omp" : session.source == "claude" ? "Claude Code" : session.source == "dsh" ? "DeepSeek" : session.source == "agy" ? "Antigravity" : session.source == "t3" ? "T3 Code" : session.source == "grok" ? "Grok Build" : "OpenCode"
         let parts = [source, session.terminal, session.name, session.detail].filter { $0?.isEmpty == false }.compactMap { $0 }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }

@@ -10,7 +10,8 @@ const slice=(start,end)=>{const from=source.indexOf(start),to=source.indexOf(end
 test('Cursor / Grok Bot：源码与功能文档不保留旧 CLI 额度路径或文案',async()=>{
  const src=new URL('../src/',import.meta.url),files=(await fs.readdir(src)).filter(name=>name.endsWith('.mjs')).map(name=>new URL(name,src));
  files.push(...['public/app.js','public/index.html','docs/features.md','AGENTS.md','CHANGELOG.md'].map(name=>new URL('../'+name,import.meta.url)));
- for(const file of files)assert.doesNotMatch(await fs.readFile(file,'utf8'),/cli-chat-proxy|GROK_HOME|grok login|grok models|SuperGrok|\.grok\//,file.pathname);
+ // Grok Build 的会话与智能体就在 ~/.grok（GROK_HOME）。这里只拦已经退役的 Grok Bot CLI 额度路径。
+ for(const file of files)assert.doesNotMatch(await fs.readFile(file,'utf8'),/cli-chat-proxy|grok login|grok models|SuperGrok/,file.pathname);
 });
 class Element{
  constructor(){this.children=[];this.textContent='';this.dataset={};this.style={};this.classList={toggle(){}};}

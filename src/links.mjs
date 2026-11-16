@@ -19,6 +19,7 @@ import { macHTTPSProxy } from './usage.mjs';
 // 线路清单：名称、服务域名、探测地址。Cloudflare 前沿的用 /cdn-cgi/trace（顺带回显出口 IP），
 // 其余用最小路径（401 / 204 也算通）。agents 是走这条线路的会话来源（通知岛面板的会话行右侧
 // 按它取线路健康；没列进来的来源退回出口线路）。加一条线路只需在下面加一行；图标由页面按 id 映射。
+// Grok Build 走 api.x.ai，没有 Cloudflare trace 回显。
 export const SERVICES = [
  { id: 'codex', name: 'Codex', host: 'chatgpt.com', trace: 'https://chatgpt.com/cdn-cgi/trace', agents: ['codex'] },
  { id: 'claude', name: 'Claude Code', host: 'api.anthropic.com', trace: 'https://api.anthropic.com/cdn-cgi/trace', agents: ['claude'] },
@@ -26,6 +27,7 @@ export const SERVICES = [
  { id: 'opencode', name: 'OpenCode Go', host: 'opencode.ai', trace: 'https://opencode.ai/cdn-cgi/trace', agents: ['opencode', 'omp'] },
  { id: 'deepseek', name: 'DeepSeek', host: 'api.deepseek.com', url: 'https://api.deepseek.com/', agents: ['dsh'] },
  { id: 'agy', name: 'Antigravity', host: 'generativelanguage.googleapis.com', show: 'googleapis.com', url: 'https://generativelanguage.googleapis.com/generate_204', agents: ['agy'] },
+ { id: 'grok', name: 'Grok', host: 'api.x.ai', url: 'https://api.x.ai/', agents: ['grok'] },
 ];
 
 const probeTimeoutMs = 6000, lookupTimeoutMs = 4000, scutilTimeoutMs = 1500, execTimeoutMs = 12000;

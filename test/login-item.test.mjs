@@ -93,6 +93,8 @@ test('通用设置入口：登录项与外观、awake 设置分别放置',async(
  assert.match(settings,/<section class="settings-pane" data-pane="general">/);
  assert.match(settings,/id="rowLaunchAtLogin"/);
  assert.match(settings,/<section class="settings-pane" data-pane="appearance" hidden>/);
+ assert.doesNotMatch(settings,/data-settings-pane="island"/,'通知岛设置留在通知岛，不从通用设置跳转');
+ assert.match(html.slice(0,html.indexOf('id="settingsWorkspace"')),/data-island-pane="settings"/);
  assert.equal((html.match(/id="rowLaunchAtLogin"/g)||[]).length,1);
 });
 

@@ -15,13 +15,14 @@ const GHOSTTY_APP = '/Applications/Ghostty.app', GHOSTTY_BUNDLE = 'com.mitchellh
 const TERMINAL_APP = '/System/Applications/Utilities/Terminal.app', TERMINAL_BUNDLE = 'com.apple.Terminal';
 const OTTS_BUNDLE = 'io.appmakes.otty';
 const CODEX_APP = 'Codex App', CODEX_APP_BUNDLE = 'com.openai.codex';
+const T3_APP = 'T3 Code', T3_APP_BUNDLE = 'com.t3tools.t3code';
 const OSASCRIPT = '/usr/bin/osascript', LSAPPINFO = '/usr/bin/lsappinfo', OPEN = '/usr/bin/open';
 // 列表输出用 ASCII 单元分隔符（0x1f）分隔字段、换行分隔记录：标题里基本不可能出现，避免撞分隔符。
 const SEP = '\u001f';
 // 标签名前缀：OpenCode 集成按 `OC | <会话标题>` 命名标签，omp 的 TUI 用 `π <标题>`
 // （运行中前缀后多一个 spinner，见 sameTabTitle），Claude Code 用 `✳ <标题>`，
 // Codex 的以实际显示为准逐个尝试。
-const TITLE_PREFIX = { opencode: ['OC | '], codex: ['CX | ', 'Codex | ', 'CDX | '], omp: ['π '], claude: ['✳ '], agy: ['AGY | ', 'Antigravity | '] };
+const TITLE_PREFIX = { opencode: ['OC | '], codex: ['CX | ', 'Codex | ', 'CDX | '], omp: ['π '], claude: ['✳ '], agy: ['AGY | ', 'Antigravity | '], grok: ['Grok | ', 'grok | '] };
 
 const run = (bin, args) => new Promise(resolve => {
  let out = '', settled = false, timer;
@@ -113,6 +114,11 @@ export function codexThreadUrl(id) {
  const s = String(id ?? '').trim().replace(/^codex:/, '');
  return s ? 'codex://threads/' + encodeURIComponent(s) : '';
 }
+// T3 Code 桌面版的线程深链：`t3code://threads/<环境 id>/<线程 id>`，应用内落到 /<环境>/<线程>。
+export function t3ThreadUrl(environmentId, threadId) {
+ const env = String(environmentId ?? '').trim(), id = String(threadId ?? '').trim().replace(/^t3:/, '');
+ return env && id ? 't3code://threads/' + encodeURIComponent(env) + '/' + encodeURIComponent(id) : '';
+}
 // app 出身的会话（rollout 的 session_meta 记了 originator=Codex Desktop 等）在终端里没有标题命中的标签页时
 // 归属 Codex app（点击走线程深链，见 focus）；只有 app 正在跑时才算归属——app 没跑还跳，就是把已经退出的 app 拉起来。
 export function locateAppSessions(sessions, running) {
@@ -120,6 +126,23 @@ export function locateAppSessions(sessions, running) {
  if (!running?.has?.(CODEX_APP_BUNDLE)) return out;
  for (const s of sessions || []) if (s?.id && s.app === true) out[s.id] = CODEX_APP;
  return out;
+}
+
+// GUI 桌面应用前台激活判定：
+// 1) 当前台是 T3 Code 时，若该应用仅有 1 个待查看会话，前台激活即判定已看；多会话时不盲目消除，避免误消其他未读任务。
+// 2) 当前台是 Codex App 时同理。
+export function matchAppViewed(sessions, front = '') {
+ if (!front || !sessions?.length) return [];
+ const ids = [];
+ if (front === T3_APP_BUNDLE) {
+  const t3 = sessions.filter(s => s.source === 't3');
+  if (t3.length === 1 && t3[0]?.id) ids.push(t3[0].id);
+ }
+ if (front === CODEX_APP_BUNDLE) {
+  const codex = sessions.filter(s => s.source === 'codex' && s.app === true);
+  if (codex.length === 1 && codex[0]?.id) ids.push(codex[0].id);
+ }
+ return ids;
 }
 
 const lines = text => String(text ?? '').split('\n').map(l => l.replace(/\r$/, '')).filter(Boolean);
@@ -223,7 +246,7 @@ async function frontBundle() {
 // 正在运行的应用的 bundleID 集合（判断某个终端是否开着）。
 async function runningBundles() { return new Set([...(await run(LSAPPINFO, ['list'])).out.matchAll(/bundleID="([^"]+)"/g)].map(m => m[1])); }
 
-export function createTerminals() {
+export function createTerminals({ browser } = {}) {
  const otty = createOtty();
  const ghostty = {
   name: 'Ghostty', bundle: GHOSTTY_BUNDLE,
@@ -283,9 +306,26 @@ export function createTerminals() {
   const r = await run(OPEN, [url]);
   return r.code === 0 ? { ok: true, app: CODEX_APP, url } : { ok: false, reason: '没有找到 Codex 桌面版' };
  }
+ async function focusT3({ id, sessionId, environmentId } = {}) {
+  const url = t3ThreadUrl(environmentId, sessionId || id);
+  if (!url) return { ok: false, reason: '缺少 T3 会话地址' };
+  const r = await run(OPEN, [url]);
+  return r.code === 0 ? { ok: true, app: T3_APP, url } : { ok: false, reason: '没有找到 T3 Code' };
+ }
  // 只对「装了的、且正在运行」的终端尝试跳转（会话在哪个终端，那个终端就一定开着）；都没匹配到再激活正在运行的那个。
  async function focus(opts = {}) {
-  const running = await runningBundles(), appRunning = running.has(CODEX_APP_BUNDLE);
+  const running = await runningBundles(), appRunning = running.has(CODEX_APP_BUNDLE), t3Running = running.has(T3_APP_BUNDLE);
+  // T3 桌面版在跑就直接打开那条线程。先按目录去认终端会跳到同项目里另一条无关标签页；
+  // app 没跑也不把已经退出的应用拉起来。
+  if (opts.source === 't3') {
+   if (t3Running) return focusT3(opts);
+   for (const a of adapters) {
+    if (!a.available() || !running.has(a.bundle)) continue;
+    const r = await a.focus(opts, { titleOnly: true });
+    if (r?.ok) return r;
+   }
+   return { ok: false, reason: 'T3 Code 没有在运行' };
+  }
   // app 出身的会话（rollout 记着 Codex Desktop / vscode）先按标题认终端：它可能已经被 CLI resume，
   // 这份 meta 却照旧——不认终端就直接跳深链，会把已经退出的 app 拉起来（线程其实在终端里跑着）。
   // app 在跑时只认标题：同目录不算数，否则会跳到同目录里另一条无关的标签页。
@@ -304,11 +344,13 @@ export function createTerminals() {
   target.open();
   return { ok: false, reason: `没有找到对应的 ${target.name} 标签页` };
  }
- // 只有在前台的那个终端才可能「正停在会话的标签页上」，各适配器自己判断前台，这里合并。
+ // 只有在前台的那个终端、应用或浏览器才可能「正停在会话上」，各适配器与应用自己判断前台，这里合并。
  async function viewed(sessions) {
   if (!sessions?.length) return [];
   const front = await frontBundle(), ids = new Set();
   for (const a of adapters) { if (a.available()) for (const id of await a.viewed(sessions, front)) ids.add(id); }
+  for (const id of matchAppViewed(sessions, front)) ids.add(id);
+  if (browser?.viewed) { for (const id of await browser.viewed(sessions, front)) ids.add(id); }
   return [...ids];
  }
  // 会话归属：只扫正在运行的终端（不为了看一眼归属就把没开的终端拉起来），返回 `{会话 id: 终端名}`；
@@ -316,11 +358,13 @@ export function createTerminals() {
  // 认不到的：app 在跑就归属 Codex app（点击走线程深链），app 没跑才退回同目录之类的普通匹配。
  async function locate(sessions) {
   if (!sessions?.length) return {};
-  const running = await runningBundles(), appRunning = running.has(CODEX_APP_BUNDLE), groups = [];
+  const running = await runningBundles(), appRunning = running.has(CODEX_APP_BUNDLE), t3Running = running.has(T3_APP_BUNDLE), groups = [];
   for (const a of adapters) { if (a.available() && running.has(a.bundle)) groups.push({ name: a.name, tabs: await a.tabs() }); }
-  const app = sessions.filter(s => s.app === true), others = sessions.filter(s => s.app !== true);
+  const t3 = sessions.filter(s => s.source === 't3'), rest = sessions.filter(s => s.source !== 't3');
+  const t3Located = t3Running ? Object.fromEntries(t3.filter(s => s.id).map(s => [s.id, T3_APP])) : locateSessions(t3, groups, { titleOnly: true });
+  const app = rest.filter(s => s.app === true), others = rest.filter(s => s.app !== true);
   const byTitle = locateSessions(app, groups, { titleOnly: true }), miss = app.filter(s => !byTitle[s.id]);
-  return { ...byTitle, ...locateSessions(others, groups), ...(appRunning ? locateAppSessions(miss, running) : locateSessions(miss, groups)) };
+  return { ...t3Located, ...byTitle, ...locateSessions(others, groups), ...(appRunning ? locateAppSessions(miss, running) : locateSessions(miss, groups)) };
  }
  return { focus, focusApp, viewed, locate, available: () => adapters.some(a => a.available()) };
 }

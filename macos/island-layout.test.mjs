@@ -586,13 +586,13 @@ test('通知岛计时：会话时长的文案分档', {skip:process.platform!=='
 test('通知岛混排：系统图标位置保留，额度跟随来源顺序，窄图标按实际距离拖动', {skip:process.platform!=='darwin'}, async()=>{
  await checkSwift(await swiftSlice('struct IslandSession: Identifiable, Decodable, Equatable {','struct IslandSnapshot: Decodable, Equatable {'),`
  let initial = IslandBarOrder.resolved(saved: [], providers: ["codex", "agy"])
- precondition(initial == ["quota:codex", "quota:agy", "device", "network", "awake", "settings", "quit"])
+ precondition(initial == ["quota:codex", "quota:agy", "device", "network", "awake", "colorFilter", "settings", "quit"])
  let saved = ["device", "quota:codex", "awake", "quota:agy", "network", "quit", "settings"]
  let synced = IslandBarOrder.resolved(saved: saved, providers: ["agy", "codex"])
- precondition(synced == ["device", "quota:agy", "awake", "quota:codex", "network", "quit", "settings"], "网页调整额度不能移动用户安排的系统图标")
+ precondition(synced == ["device", "quota:agy", "awake", "quota:codex", "network", "quit", "settings", "colorFilter"], "网页调整额度不能移动用户安排的系统图标")
  precondition(IslandBarOrder.providers(in: synced) == ["agy", "codex"])
  let sanitized = IslandBarOrder.resolved(saved: ["device", "device", "quota:removed", "unknown"], providers: ["codex"])
- precondition(sanitized == ["quota:codex", "device", "network", "awake", "settings", "quit"])
+ precondition(sanitized == ["quota:codex", "device", "network", "awake", "colorFilter", "settings", "quit"])
  let shown = ["quota:codex", "network", "device", "awake"]
  let widths: [CGFloat] = [32, 12, 22, 22]
  precondition(IslandBarOrder.reordered(shown, id: "network", translation: -38, widths: widths) == ["network", "quota:codex", "device", "awake"])
@@ -677,6 +677,12 @@ test('通知岛收起状态：默认只显示当前额度、系统状态和网�
  precondition(folded.right == 66, "收起宽度只为三枚图标和间隔留位置")
  model.hovering = true
  precondition(shown() == saved, "展开后恢复 awake 和按钮的已保存位置")
+ model.colorFilterAvailable = true
+ precondition(shown() == ["device", "awake", "quota:codex", "network", "quit", "settings"], "色彩滤镜没排进已保存顺序时不挤进这条断言")
+ let withFilter = ["device", "awake", "colorFilter", "quota:codex", "network", "quit", "settings"]
+ precondition(withFilter.filter { model.visibleBarItems.contains($0) } == withFilter, "符号可用时展开栏带上色彩滤镜")
+ let filterWidth = IslandBarGeometry.contentWidths(faces: 1, hidden: 0, quota: 1, device: true, network: true, actionButtons: true, awake: true, colorFilter: true)
+ precondition(filterWidth.right == folded.right + IslandMetrics.itemSize * 4 + IslandMetrics.itemSpacing * 4, "展开再加 awake、色彩滤镜、设置和退出")
  model.hovering = false
  precondition(shown() == ["device", "quota:codex", "network"], "移出后不能残留展开态图标")
  model.device = nil; model.network = nil
@@ -920,6 +926,8 @@ test('通知岛跳转：头像分栏与额度排序的合并顺序', {skip:proce
  precondition(IslandMetrics.islandPane(forSource: "claude") == "claude")
  precondition(IslandMetrics.islandPane(forSource: "dsh") == "dsh")
  precondition(IslandMetrics.islandPane(forSource: "agy") == "agy")
+ precondition(IslandMetrics.islandPane(forSource: "t3") == "t3")
+precondition(IslandMetrics.islandPane(forSource: "grok") == "grok")
  precondition(IslandMetrics.islandPane(forSource: "认不出的来源") == "settings")
  // 顺序没变、整个翻转、以及夹杂未显示来源的三种合并。
  precondition(IslandMetrics.mergedQuotaOrder(full: ["a","b","c","d"], shown: ["a","b"]) == ["a","b","c","d"])
@@ -1036,9 +1044,34 @@ precondition(IslandWindowGeometry.frontmostBounds([window(upperToolbar), window(
 `);
 });
 
-// 刘海屏的 Chrome 全屏会保留摄像头区域；用现场几何验证分离工具栏与普通最大化的差别。
-test('通知岛视频全屏：刘海下方的主窗口需有前置分离工具栏，普通最大化与退出后不隐藏', {skip:process.platform!=='darwin'}, async()=>{
+// 刘海屏的 Chrome 全屏会保留摄像头区域；其它浏览器按 HTTP/HTTPS 能力复用相同视频证据。
+test('通知岛视频全屏：按浏览器能力覆盖 Egolight，普通最大化与退出后不隐藏', {skip:process.platform!=='darwin'}, async()=>{
  await checkSwift(await swiftSlice('enum IslandWindowGeometry {','// 顶栏命中范围'),`
+ let egolightInfo: [String: Any] = [
+  "CFBundleName": "Egolight",
+  "CFBundleURLTypes": [["CFBundleURLSchemes": ["http", "https"]]]
+ ]
+ let unknownBrowserInfo: [String: Any] = [
+  "CFBundleIdentifier": "unknown.vendor.browser",
+  "CFBundleURLTypes": [["CFBundleURLSchemes": ["HTTPS"]], ["CFBundleURLSchemes": ["custom", "HtTp"]]]
+ ]
+ let egolight = IslandWindowGeometry.isWebBrowser(egolightInfo)
+ let unknownBrowser = IslandWindowGeometry.isWebBrowser(unknownBrowserInfo)
+ precondition(egolight, "Egolight 声明 HTTP 与 HTTPS 浏览能力即可识别，不依赖品牌白名单")
+ precondition(unknownBrowser, "未知浏览器的协议可分在多项声明，大小写不影响识别")
+ let nonBrowsers: [[String: Any]] = [
+  [:],
+  ["CFBundleIdentifier": "com.google.Chrome"],
+  ["CFBundleIdentifier": "md.obsidian", "CFBundleURLTypes": [["CFBundleURLSchemes": ["obsidian"]]]],
+  ["CFBundleURLTypes": "http,https"],
+  ["CFBundleURLTypes": [["CFBundleURLSchemes": "http https"]]],
+  ["CFBundleURLTypes": [["CFBundleURLSchemes": ["http"]]]],
+  ["CFBundleURLTypes": [["CFBundleURLSchemes": ["https"]]]],
+  ["CFBundleURLTypes": [["CFBundleURLSchemes": ["http", "https", 42] as [Any]]]]
+ ]
+ for info in nonBrowsers {
+  precondition(!IslandWindowGeometry.isWebBrowser(info), "品牌名、单一协议、自定义协议或畸形元数据不能作为浏览器能力证据")
+ }
  let display = CGRect(x: 0, y: 0, width: 1470, height: 956)
  let cameraArea = CGRect(x: 0, y: 32, width: 1470, height: 924)
  let video = CGRect(x: 0, y: 33, width: 1470, height: 923)
@@ -1049,11 +1082,13 @@ test('通知岛视频全屏：刘海下方的主窗口需有前置分离工具�
   [kCGWindowOwnerPID as String: pid, kCGWindowLayer as String: layer, kCGWindowAlpha as String: alpha,
    kCGWindowBounds as String: rect.dictionaryRepresentation as NSDictionary]
  }
- func full(_ windows: [[String: Any]], display: CGRect = display, safe: [CGRect] = [cameraArea]) -> CGRect? {
-  IslandWindowGeometry.videoFullScreenBounds(windows, pid: 42, bundleIdentifier: "com.google.Chrome", displays: [display], cameraSafeAreas: safe)
+ func full(_ windows: [[String: Any]], display: CGRect = display, safe: [CGRect] = [cameraArea], isBrowser: Bool = true) -> CGRect? {
+  IslandWindowGeometry.videoFullScreenBounds(windows, pid: 42, isBrowser: isBrowser, displays: [display], cameraSafeAreas: safe)
  }
  let current = [window(strip), window(toolbar), window(video)]
  precondition(full(current) == video, "Chrome 当前现场应识别为全屏，不能被 33pt 摄像头留白或工具栏挡住")
+ precondition(full(current, isBrowser: egolight) == video, "Egolight 的视频全屏应触发让位")
+ precondition(full(current, isBrowser: unknownBrowser) == video, "新增浏览器不必补品牌名单即可触发视频让位")
  precondition(IslandWindowGeometry.frontmostBounds(current, pid: 42, displays: [display], cameraSafeAreas: [cameraArea]) == video)
  precondition(full([window(video)]) == nil, "普通最大化窗口即使铺满摄像头下方也不能让位")
  precondition(full([window(video), window(toolbar)]) == nil, "后面的短条不能把前面的最大化窗口变成全屏")
@@ -1062,11 +1097,18 @@ test('通知岛视频全屏：刘海下方的主窗口需有前置分离工具�
  precondition(full([window(toolbar, alpha: 0), window(video)]) == nil)
  precondition(full(current, safe: []) == nil, "无刘海屏不能把菜单栏下方的最大化区域当全屏")
  precondition(full([window(strip), window(toolbar), window(normal), window(video)]) == nil, "退出后前面的普通窗口必须解除让位")
- precondition(full([window(display)]) == nil, "普通应用或浏览器窗口全屏不能隐藏 bobo")
+ precondition(full([window(display)], isBrowser: egolight) == nil, "Egolight 的普通浏览器窗口全屏不能隐藏 bobo")
  let edgeToolbar = CGRect(x: 0, y: 0, width: display.width, height: 115)
  precondition(full([window(edgeToolbar), window(display)]) == display, "无摄像头留白的视频内容全屏仍然让位")
  precondition(full([window(display), window(edgeToolbar)]) == nil, "浏览器应用全屏时工具栏在后面，不得冒充视频全屏")
- precondition(IslandWindowGeometry.videoFullScreenBounds(current, pid: 42, bundleIdentifier: "md.obsidian", displays: [display], cameraSafeAreas: [cameraArea]) == nil, "其它应用即使存在类似几何也不能触发视频让位")
+ let egoScreen = CGRect(x: 0, y: 0, width: 2048, height: 1152)
+ let egoBar = CGRect(x: 0, y: 0, width: 2048, height: 68)
+ let egoBubble = CGRect(x: 811, y: 45, width: 426, height: 50)
+ let egoDot = CGRect(x: 0, y: 0, width: 1, height: 1)
+ precondition(full([window(egoBubble, layer: 999), window(egoBar), window(egoDot), window(egoScreen)], display: egoScreen, safe: []) == egoScreen, "ego lite 的 68pt 工具栏、退出气泡和原点 1×1 窗口仍应让位")
+ precondition(IslandWindowGeometry.frontmostBounds([window(egoBar), window(egoDot), window(egoScreen)], pid: 42, displays: [egoScreen]) == egoScreen, "原点 1×1 窗口不能变成前台窗口")
+ precondition(full([window(egoScreen), window(egoScreen)], display: egoScreen, safe: []) == nil, "ego lite 全屏过渡期的两扇重合窗口不能提前让位")
+ precondition(full(current, isBrowser: false) == nil, "Obsidian 等非浏览器即使存在类似几何也不能触发视频让位")
  let upper = CGRect(x: -100, y: -1080, width: 1920, height: 1080)
  let upperArea = CGRect(x: -100, y: -1048, width: 1920, height: 1048)
  let upperVideo = CGRect(x: -100, y: -1047, width: 1920, height: 1047)

@@ -116,6 +116,7 @@ function typical(){
   'https://opencode.ai/cdn-cgi/trace|proxy':{body:traceBody('112.120.123.178'),meta:'200 1.170 0.863'},
   'https://api.deepseek.com/|proxy':{body:'{"error":"missing key"}',meta:'401 0.150 0.045'},
   'https://generativelanguage.googleapis.com/generate_204|proxy':{body:'',meta:'204 0.448 0.350'},
+  'https://api.x.ai/|proxy':{body:'',meta:'401 0.180 0.140'},
   'https://proxycheck.io/v2/203.0.113.7?vpn=1&risk=1&asn=1|proxy':{body:'{"status":"ok","203.0.113.7":{"type":"Residential","risk":5,"provider":"Chinanet","country":"China"}}',meta:'200 0.200 0.180'},
   'https://proxycheck.io/v2/188.253.121.80?vpn=1&risk=1&asn=1|proxy':{body:'{"status":"ok","188.253.121.80":{"type":"VPN","risk":66,"provider":"Akari Networks","country":"Singapore"}}',meta:'200 0.210 0.190'},
   'https://proxycheck.io/v2/2407:cdc0:d002::1?vpn=1&risk=1&asn=1|proxy':{body:'{"status":"ok","2407:cdc0:d002::1":{"type":"VPN","risk":66}}',meta:'200 0.205 0.185'},
@@ -149,7 +150,7 @@ test('线路：一次检测给出出口与服务两类线路',async()=>{
  assert.equal(via.info.provider,'Akari Networks');assert.equal(via.healthText,'偏慢');
  // 服务行：顺序跟随线路清单；Cloudflare 三条回显各自真实出口，其余标线路出口。
  const byId=Object.fromEntries(s.rows.map(r=>[r.id,r]));
- assert.deepEqual(SERVICES.map(x=>x.id),['codex','claude','opencode','deepseek','agy']);
+ assert.deepEqual(SERVICES.map(x=>x.id),['codex','claude','opencode','deepseek','agy','grok']);
  assert.equal(byId.codex.ip,'2407:cdc0:d002::1');assert.equal(byId.codex.ipSource,'trace');assert.equal(byId.codex.colo,'SIN');
  assert.equal(byId.codex.ms,379);assert.equal(byId.codex.bars,2);assert.equal(byId.codex.healthText,'偏慢');
  // Claude 的出口与代理出口相同、延迟 199 ms：速度正常但出口不纯净 → 需留意。
@@ -162,6 +163,8 @@ test('线路：一次检测给出出口与服务两类线路',async()=>{
  assert.equal(byId.deepseek.ipSource,'route');assert.equal(byId.deepseek.ip,'188.253.121.80');
  assert.equal(byId.deepseek.host,'api.deepseek.com');assert.equal(byId.deepseek.status,401);assert.equal(byId.deepseek.healthText,'需留意');
  assert.equal(byId.agy.bars,2);assert.equal(byId.agy.status,204);assert.equal(byId.agy.healthText,'偏慢');
+ assert.equal(byId.grok.host,'api.x.ai');assert.equal(byId.grok.status,401);assert.equal(byId.grok.ok,true);
+ assert.equal(byId.grok.ipSource,'route');assert.equal(byId.grok.ip,'188.253.121.80');
 });
 test('线路：结果按新鲜度复用，出口类型按 IP 缓存',async()=>{
  const h=typical();
@@ -203,7 +206,7 @@ test('线路：会话来源映射到它走的那条线路',async()=>{
  assert.equal(links.linkFor('codex'),'');   // 还没探测过：没有线路可给，面板行上不画指示
  links.refresh(true);await links.whenIdle();
  assert.deepEqual(SERVICES.find(s=>s.id==='opencode').agents,['opencode','omp']);
- for(const [source,id] of [['codex','codex'],['claude','claude'],['opencode','opencode'],['omp','opencode'],['dsh','deepseek'],['agy','agy']])assert.equal(links.linkFor(source),id,source);
+ for(const [source,id] of [['codex','codex'],['claude','claude'],['opencode','opencode'],['omp','opencode'],['dsh','deepseek'],['agy','agy'],['grok','grok']])assert.equal(links.linkFor(source),id,source);
  // 没映射到的来源退回出口线路：有系统代理就是代理出口，没有就是直连出口。
  assert.equal(links.linkFor('unknown'),'proxy');
  assert.equal(links.linkFor(''),'proxy');

@@ -445,11 +445,7 @@ function showSettingsPane(name){
  if(next==='ai')loadAIUsage().catch(e=>$('#aiUsageDetail').textContent=e.message);
  if(next==='appearance')requestAnimationFrame(()=>document.querySelectorAll('#settingsWorkspace .theme-switch').forEach(observeSeg));
 }
-for(const b of document.querySelectorAll('#settingsWorkspace [data-settings-pane]'))b.onclick=()=>{
- const p=b.dataset.settingsPane;
- if(p==='island'){switchView('island').then(()=>showIslandPane('settings'));return;}
- showSettingsPane(p);
-};
+for(const b of document.querySelectorAll('#settingsWorkspace [data-settings-pane]'))b.onclick=()=>showSettingsPane(b.dataset.settingsPane);
 
 // bobo 自身的登录项由 macOS 管理，和「设备 → awake」的自动开启保持唤醒分别设置。
 let loginItemSettings=null,loginItemRun=0,loginItemSaving=false,loginItemError='';
@@ -780,26 +776,27 @@ $('#syncForm').onsubmit=guard(async e=>{
 // 文件即配置：ID 就是文件名，frontmatter 是配置，正文是系统提示词；保存、重命名、删除前都会备份。
 let agentItems=[],agentLoaded=false,agentConfigs=null,agentConfigLoaded=false,agentSel=null,agentOriginal='',agentVersion='',agentRun=0,agentProvider='opencode',agentDetailKind='agent',agentFilter='',agentProviders=null,agentSection='config';
 const agentMeta=()=>(agentProviders||[]).find(p=>p.id===agentProvider)||null;
-// 来源 meta 的 agents 字段是子智能体定义的后端（opencode / codex / null）：null 表示这个 Agent 只管理全局配置。
+// 来源 meta 的 agents 字段是子智能体定义的后端（opencode / codex / grok / null）：null 表示这个 Agent 只管理全局配置。
 const agentBackend=()=>agentMeta()?.agents||null;
 const agentCodex=()=>agentBackend()==='codex';
+const agentGrok=()=>agentBackend()==='grok';
 const agentHasDefs=()=>!!agentBackend();
 // 内容分类决定中间列显示哪一种列表；agentDetailKind 记录当前打开的详情类型。
 const agentIsConfig=()=>agentDetailKind==='config';
 const agentSectionOK=section=>section==='config'||section==='agent'&&agentHasDefs()||section==='skill'&&!!agentMeta()?.skillAgent;
-const agentRoute=s=>agentCodex()?'codex/agents'+s:'agents'+s;
+const agentRoute=s=>(agentCodex()?'codex/agents':agentGrok()?'grok/agents':'agents')+s;
 const agentConfigRoute=s=>'configs'+s;
 function agentDirty(){return !!(agentSel&&$('#agentEditor').value!==agentOriginal);}
 function agentLeave(){return !agentDirty()||confirm((agentIsConfig()?'配置文件':'智能体定义')+'尚未保存，放弃修改？');}
 function agentDirtyUI(){$('#agentSave').disabled=!agentDirty();$('#agentDirty').textContent=agentDirty()?'未保存':'';}
 // 来源切换：OpenCode（~/.config/opencode）与 Codex（~/.codex）。对话框与新建按钮随来源变化。
 function refreshAgentChrome(){
- const codex=agentCodex();
+ const codex=agentCodex(),grok=agentGrok();
  // 详情里的管理按钮只对智能体定义有意义：全局配置是固定文件，不改名、不删除、不复制 ID。
  applyAgentDetailChrome();
  if(!agentSectionOK(agentSection))agentSection='config';
  $('#agentNew').hidden=agentSection!=='agent'||!agentHasDefs();
- $('#agentNew').title=codex?'在 ~/.codex/agents 下新建 Codex 自定义智能体':'在 ~/.config/opencode/agents 下新建智能体定义';
+ $('#agentNew').title=codex?'在 ~/.codex/agents 下新建 Codex 自定义智能体':grok?'在 ~/.grok/agents 下新建 Grok Build 智能体':'在 ~/.config/opencode/agents 下新建智能体定义';
  $('#agentSkillAdd').hidden=agentSection!=='skill'||!agentMeta()?.skillAgent;
  const labels={config:'配置',agent:'智能体',skill:'技能'},hints={config:'模型、权限与全局规则',agent:'角色定义与系统提示词',skill:'这个 Agent 可使用的技能'};
  const meta=agentMeta(),glyph=meta&&providerGlyph(meta);
@@ -811,9 +808,9 @@ function refreshAgentChrome(){
  $('#agentListLabel').textContent={config:'配置文件',agent:'智能体定义',skill:'可用技能'}[agentSection];
  $('#agentEmptyTitle').textContent={config:'选择一份配置',agent:'选择一个智能体',skill:'选择一个技能'}[agentSection];
  $('#agentEmptyText').textContent={config:'查看或编辑 '+(meta?.label||'Agent')+' 的全局设置。未创建的配置可在保存时创建。',agent:'查看角色与系统提示词，或新建一个智能体。',skill:'查看技能说明与文件，管理它在各个 Agent 中的安装。'}[agentSection];
- $('#agentDialogTitle').textContent=codex?'新建 Codex 智能体':'新建智能体';
- $('#agentDialogHint').textContent=codex?'在 ~/.codex/agents 下创建一个 Codex 自定义智能体（TOML：name / description / developer_instructions）。Codex 以 name 字段识别它，建议两者一致。':'在 ~/.config/opencode/agents 下创建一个 OpenCode 智能体定义（Markdown + frontmatter）。OpenCode 会自动加载新文件，无需重启。';
- $('#agentModeLabel').hidden=codex;$('#agentColorLabel').hidden=codex;
+ $('#agentDialogTitle').textContent=codex?'新建 Codex 智能体':grok?'新建 Grok Build 智能体':'新建智能体';
+ $('#agentDialogHint').textContent=codex?'在 ~/.codex/agents 下创建一个 Codex 自定义智能体（TOML：name / description / developer_instructions）。Codex 以 name 字段识别它，建议两者一致。':grok?'在 ~/.grok/agents 下创建一个 Grok Build 智能体（Markdown + frontmatter：name / description）。Grok 以 name 识别，文件名建议与 name 一致。':'在 ~/.config/opencode/agents 下创建一个 OpenCode 智能体定义（Markdown + frontmatter）。OpenCode 会自动加载新文件，无需重启。';
+ $('#agentModeLabel').hidden=codex||grok;$('#agentColorLabel').hidden=codex||grok;
  const id=$('#agentIdInput');id.pattern=codex?'[A-Za-z0-9][A-Za-z0-9_-]*':'[a-z0-9][a-z0-9-]*';
  id.title=codex?'只能使用字母、数字、短横线和下划线':'只能使用小写字母、数字和短横线';
  id.placeholder=codex?'security-reviewer':'reviewer';
@@ -824,7 +821,7 @@ function applyAgentDetailChrome(){
  $('#agentReadingActions').hidden=config&&!agentSel?.exists;
  $('#agentManage').hidden=config;
  $('#agentRename').hidden=config;$('#agentDelete').hidden=config;$('#agentCopy').hidden=config;
- $('#agentToggle').hidden=config||agentCodex();
+ $('#agentToggle').hidden=config||agentCodex()||agentGrok();
  $('#agentPropertiesLabel').textContent=config?'配置与文件位置':'智能体属性与文件位置';
  $('#agentReader').setAttribute('aria-label',config?'配置正文':'智能体正文');
  $('#agentEditor').setAttribute('aria-label',config?'配置内容':'智能体内容');
@@ -915,15 +912,16 @@ function agentConfigRow(f){
  b.append(line,small);return b;
 }
 function agentRow(a){
- const codex=agentCodex();
+ const codex=agentCodex(),grok=agentGrok();
  const b=button('',`skill-item ${!agentIsConfig()&&agentSel?.id===a.id?'selected':''}`,()=>openAgent(a));
- b.title=(codex?a.name:a.id)||a.description||a.id;
+ b.title=(codex||grok?a.name:a.id)||a.description||a.id;
  const line=document.createElement('span');line.className='agent-line';
  const dot=document.createElement('i');dot.className='agent-dot';if(/^#[0-9a-fA-F]{6}$/.test(a.color))dot.style.background=a.color;else if(codex)dot.style.background='#10a37f';
- const strong=document.createElement('strong');strong.textContent=codex?(a.name||a.id):a.id;line.append(dot,strong);
- if(!codex&&a.disabled){const tag=document.createElement('span');tag.className='badge';tag.textContent='已停用';line.append(tag);}
- else if(!codex&&a.mode){const tag=document.createElement('span');tag.className='badge';tag.textContent=a.mode;line.append(tag);}
+ const strong=document.createElement('strong');strong.textContent=(codex||grok)?(a.name||a.id):a.id;line.append(dot,strong);
+ if(!codex&&!grok&&a.disabled){const tag=document.createElement('span');tag.className='badge';tag.textContent='已停用';line.append(tag);}
+ else if(!codex&&!grok&&a.mode){const tag=document.createElement('span');tag.className='badge';tag.textContent=a.mode;line.append(tag);}
  else if(codex&&a.effort){const tag=document.createElement('span');tag.className='badge';tag.textContent=a.effort;line.append(tag);}
+ else if(grok&&a.permissionMode){const tag=document.createElement('span');tag.className='badge';tag.textContent=a.permissionMode;line.append(tag);}
  if(a.problems.length){const tag=document.createElement('span');tag.className='badge conflict';tag.textContent='需检查';tag.title=a.problems.join('\n');line.append(tag);}
  const small=document.createElement('small');small.textContent=a.description||'（未填写 description）';
  b.append(line,small);return b;
@@ -943,7 +941,7 @@ function renderAgentList(){
  const q=agentFilter;
  const files=agentConfigs?.files||[];
  const configs=files.filter(f=>[f.file,f.label,f.description,f.format].filter(Boolean).join(' ').toLowerCase().includes(q));
- const agents=agentItems.filter(a=>[a.id,a.name,a.description,a.mode,a.model,a.effort,a.sandbox].filter(Boolean).join(' ').toLowerCase().includes(q));
+ const agents=agentItems.filter(a=>[a.id,a.name,a.description,a.mode,a.model,a.effort,a.sandbox,a.promptMode,a.permissionMode].filter(Boolean).join(' ').toLowerCase().includes(q));
  const skillAgent=agentMeta()?.skillAgent||null;
  const visibleSkills=skillAgent?skills.filter(s=>(s.agentLinks||[]).some(x=>x.id===skillAgent)):[];
  const skillRows=visibleSkills.filter(s=>[s.name,s.description,s.source].filter(Boolean).join(' ').toLowerCase().includes(q)).sort((a,b)=>a.name.localeCompare(b.name));
@@ -968,7 +966,10 @@ function renderAgentFacts(a){
   for(const [k,v] of rows)box.append(fact(k,v));
   return;
  }
- const rows=agentCodex()?[
+ const rows=agentGrok()?[
+  ['名称',a.name||'未填写'],['描述',a.description||'未填写'],['模型',a.model||'继承会话'],['提示模式',a.promptMode||'默认'],['权限模式',a.permissionMode||'默认'],
+  ['ID / 文件',a.id+'（'+a.file+'）'],['大小',a.size+' 字节 · '+new Date(a.mtime).toLocaleString()],
+ ]:agentCodex()?[
   ['名称',a.name||'未填写'],['描述',a.description||'未填写'],['模型',a.model||'继承会话'],['思考强度',a.effort||'继承会话'],['沙箱',a.sandbox||'继承会话'],
   ['ID / 文件',a.id+'（'+a.file+'）'],['大小',a.size+' 字节 · '+new Date(a.mtime).toLocaleString()],
  ]:[
@@ -978,7 +979,7 @@ function renderAgentFacts(a){
 }
 // 智能体的能力总结与翻译：复用技能的段落对齐和缓存机制（/api/ai/agent/*），只是针对单个定义文件。
 let agentAIData=null,agentAIFile=null,agentAIRun=0,agentAIBilingual=false,agentAISummaryExpanded=false,agentAISummaryKey='',agentAIResumeTimer;
-const agentAIKey=id=>agentIsConfig()?'config:'+agentProvider+':'+id+'\nconfig':(agentCodex()?'codex-agent:':'agent:')+id+'\nAGENT.md';
+const agentAIKey=id=>agentIsConfig()?'config:'+agentProvider+':'+id+'\nconfig':(agentGrok()?'grok-agent:':agentCodex()?'codex-agent:':'agent:')+id+'\nAGENT.md';
 function renderAgentReading(){
  if(!agentSel)return;
  // 全局配置尚未创建时没有可总结 / 翻译的内容，隐藏这两处入口。
@@ -1008,7 +1009,7 @@ async function loadAgentAI(id,reset=false){
  if(reset){agentAIData=null;agentAIFile=id;agentAIBilingual=false;agentAISummaryExpanded=false;$('#agentSummaryStatus').hidden=true;}
  renderAgentReading();
  try{
-  const data=await api(agentIsConfig()?'ai/config/document?id='+encodeURIComponent(agentProvider+':'+id):(agentCodex()?'ai/codex/document?id=':'ai/agent/document?id=')+encodeURIComponent(id));
+  const data=await api(agentIsConfig()?'ai/config/document?id='+encodeURIComponent(agentProvider+':'+id):(agentGrok()?'ai/grok/document?id=':agentCodex()?'ai/codex/document?id=':'ai/agent/document?id=')+encodeURIComponent(id));
   if(run!==agentAIRun||agentSel?.id!==id)return;
   agentAIData=data;agentAIFile=id;if(reset)agentAISummaryExpanded=!!data.summary;renderAgentReading();
   if(data.pending&&!activeAI.has(agentAIKey(id)))agentAIResumeTimer=setTimeout(()=>{if(agentSel?.id===id)loadAgentAI(id);},1000);
@@ -1028,7 +1029,7 @@ async function startAgentAI(mode){
  activeAI.set(key,mode);renderAgentReading();
  let streamRevision=loaded?agentAIData.revision:undefined;
  async function generateStream(){
-  const response=await fetch(agentIsConfig()?'/api/ai/config/generate':agentCodex()?'/api/ai/codex/generate':'/api/ai/agent/generate',{method:'POST',headers:{'x-bobo-token':token,'Content-Type':'application/json'},body:JSON.stringify({id:agentIsConfig()?agentProvider+':'+id:id,mode,stream:true})});
+  const response=await fetch(agentIsConfig()?'/api/ai/config/generate':agentGrok()?'/api/ai/grok/generate':agentCodex()?'/api/ai/codex/generate':'/api/ai/agent/generate',{method:'POST',headers:{'x-bobo-token':token,'Content-Type':'application/json'},body:JSON.stringify({id:agentIsConfig()?agentProvider+':'+id:id,mode,stream:true})});
   if(!response.ok)throw Error((await response.json()).error);
   let result;
   for await(const line of responseLines(response)){
@@ -1057,9 +1058,9 @@ async function openAgent(a){
  agentDetailKind='agent';agentSel=a;applyAgentDetailChrome();renderAgentList();
  const run=++agentRun;
  showPane('agent');
- $('#agentName').textContent=agentCodex()?(a.name||a.id):a.id;
+ $('#agentName').textContent=(agentCodex()||agentGrok())?(a.name||a.id):a.id;
  $('#agentDescription').textContent=a.description||'此智能体暂未填写 description。';
- $('#agentMeta').textContent=(agentCodex()?[a.id,a.model,a.effort,a.sandbox,a.link?'符号链接':null]:[a.mode||'未设置模式',a.model||null,a.hidden?'已隐藏':null,a.link?'符号链接':null]).filter(Boolean).join(' · ');
+ $('#agentMeta').textContent=(agentGrok()?[a.id,a.model,a.promptMode,a.permissionMode,a.link?'符号链接':null]:agentCodex()?[a.id,a.model,a.effort,a.sandbox,a.link?'符号链接':null]:[a.mode||'未设置模式',a.model||null,a.hidden?'已隐藏':null,a.link?'符号链接':null]).filter(Boolean).join(' · ');
  renderAgentFacts(a);
  const problems=$('#agentProblems');
  problems.hidden=!a.problems.length;problems.textContent=a.problems.length?'需要检查：'+a.problems.join('；'):'';
@@ -1176,7 +1177,7 @@ async function saveAgent(){
  toast('已保存，原文件已备份');
 }
 async function toggleAgent(){
- if(!agentSel||agentCodex()||agentIsConfig())return;
+ if(!agentSel||agentCodex()||agentGrok()||agentIsConfig())return;
  if(agentDirty()){toast('请先保存修改，再切换启用状态');return;}
  const id=agentSel.id,enable=agentSel.disabled;
  const r=await api('agents/toggle',{id,enabled:enable});
@@ -1188,8 +1189,8 @@ async function toggleAgent(){
 async function renameAgent(){
  if(!agentSel||agentIsConfig())return;
  if(agentDirty()){toast('请先保存修改，再重命名');return;}
- const codex=agentCodex();
- const next=(prompt(codex?'新的文件名（字母、数字、短横线和下划线）。\nCodex 实际以 TOML 里的 name 字段识别智能体，这里只改文件名，需要的话请再编辑 name。':'新的 ID（文件名，小写字母、数字和短横线）。\n重命名会改变 ID，已有会话对旧 ID 的引用将失效。',agentSel.id)||'').trim();
+ const codex=agentCodex(),grok=agentGrok();
+ const next=(prompt(codex?'新的文件名（字母、数字、短横线和下划线）。\nCodex 实际以 TOML 里的 name 字段识别智能体，这里只改文件名，需要的话请再编辑 name。':grok?'新的文件名（小写字母、数字和短横线）。\nGrok 以 frontmatter 的 name 识别智能体，这里只改文件名，需要的话请再编辑 name。':'新的 ID（文件名，小写字母、数字和短横线）。\n重命名会改变 ID，已有会话对旧 ID 的引用将失效。',agentSel.id)||'').trim();
  if(!next||next===agentSel.id)return;
  await api(agentRoute('/rename'),{id:agentSel.id,next});
  await loadAgentAll();
@@ -1199,7 +1200,7 @@ async function renameAgent(){
 }
 async function deleteAgent(){
  if(!agentSel||agentIsConfig())return;
- const label=agentCodex()?(agentSel.name||agentSel.id):agentSel.id;
+ const label=(agentCodex()||agentGrok())?(agentSel.name||agentSel.id):agentSel.id;
  if(!confirm('删除智能体 '+label+'？定义文件会先备份到 ~/.bobo/backups。'))return;
  await api(agentRoute('/delete'),{id:agentSel.id});
  agentSel=null;agentOriginal='';agentVersion='';
@@ -1217,8 +1218,8 @@ $('#settingsTab').onclick=guard(()=>switchView('settings'));
 $('#agentSearch').oninput=()=>{agentFilter=$('#agentSearch').value.trim().toLowerCase();renderAgentList();};
 refreshAgentChrome();
 showPane(emptyPane());applyAgentsMode();
-$('#agentFinder').onclick=guard(()=>api('open',agentIsConfig()?{config:agentProvider}:agentCodex()?{codexAgent:true}:{agent:true}));
-$('#agentCopy').onclick=guard(async()=>{if(!agentSel)return;const v=agentCodex()?(agentSel.name||agentSel.id):agentSel.id;await navigator.clipboard.writeText(v);toast('已复制 '+(agentCodex()?'name':'ID'));});
+$('#agentFinder').onclick=guard(()=>api('open',agentIsConfig()?{config:agentProvider}:agentGrok()?{grokAgent:true}:agentCodex()?{codexAgent:true}:{agent:true}));
+$('#agentCopy').onclick=guard(async()=>{if(!agentSel)return;const named=agentCodex()||agentGrok(),v=named?(agentSel.name||agentSel.id):agentSel.id;await navigator.clipboard.writeText(v);toast('已复制 '+(named?'name':'ID'));});
 $('#agentSave').onclick=guard(saveAgent);
 $('#agentToggle').onclick=guard(toggleAgent);
 $('#agentRename').onclick=guard(renameAgent);
@@ -1237,7 +1238,7 @@ $('#agentCancel').onclick=()=>$('#agentDialog').close();
 $('#agentForm').onsubmit=guard(async e=>{
  e.preventDefault();
  const id=$('#agentIdInput').value.trim();
- const r=await api(agentRoute('/create'),agentCodex()?{id,description:$('#agentDescInput').value}:{id,description:$('#agentDescInput').value,mode:$('#agentModeInput').value,color:$('#agentColorInput').value});
+ const r=await api(agentRoute('/create'),(agentCodex()||agentGrok())?{id,description:$('#agentDescInput').value}:{id,description:$('#agentDescInput').value,mode:$('#agentModeInput').value,color:$('#agentColorInput').value});
  $('#agentDialog').close();
  await loadAgentAll();
  const a=agentItems.find(x=>x.id===r.id);
@@ -1252,7 +1253,7 @@ let butlerData=null,butlerLoading=null,butlerProjectsKey='';
 let butlerReplyTo=null,butlerChosenTarget=null,butlerReplyRequest=null,butlerSending=false,butlerUnknown=false,butlerUnread=0;
 let butlerVisibleCount=20,butlerKnownIds=new Set();
 const butlerMessageNodes=new Map();
-const butlerLabels={codex:'Codex',claude:'Claude Code',opencode:'OpenCode',omp:'omp',dsh:'DeepSeek',agy:'Antigravity'};
+const butlerLabels={codex:'Codex',claude:'Claude Code',opencode:'OpenCode',omp:'omp',dsh:'DeepSeek',agy:'Antigravity',grok:'Grok Build'};
 const butlerNode=(tag,cls,text)=>{const el=document.createElement(tag);el.className=cls;if(text!==undefined)el.textContent=text;return el;};
 function setButlerQuote(message,quote){
  butlerReplyTo=message?{id:message.id,text:quote||message.text,name:message.name,source:message.source}:null;
@@ -1338,7 +1339,7 @@ $('#butlerComposer').onsubmit=async e=>{
 };
 const ocLabels={working:'运行中',waiting:'等你回答',idle:'已结束',error:'已终止'};
 // 会话来源的显示名（与 Bobo.swift 的 IslandRow 保持一致）。
-const sourceLabels={opencode:'OpenCode',codex:'Codex',omp:'omp',claude:'Claude Code',dsh:'DeepSeek',agy:'Antigravity'};
+const sourceLabels={opencode:'OpenCode',codex:'Codex',omp:'omp',claude:'Claude Code',dsh:'DeepSeek',agy:'Antigravity',t3:'T3 Code',grok:'Grok Build'};
 const islandOn=s=>s.state==='working'||s.state==='waiting';
 // 会话计时（对齐 CodeIsland 的 SessionTag）：会话开始至今，`<1m` / `5m` / `2h` / `1d`。
 // 服务端各来源都把开始时间记进 startedAt（epoch 毫秒）；没有就返回空串，行上不显示这一格。
@@ -1369,7 +1370,7 @@ function fillSessionRow(e,s){
  const {row}=e;
  row.dataset.state=s.state;row.dataset.source=s.source||'opencode';
  row.__session=s;
- row.title=(s.title||s.name||'')+(s.source==='dsh'?' · 点击打开 dsh 页面':' · 点击跳到对应终端标签页');
+ row.title=(s.title||s.name||'')+(s.source==='dsh'?' · 点击打开 dsh 页面':s.source==='t3'?' · 点击打开 T3 Code':' · 点击跳到对应终端标签页');
  e.strong.textContent=s.title||s.name||s.id;
  e.small.textContent=[sourceLabels[s.source]||'OpenCode',s.terminal,s.name,s.detail||s.directory].filter(Boolean).join(' · ');
  e.st.dataset.state=s.state;e.st.textContent=ocLabels[s.state]||s.state;
@@ -1416,15 +1417,18 @@ function renderIsland(){
  const key=JSON.stringify([connected,sessions.map(s=>[s.id,s.state,s.title,s.terminal,s.name,s.detail,s.directory,s.source,s.order,s.acked]),settings,islandState.usage?.providers?.map(p=>[p.id,p.available,p.enabled,p.range]),islandState.butler]);
  if(key===islandRenderKey)return;
  islandRenderKey=key;
- // 服务端把六个 Agent 的会话合并进 sessions，并按 source 区分；这里分栏展示。
- const oc=sessions.filter(s=>!['codex','omp','claude','dsh','agy'].includes(s.source)),cx=sessions.filter(s=>s.source==='codex'),op=sessions.filter(s=>s.source==='omp'),cl=sessions.filter(s=>s.source==='claude'),ds=sessions.filter(s=>s.source==='dsh'),ag=sessions.filter(s=>s.source==='agy');
+ // 服务端把八个 Agent 的会话合并进 sessions，并按 source 区分；这里分栏展示。
+ const known=['codex','omp','claude','dsh','agy','t3','grok'];
+ const oc=sessions.filter(s=>!known.includes(s.source)),cx=sessions.filter(s=>s.source==='codex'),op=sessions.filter(s=>s.source==='omp'),cl=sessions.filter(s=>s.source==='claude'),ds=sessions.filter(s=>s.source==='dsh'),ag=sessions.filter(s=>s.source==='agy'),t3s=sessions.filter(s=>s.source==='t3'),gk=sessions.filter(s=>s.source==='grok');
  const [ocState,ocText]=connected?sessionSide(oc):['','未运行'];setSideStatus('opencode',ocState,ocText);
  $('#islandService').textContent=connected?'事件流已连接，OpenCode 换端口会自动重连':'未检测到正在运行的 OpenCode 服务，启动后会自动连上';
  setSideStatus('codex',...sessionSide(cx));
  setSideStatus('omp',...sessionSide(op));
  setSideStatus('claude',...sessionSide(cl));
  setSideStatus('dsh',...sessionSide(ds));
- setSideStatus('agy',...sessionSide(ag));const waiting=sessions.filter(s=>s.state==='waiting').length,working=sessions.filter(s=>s.state==='working').length;$('#islandSummary').textContent=waiting?waiting+' 个等你回答':working?working+' 个运行中':'无活跃会话';
+ setSideStatus('agy',...sessionSide(ag));
+ setSideStatus('t3',...sessionSide(t3s));
+ setSideStatus('grok',...sessionSide(gk));const waiting=sessions.filter(s=>s.state==='waiting').length,working=sessions.filter(s=>s.state==='working').length;$('#islandSummary').textContent=waiting?waiting+' 个等你回答':working?working+' 个运行中':'无活跃会话';
  // 顺序照搬服务端：最近发生状态变更的会话排在最上面（见各来源的 *.mjs），这里不再按状态分组。
  renderSessionList($('#islandList'),$('#islandCount'),oc,'还没有会话记录');
  renderSessionList($('#codexList'),$('#codexCount'),cx,'最近没有 Codex 会话；Codex 运行时会自动出现在这里');
@@ -1432,6 +1436,8 @@ function renderIsland(){
  renderSessionList($('#claudeList'),$('#claudeCount'),cl,'最近没有 Claude Code 会话；Claude Code 运行时会自动出现在这里');
  renderSessionList($('#dshList'),$('#dshCount'),ds,'最近没有 DeepSeek Harness 会话；dsh 运行时会自动出现在这里');
  renderSessionList($('#agyList'),$('#agyCount'),ag,islandState.agy?.reason||'最近没有 Antigravity 会话；agy 运行时会自动出现在这里');
+ renderSessionList($('#t3List'),$('#t3Count'),t3s,islandState.t3?.reason||'最近没有 T3 Code 会话；T3 运行时会自动出现在这里');
+ renderSessionList($('#grokList'),$('#grokCount'),gk,'最近没有 Grok Build 会话；Grok 运行时会自动出现在这里');
  renderQuotaOrder(islandState.usage);
  const butler=islandState.butler;setSideStatus('butler',butler?.status==='checking'?'working':butler?.status==='error'?'error':butler?.enabled?'idle':'',butler?.enabled?'已开启':'未开启');
  if(document.body.dataset.islandPane==='butler'&&butler?.revision!==butlerData?.revision)loadButler().catch(e=>$('#butlerStatus').textContent=e.message);
@@ -1439,7 +1445,7 @@ function renderIsland(){
 }
 // 通知岛左侧分类：顶部是面板设置，下方是近况、会话与额度来源。
 // 行右侧是「圆点 + 状态文字」；分栏按 data-island-pane 切换，设置页内再用子页签（data-island-settings）切四个分页。
-const islandPanes=['opencode','codex','omp','claude','dsh','agy','butler','todo','quota-codex','quota-claude','quota-opencode','quota-agy','quota-deepseek','quota-cursor','quota-grok','settings'];
+const islandPanes=['opencode','codex','omp','claude','dsh','agy','t3','grok','butler','todo','quota-codex','quota-claude','quota-opencode','quota-agy','quota-deepseek','quota-cursor','quota-grok','settings'];
 function showIslandPane(name){
  const next=islandPanes.includes(name)?name:islandPanes[0];
  for(const p of document.querySelectorAll('#islandWorkspace [data-island-pane-content]'))p.hidden=p.dataset.islandPaneContent!==next;
@@ -2017,22 +2023,96 @@ $('#usageClaudeKeychain').onclick=guard(async()=>{
 function openUsage(){if(!windowActive||usageTimer)return;loadUsage();usageTimer=setInterval(()=>guard(loadUsage)(),60000);}
 function usageClose(){if(usageTimer){clearInterval(usageTimer);usageTimer=null;}}
 
-// 设备：CPU / 内存 / 磁盘 / 网络四项本机指标。服务端常驻采样，这里每 3 秒读一次快照，离开视图就停掉定时器。
+// 设备：CPU / 内存 / 磁盘 / 网络，以及色彩滤镜与 awake。指标每 3 秒读一次快照，离开视图就停掉定时器。
 // 进程列表另走按需接口（服务端缓存 1.5 秒）：只在设备视图可见、当前分栏有进程且页面在前台时每 3 秒拉一次，
 // 切走或切到后台立即停——这块的开销全在这里，不在服务端常驻采样里。
 let deviceData=null,networkData=null,deviceTimer=null,devicePane='cpu',processTimer=null,processRows='',processData=null,processSortSeen='',linksData=null,linksTimer=null,linksFollowup=null,linksLoading=false;
-const devicePanes=['cpu','memory','disk','network','awake'];
+const devicePanes=['cpu','memory','disk','network','color-filter','awake'];
 function showDevicePane(name){
  const next=devicePanes.includes(name)?name:devicePanes[0];
  devicePane=next;
  for(const p of document.querySelectorAll('#deviceWorkspace [data-device-pane-content]'))p.hidden=p.dataset.devicePaneContent!==next;
  for(const b of document.querySelectorAll('#deviceWorkspace [data-device-pane]'))b.setAttribute('aria-pressed',String(b.dataset.devicePane===next));
- $('#deviceRefresh').hidden=next==='awake';
+ $('#deviceRefresh').hidden=next==='awake'||next==='color-filter';
  if(next==='awake')loadAwakeSettings();
+ syncColorFilterPolling();
  syncProcessPolling();
  syncLinksPolling();
 }
 for(const b of document.querySelectorAll('#deviceWorkspace [data-device-pane]'))b.onclick=()=>showDevicePane(b.dataset.devicePane);
+// 色彩滤镜跟系统「辅助功能 → 显示」同一组控件：开关、类型、强度。强度按 0–100% 显示。类型不连带打开。
+let colorFilter=null,colorFilterTimer=null,colorFilterSaving=false,colorFilterSlide=null;
+function filterHue(value){return 'hsl('+Math.round(Math.min(1,Math.max(0,Number(value)||0))*360)+' 90% 50%)';}
+function filterPercent(value){const n=Number(value);return (Number.isFinite(n)?Math.round(Math.min(1,Math.max(0,n))*100):0)+'%';}
+function colorFilterActive(){return windowActive&&!$('#deviceWorkspace').hidden&&devicePane==='color-filter'&&!document.hidden;}
+function syncColorFilterPolling(){
+ const active=colorFilterActive();
+ if(!active){if(colorFilterTimer){clearInterval(colorFilterTimer);colorFilterTimer=null;}return;}
+ if(!colorFilterTimer)colorFilterTimer=setInterval(loadColorFilter,4000);
+ loadColorFilter();
+}
+document.addEventListener('visibilitychange',syncColorFilterPolling);
+function renderColorFilter(){
+ const snap=colorFilter,ready=!!snap?.supported,row=$('#rowColorFilter');
+ let input=row.querySelector('.switch input');
+ if(!input){row.append(toggleSwitch(false,'色彩滤镜',value=>saveColorFilter({enabled:value})));input=row.querySelector('.switch input');}
+ if(document.activeElement!==input)input.checked=snap?.enabled===true;
+ input.disabled=!ready||colorFilterSaving;
+ const type=$('#colorFilterType'),intensity=$('#colorFilterIntensity'),hue=$('#colorFilterHue');
+ const kinds=['1','2','4','8','16'];
+ type.disabled=!ready||colorFilterSaving;
+ intensity.disabled=!ready||snap?.adjustable===false||(colorFilterSaving&&document.activeElement!==intensity);
+ hue.disabled=!ready||snap?.adjustable===false||(colorFilterSaving&&document.activeElement!==hue);
+ if(document.activeElement!==type)type.value=snap&&kinds.includes(String(snap.type))?String(snap.type):(type.value||'1');
+ $('#rowColorFilterHue').hidden=type.value!=='16';
+ if(snap&&!colorFilterSaving&&document.activeElement!==intensity){
+  const min=Number.isFinite(snap.intensityMin)?snap.intensityMin:0.25,max=Number.isFinite(snap.intensityMax)?snap.intensityMax:1;
+  intensity.min=String(min);intensity.max=String(max);
+  intensity.value=String(Math.min(max,Math.max(min,snap.intensity)));
+ }
+ if(snap&&!colorFilterSaving&&document.activeElement!==hue)hue.value=String(Math.min(1,Math.max(0,snap.hue)));
+ $('#colorFilterIntensityValue').textContent=filterPercent(intensity.value);
+ $('#colorFilterHueSwatch').style.background=filterHue(hue.value);
+ $('#colorFilterNote').textContent=snap?.reason||'读取色彩滤镜…';
+}
+async function loadColorFilter(){
+ if(colorFilterSaving)return;
+ try{colorFilter=await api('color-filter');renderColorFilter();}
+ catch(e){$('#colorFilterNote').textContent=e.message;}
+}
+async function saveColorFilter(patch){
+ colorFilterSaving=true;
+ try{colorFilter=await api('color-filter',patch);}
+ catch(e){
+  $('#colorFilterNote').textContent=e.message;
+  try{colorFilter=await api('color-filter');}catch{}
+  throw e;
+ }finally{colorFilterSaving=false;renderColorFilter();}
+}
+function commitColorFilter(patch){
+ clearTimeout(colorFilterSlide);colorFilterSlide=null;
+ if(!colorFilter?.supported)return;
+ saveColorFilter(patch).catch(e=>toast(e.message));
+}
+$('#colorFilterType').onchange=()=>{
+ $('#rowColorFilterHue').hidden=$('#colorFilterType').value!=='16';
+ commitColorFilter({type:Number($('#colorFilterType').value)});
+};
+$('#colorFilterIntensity').oninput=()=>{
+ $('#colorFilterIntensityValue').textContent=filterPercent($('#colorFilterIntensity').value);
+ if(!colorFilter?.supported)return;
+ clearTimeout(colorFilterSlide);
+ colorFilterSlide=setTimeout(()=>commitColorFilter({intensity:Number($('#colorFilterIntensity').value)}),180);
+};
+$('#colorFilterIntensity').onchange=()=>commitColorFilter({intensity:Number($('#colorFilterIntensity').value)});
+$('#colorFilterHue').oninput=()=>{
+ $('#colorFilterHueSwatch').style.background=filterHue($('#colorFilterHue').value);
+ if(!colorFilter?.supported||$('#colorFilterType').value!=='16')return;
+ clearTimeout(colorFilterSlide);
+ colorFilterSlide=setTimeout(()=>commitColorFilter({hue:Number($('#colorFilterHue').value)}),180);
+};
+$('#colorFilterHue').onchange=()=>{if($('#colorFilterType').value==='16')commitColorFilter({hue:Number($('#colorFilterHue').value)});};
+renderColorFilter();
 // 进程列表：CPU 分栏按占用率、内存分栏按常驻内存（RSS）排序，服务端只回前 15 条。
 function processSort(){return devicePane==='memory'?'memory':'cpu';}
 function processBox(){return devicePane==='memory'?$('#deviceMemoryProcesses'):$('#deviceProcesses');}
@@ -2087,7 +2167,7 @@ function renderProcesses(sort){
 // 服务线路：延迟信号 + 出口 IP 与纯净度。只在「设备 → 网络」分栏打开、页面在前台时拉取：
 // 打开时自动检测一次，之后每分钟一次，右下角「检测线路」可强制。探测在服务端后台跑
 // （checking 为真时 1.2 秒后再拉一次），数据都来自服务端缓存，页面不做任何网络判断。
-const linkIcons={direct:'sf-network',proxy:'sf-network',codex:'provider-codex',claude:'provider-claude',opencode:'provider-opencode',deepseek:'provider-dsh',agy:'provider-agy'};
+const linkIcons={direct:'sf-network',proxy:'sf-network',codex:'provider-codex',claude:'provider-claude',opencode:'provider-opencode',deepseek:'provider-dsh',agy:'provider-agy',t3:'provider-t3',grok:'/provider-grok.png'};
 function syncLinksPolling(){
  const active=windowActive&&!$('#deviceWorkspace').hidden&&devicePane==='network'&&!document.hidden;
  if(!active){
@@ -2312,8 +2392,8 @@ async function loadDevice(force=false){
  else{const e=devices.reason;$('#deviceState').textContent='不可用';$('#deviceState').title=e.message;}
  renderNetwork();
 }
-function openDevice(){if(!windowActive||deviceTimer)return;if(devicePane==='awake')loadAwakeSettings();loadDevice();deviceTimer=setInterval(loadDevice,3000);syncProcessPolling();syncLinksPolling();}
-function deviceClose(){if(deviceTimer){clearInterval(deviceTimer);deviceTimer=null;}syncProcessPolling();syncLinksPolling();}
+function openDevice(){if(!windowActive||deviceTimer)return;if(devicePane==='awake')loadAwakeSettings();loadDevice();deviceTimer=setInterval(loadDevice,3000);syncProcessPolling();syncLinksPolling();syncColorFilterPolling();}
+function deviceClose(){if(deviceTimer){clearInterval(deviceTimer);deviceTimer=null;}syncProcessPolling();syncLinksPolling();syncColorFilterPolling();}
 // 右下角的「刷新设备」：强制服务端立刻全量采一次（磁盘常驻采样约 60 秒一轮、网络延迟约 6 秒一轮，等不起）。
 $('#deviceRefresh').onclick=guard(async()=>{$('#deviceRefresh').disabled=true;try{await loadDevice(true);toast('已刷新设备信息');}finally{$('#deviceRefresh').disabled=false;}});
 

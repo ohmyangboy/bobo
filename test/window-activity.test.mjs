@@ -31,6 +31,7 @@ function page(pane='cpu',api=async()=>({checking:false,rows:[]})){
  `+slice('let windowActive=true,','// 终端归属只在通知岛打开时扫描：')+
  slice('function syncProcessPolling(){',"document.addEventListener('visibilitychange',syncProcessPolling);")+
  slice('function syncLinksPolling(){','// IPv6 太长')+
+ slice('let colorFilter=null,','document.addEventListener(\'visibilitychange\',syncColorFilterPolling);')+
  slice('function openDevice(){',"$('#deviceRefresh').onclick")+
  source.match(/document\.addEventListener\('visibilitychange',\(\)=>setWindowActive\(.*\)\);/)[0],context);
  return {context,timers,listeners,workspace,classes,run:code=>vm.runInContext(code,context),requests:()=>requests};

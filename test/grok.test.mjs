@@ -1,0 +1,78 @@
+import {test} from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs/promises';import os from 'node:os';import path from 'node:path';
+import {createGrok,deriveEvents,parseSummary,sessionState} from '../src/grok.mjs';
+
+const line=o=>JSON.stringify(o);
+test('grok：从 events.jsonl 尾巴推导状态',()=>{
+ assert.equal(deriveEvents([{type:'turn_started'},{type:'phase_changed',phase:'streaming_text'}]).state,'working');
+ assert.equal(deriveEvents([{type:'turn_started'},{type:'phase_changed',phase:'permission_prompt'},{type:'permission_requested'}]).state,'waiting');
+ assert.equal(deriveEvents([{type:'turn_started'},{type:'phase_changed',phase:'permission_prompt'},{type:'permission_requested'}]).detail,'等待批准');
+ // 立刻批准后 phase 还会停在 permission_prompt，直到下一次 phase_changed；这不算等你回答。
+ assert.equal(deriveEvents([{type:'turn_started'},{type:'phase_changed',phase:'permission_prompt'},{type:'permission_requested'},{type:'permission_resolved',wait_ms:0}]).state,'working');
+ assert.equal(deriveEvents([{type:'turn_started'},{type:'tool_started',tool_name:'ask_user_question'}]).state,'waiting');
+ assert.equal(deriveEvents([{type:'turn_started'},{type:'tool_started',tool_name:'ask_user_question'}]).detail,'等你回答');
+ assert.equal(deriveEvents([{type:'turn_started'},{type:'tool_started',tool_name:'ask_user_question'},{type:'tool_completed',tool_name:'ask_user_question'}]).state,'working');
+ assert.equal(deriveEvents([{type:'turn_ended',outcome:'completed'}]).state,'idle');
+ assert.equal(deriveEvents([{type:'turn_ended',outcome:'cancelled'}]).state,'error');
+ assert.equal(deriveEvents([{type:'phase_changed',phase:'permission_prompt'},{type:'turn_ended',outcome:'completed'},{type:'turn_started'}]).state,'working','上一轮的阶段不能带到新一轮');
+ const now=Date.now();
+ assert.equal(sessionState([{type:'turn_started'}],{alive:false,now,at:now}).state,'error');
+ assert.equal(sessionState([{type:'turn_started'}],{alive:true,now,at:now-16*60*1000}).state,'idle');
+ const summary=parseSummary({generated_title:'修通知岛',info:{cwd:'/tmp/proj'},created_at:'2023-11-14T22:13:20.000Z',last_active_at:'2023-11-14T22:18:20.000Z'});
+ assert.equal(summary.title,'修通知岛');assert.equal(summary.directory,'/tmp/proj');assert.equal(summary.startedAt,1700000000000);
+});
+test('grok 会话：运行中 / 等批准 / 提问 / 结束、子代理跳过、进程退出与已查看',async()=>{
+ const home=await fs.mkdtemp(path.join(os.tmpdir(),'bobo-grok-'));
+ const root=path.join(home,'.grok');
+ const group=encodeURIComponent('/tmp/proj');
+ const sid='01a1c4ae-6ddb-7dd1-8d55-62019cacfe8d',child='01a1c39c-child';
+ const dir=path.join(root,'sessions',group,sid),childDir=path.join(root,'sessions',group,child);
+ await fs.mkdir(path.join(dir,'subagents',child),{recursive:true});
+ await fs.mkdir(childDir,{recursive:true});
+ const summary=title=>({generated_title:title,info:{cwd:'/tmp/proj',id:sid},created_at:'2023-11-14T22:13:20.000Z',last_active_at:new Date().toISOString()});
+ await fs.writeFile(path.join(dir,'summary.json'),JSON.stringify(summary('修通知岛')));
+ await fs.writeFile(path.join(childDir,'summary.json'),JSON.stringify(summary('子代理')));
+ const ev=path.join(dir,'events.jsonl'),childEv=path.join(childDir,'events.jsonl');
+ const writeEv=(file,rows)=>fs.writeFile(file,rows.map(line).join('\n')+'\n');
+ await writeEv(ev,[{type:'turn_started'},{type:'phase_changed',phase:'streaming_text'}]);
+ await writeEv(childEv,[{type:'turn_started'},{type:'phase_changed',phase:'tool_execution'}]);
+ await fs.writeFile(path.join(root,'active_sessions.json'),JSON.stringify([{session_id:sid,pid:4242,cwd:'/tmp/proj'},{session_id:child,pid:7,cwd:'/tmp/proj'}]));
+ const reminders=[];
+ const client=createGrok({home,grokHome:root,env:{},remind:(kind,title,message)=>reminders.push([kind,title,message]),alive:pid=>pid===4242||pid===7,interval:100000});
+ const sessions=()=>client.snapshot().sessions;
+ try{
+  await client.refresh();
+  assert.equal(sessions().length,1,'子代理会话不应出现');
+  const s=sessions()[0];
+  assert.equal(s.id,'grok:'+sid);assert.equal(s.state,'working');assert.equal(s.title,'修通知岛');
+  assert.equal(s.directory,'/tmp/proj');assert.equal(s.source,'grok');assert.equal(s.acked,false);
+  assert.equal(s.startedAt,1700000000000);assert.ok(s.order>0);
+  await writeEv(ev,[{type:'turn_started'},{type:'phase_changed',phase:'permission_prompt'},{type:'permission_requested'}]);
+  await client.refresh();
+  assert.equal(sessions()[0].state,'waiting');assert.equal(sessions()[0].detail,'等待批准');
+  await new Promise(r=>setTimeout(r,900));
+  assert.ok(reminders.some(r=>r[0]==='question'),'没有「需要你回答」提醒');
+  await writeEv(ev,[{type:'turn_started'},{type:'phase_changed',phase:'permission_prompt'},{type:'permission_requested'},{type:'permission_resolved',wait_ms:0}]);
+  await client.refresh();
+  assert.equal(sessions()[0].state,'working','自动批准不应停在等你回答');
+  await writeEv(ev,[{type:'turn_started'},{type:'tool_started',tool_name:'ask_user_question'}]);
+  await client.refresh();
+  assert.equal(sessions()[0].state,'waiting');assert.equal(sessions()[0].detail,'等你回答');
+  await writeEv(ev,[{type:'turn_started'},{type:'turn_ended',outcome:'completed'}]);
+  await client.refresh();
+  assert.equal(sessions()[0].state,'idle');
+  await new Promise(r=>setTimeout(r,1600));
+  assert.ok(reminders.some(r=>r[0]==='done'),'没有「运行结束」提醒');
+  assert.deepEqual(client.unviewed().map(x=>x.id),['grok:'+sid]);
+  assert.equal(client.acknowledge('grok:'+sid),true);
+  assert.equal(sessions().length,0,'已看过的结束会话应从列表收起');
+  assert.equal(client.acknowledge('grok:'+sid),false);
+  await writeEv(ev,[{type:'turn_started'}]);
+  await fs.writeFile(path.join(root,'active_sessions.json'),'[');
+  await client.refresh();
+  assert.equal(sessions()[0]?.state,'working','active_sessions 写到一半时沿用上一份名单');
+  await fs.writeFile(path.join(root,'active_sessions.json'),JSON.stringify([{session_id:sid,pid:1,cwd:'/tmp/proj'}]));
+  await client.refresh();
+  assert.equal(sessions()[0].state,'error','进程已经不在仍显示运行中的会话应按已终止');
+  assert.ok(sessions()[0].acked===false);
+ }finally{client.stop();await fs.rm(home,{recursive:true,force:true});}
+});
